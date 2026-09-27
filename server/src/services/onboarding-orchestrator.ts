@@ -10,6 +10,7 @@ import type { DataSource, DataSourceType, DatabaseConnectionConfig } from "@pape
 import { StructuredIngestionService } from "./structured-ingestion.js";
 import { KnowledgeIngestionService } from "./knowledge-ingestion.js";
 import { DatabaseIntegrationService } from "./database-integration.js";
+import { TypeSafeJevService } from "./typesafe-jev.js";
 
 export interface OnboardingFileInput {
   buffer: Buffer;
@@ -19,7 +20,11 @@ export interface OnboardingFileInput {
 }
 
 export class OnboardingOrchestratorService {
-  constructor(private db: Db) {}
+  private jevService: TypeSafeJevService;
+
+  constructor(private db: Db) {
+    this.jevService = new TypeSafeJevService();
+  }
 
   /**
    * Main entrypoint for onboarding data sources
@@ -36,8 +41,34 @@ export class OnboardingOrchestratorService {
       sourceType = "csv";
     } else if (ext === "xlsx" || ext === "xls") {
       sourceType = "excel";
-    } else {
+    } else if (ext === "md" || ext === "pdf" || ext === "txt" || ext === "docx") {
       sourceType = "rag_document";
+    } else {
+      // Ambiguous or unusual format: classify with TypeSafe Jev System One
+      try {
+        const preview = file.buffer.slice(0, 800).toString("utf-8");
+        const classification = await this.jevService.systemOne(
+          { fileName: file.originalname, snippet: preview },
+          {
+            format_triage: {
+              type: "choice",
+              instructions: "Klasifikasikan format data source ini berdasarkan cuplikan konten.",
+              criteria: {
+                csv: "Format tabular dengan delimitasi koma/titik-koma/baris teratur",
+                rag_document: "Dokumen teks naratif / deskriptif / manual / kebijakan",
+              },
+            },
+          },
+        );
+        const ans = classification.answers["format_triage"] as any;
+        if (ans?.choice === "csv") {
+          sourceType = "csv";
+        } else {
+          sourceType = "rag_document";
+        }
+      } catch {
+        sourceType = "rag_document";
+      }
     }
 
     const defaultName = options.name?.trim() || file.originalname.replace(/\.[^/.]+$/, "");
