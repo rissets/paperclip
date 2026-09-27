@@ -1,6 +1,13 @@
 import type { AdapterSessionManagement, ServerAdapterModule } from "@paperclipai/adapter-utils";
 import { ADAPTER_LABEL, ADAPTER_TYPE } from "./shared/constants.js";
-import { execute, getConfigSchema, sessionCodec, testEnvironment } from "./server/index.js";
+import {
+  execute,
+  getConfigSchema,
+  listSkills,
+  sessionCodec,
+  syncSkills,
+  testEnvironment,
+} from "./server/index.js";
 
 export const type = ADAPTER_TYPE;
 export const label = ADAPTER_LABEL;
@@ -46,6 +53,8 @@ Optional fields:
 
 Runtime mapping:
 - Creates runs with POST /v1/runs.
+- Supports Paperclip skill assignment by adding the selected skill's SKILL.md to that agent's per-run Hermes instructions. No files are copied to the remote host.
+- Lists remote Hermes-native skills from GET /v1/skills as read-only entries; Paperclip cannot toggle those skills per agent.
 - Sends Idempotency-Key equal to the Paperclip run id for correlation only; Hermes v0.16.0 did not dedupe duplicate creates.
 - Streams GET /v1/runs/{run_id}/events and polls GET /v1/runs/{run_id} as fallback.
 - Calls POST /v1/runs/{run_id}/stop on timeout.
@@ -67,6 +76,8 @@ export function createServerAdapter(): ServerAdapterModule {
     supportsLocalAgentJwt: false,
     supportsInstructionsBundle: false,
     requiresMaterializedRuntimeSkills: false,
+    listSkills,
+    syncSkills,
     agentConfigurationDoc,
     getConfigSchema,
   };

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { HttpError, unprocessable } from "../errors.js";
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -116,6 +117,7 @@ while :; do
       if test "$result" -ne 1; then exit 43; fi
     fi
   done
+  if test -e "$directory/.git"; then break; fi
   parent=$(dirname "$directory")
   if test "$parent" = "$directory"; then break; fi
   directory=$parent
@@ -140,17 +142,23 @@ done`,
       );
     return;
   }
+  const homeDir = path.resolve(os.homedir());
   let directory =
     typeof config.cwd === "string" ? path.resolve(config.cwd) : process.cwd();
   for (;;) {
+    if (directory === homeDir) break;
     for (const relative of files) {
       try {
         const content = await readFile(path.join(directory, relative), "utf8");
-        if (
-          /apiKeyHelper|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_API_KEY|model_provider\s*=|env_key\s*=|experimental_bearer_token|cli_auth_credentials_store/.test(
-            content,
-          )
-        ) {
+        const lines = content.split(/\r?\n/);
+        const hasConflict = lines.some((line) => {
+          const trimmed = line.trim();
+          if (trimmed.startsWith("#") || trimmed.startsWith("//")) return false;
+          return /apiKeyHelper|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_API_KEY|model_provider\s*=|env_key\s*=|experimental_bearer_token|cli_auth_credentials_store/.test(
+            trimmed,
+          );
+        });
+        if (hasConflict) {
           throw unprocessable(
             "Project authentication settings conflict with the selected AI connection",
             { code: "ai_connection_incompatible" },
@@ -160,6 +168,7 @@ done`,
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
     }
+    if (existsSync(path.join(directory, ".git"))) break;
     const parent = path.dirname(directory);
     if (parent === directory) break;
     directory = parent;

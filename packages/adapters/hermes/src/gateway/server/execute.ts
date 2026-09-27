@@ -25,6 +25,7 @@ import {
   isRemotePlainHttp,
   remotePlainHttpDeniedMessage,
 } from "./transport-security.js";
+import { readHermesGatewayAssignedSkills } from "./skills.js";
 
 type SessionKeyStrategy = "issue" | "agent" | "run" | "none";
 
@@ -320,17 +321,28 @@ function buildInput(ctx: AdapterExecutionContext, paperclipApiUrl: string | null
   return lines.filter((line) => line !== null && line !== undefined).join("\n").trim();
 }
 
-function buildRunBody(ctx: AdapterExecutionContext, sessionKey: string | null): Record<string, unknown> {
+async function buildRunBody(ctx: AdapterExecutionContext, sessionKey: string | null): Promise<Record<string, unknown>> {
   const paperclipApiUrl = nonEmpty(ctx.config.paperclipApiUrl);
   const payloadTemplate = parseObject(ctx.config.payloadTemplate);
   const configuredInput = nonEmpty(payloadTemplate.input);
   const input = configuredInput && ctx.context.conversationMode === true
     ? `${configuredInput}\n\n${buildInput(ctx, paperclipApiUrl)}`
     : configuredInput ?? buildInput(ctx, paperclipApiUrl);
-  const instructions =
+  const baseInstructions =
     nonEmpty(ctx.config.instructions) ??
     nonEmpty(payloadTemplate.instructions) ??
     "Follow the Paperclip wake instructions exactly. Do not expose secrets in logs, comments, or final output.";
+  const assignedSkills = await readHermesGatewayAssignedSkills(ctx.config);
+  for (const warning of assignedSkills.warnings) {
+    await ctx.onLog("stderr", `[hermes-gateway:skills] ${warning}\n`);
+  }
+  const skillInstructions = assignedSkills.skills.length > 0
+    ? [
+        "Paperclip skills assigned to this agent are active for this run. Apply a skill when it is relevant and follow its procedure and constraints.",
+        ...assignedSkills.skills.map(({ key, markdown }) => `## Assigned skill: ${key}\n\n${markdown}`),
+      ].join("\n\n")
+    : null;
+  const instructions = [baseInstructions, skillInstructions].filter(Boolean).join("\n\n");
   return {
     ...payloadTemplate,
     input,
@@ -856,7 +868,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     runHeaders.Authorization,
     runHeaders["X-Hermes-Session-Key"],
   ]);
-  const body = buildRunBody(ctx, sessionKey);
+  const body = await buildRunBody(ctx, sessionKey);
   const createRunUrl = apiUrl(baseUrl, "/v1/runs");
 
   await ctx.onMeta?.({

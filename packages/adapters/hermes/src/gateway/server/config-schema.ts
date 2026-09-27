@@ -69,7 +69,7 @@ export function getConfigSchema(): AdapterConfigSchema {
         key: "instructions",
         label: "Instructions",
         type: "textarea",
-        hint: "Optional stable Hermes instructions sent separately from the wake input.",
+        hint: "Optional stable Hermes instructions. Paperclip-assigned skill Markdown is appended for each run.",
       },
     ],
   };

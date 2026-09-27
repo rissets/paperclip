@@ -144,6 +144,14 @@ This mode does not start Hermes. It creates runs with `POST /v1/runs`, streams
 Hermes events with SSE, polls run status as a fallback, and stops timed-out runs
 with `POST /v1/runs/{run_id}/stop`.
 
+Paperclip-managed skills can be assigned to a Gateway agent. Paperclip appends
+each assigned `SKILL.md` to that agent's per-run Hermes `instructions`, so the
+assignment remains scoped to the Paperclip agent without changing the remote
+Hermes profile. Hermes-native skills returned by `GET /v1/skills` appear in the
+agent's skill inventory as read-only; Paperclip cannot enable or disable them
+per agent. Supporting files such as scripts are not copied to the remote host,
+so Gateway-assigned skills should keep their procedure in `SKILL.md`.
+
 ### Compatibility with the old gateway package
 
 `@paperclipai/adapter-hermes-gateway` remains as a deprecated compatibility shim

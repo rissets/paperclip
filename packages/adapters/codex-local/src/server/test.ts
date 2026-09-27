@@ -340,8 +340,12 @@ export async function testEnvironment(
     });
   }
 
-  const configOpenAiKey = env.OPENAI_API_KEY;
-  const hostOpenAiKey = targetIsRemote ? undefined : process.env.OPENAI_API_KEY;
+  const configOpenAiKey = isNonEmpty(env.OPENAI_API_KEY) ? env.OPENAI_API_KEY : undefined;
+  const considerHostEnv =
+    !targetIsRemote &&
+    !config.managedAiConnection &&
+    !Object.prototype.hasOwnProperty.call(env, "OPENAI_API_KEY");
+  const hostOpenAiKey = considerHostEnv && isNonEmpty(process.env.OPENAI_API_KEY) ? process.env.OPENAI_API_KEY : undefined;
   if (isNonEmpty(configOpenAiKey) || isNonEmpty(hostOpenAiKey)) {
     const source = isNonEmpty(configOpenAiKey) ? "adapter config env" : "server environment";
     checks.push({

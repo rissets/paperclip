@@ -51,6 +51,7 @@
     "@paperclipai/shared": "workspace:*",
     "drizzle-orm": "^0.45.2",
     "embedded-postgres": "^18.1.0-beta.16",
+    "mysql2": "^3.24.4",
     "postgres": "^3.4.9"
   },
   "devDependencies": {

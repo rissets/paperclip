@@ -572,6 +572,7 @@ export async function testCodexAcpEnvironment(
   if (!targetIsRemote) {
     const configApiKey = isNonEmpty(envConfig.OPENAI_API_KEY) ? envConfig.OPENAI_API_KEY : null;
     const hostApiKey =
+      Boolean(config.managedAiConnection) ||
       Object.prototype.hasOwnProperty.call(envConfig, "OPENAI_API_KEY")
         ? null
         : isNonEmpty(process.env.OPENAI_API_KEY)
