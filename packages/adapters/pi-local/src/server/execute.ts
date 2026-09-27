@@ -54,7 +54,7 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 import { shellQuote } from "@paperclipai/adapter-utils/ssh";
 import { isPiUnknownSessionError, parsePiJsonl } from "./parse.js";
-import { ensurePiModelConfiguredAndAvailable } from "./models.js";
+import { ensurePiModelConfiguredAndAvailable, normalizePiModelId } from "./models.js";
 import { preparePiRuntimeConfig } from "./runtime-config.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 
@@ -235,7 +235,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       : DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   );
   const command = asString(config.command, "pi");
-  const model = asString(config.model, "").trim();
+  const rawModel = asString(config.model, "").trim();
+  const model = normalizePiModelId(rawModel);
   const thinking = asString(config.thinking, "").trim();
 
   // Parse model into provider and model id

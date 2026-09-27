@@ -166,14 +166,27 @@ export async function discoverPiModelsCached(input: {
   return models;
 }
 
+export function normalizePiModelId(model: string, availableModels?: AdapterModel[]): string {
+  const trimmed = model.trim();
+  if (!trimmed) return trimmed;
+  if (availableModels?.some((m) => m.id === trimmed)) return trimmed;
+  if (trimmed.startsWith("cmd/")) {
+    const candidate = `rissets/${trimmed}`;
+    if (!availableModels || availableModels.some((m) => m.id === candidate)) {
+      return candidate;
+    }
+  }
+  return trimmed;
+}
+
 export async function ensurePiModelConfiguredAndAvailable(input: {
   model?: unknown;
   command?: unknown;
   cwd?: unknown;
   env?: unknown;
 }): Promise<AdapterModel[]> {
-  const model = asString(input.model, "").trim();
-  if (!model) {
+  const rawModel = asString(input.model, "").trim();
+  if (!rawModel) {
     throw new Error("Pi requires `adapterConfig.model` in provider/model format.");
   }
 
@@ -187,10 +200,12 @@ export async function ensurePiModelConfiguredAndAvailable(input: {
     throw new Error("Pi returned no models. Run `pi --list-models` and verify provider auth.");
   }
 
+  const model = normalizePiModelId(rawModel, models);
+
   if (!models.some((entry) => entry.id === model)) {
     const sample = models.slice(0, 12).map((entry) => entry.id).join(", ");
     throw new Error(
-      `Configured Pi model is unavailable: ${model}. Available models: ${sample}${models.length > 12 ? ", ..." : ""}`,
+      `Configured Pi model is unavailable: ${rawModel}. Available models: ${sample}${models.length > 12 ? ", ..." : ""}`,
     );
   }
 

@@ -5359,7 +5359,29 @@ export function agentRoutes(
         adapterConfig: patchData.adapterConfig,
       });
     }
-    if (existing.runtimeConfig.aiConnection && requestedRuntimeConfig && !requestedRuntimeConfig.aiConnection) requestedRuntimeConfig.aiConnection = existing.runtimeConfig.aiConnection;
+    if (requestedRuntimeConfig && requestedRuntimeConfig.aiConnection === null) {
+      delete requestedRuntimeConfig.aiConnection;
+      if (existing.runtimeConfig) {
+        const { aiConnection: _, ...rest } = existing.runtimeConfig;
+        existing.runtimeConfig = rest;
+      }
+    } else if (touchesAdapterConfiguration && requestedAdapterType !== existing.adapterType) {
+      const existingAi = aiConnectionBindingSchema.safeParse(existing.runtimeConfig.aiConnection).data;
+      const aiConfig = (patchData.adapterConfig ?? existing.adapterConfig) as Record<string, unknown>;
+      if (existingAi && !isAiConnectionCompatible(existingAi, requestedAdapterType, aiConfig.model, aiConfig.provider, aiConfig.acpxAgent)) {
+        if (requestedRuntimeConfig) {
+          delete requestedRuntimeConfig.aiConnection;
+        }
+        if (existing.runtimeConfig) {
+          const { aiConnection: _, ...rest } = existing.runtimeConfig;
+          existing.runtimeConfig = rest;
+        }
+      } else if (existing.runtimeConfig.aiConnection && requestedRuntimeConfig && !requestedRuntimeConfig.aiConnection) {
+        requestedRuntimeConfig.aiConnection = existing.runtimeConfig.aiConnection;
+      }
+    } else if (existing.runtimeConfig.aiConnection && requestedRuntimeConfig && !requestedRuntimeConfig.aiConnection) {
+      requestedRuntimeConfig.aiConnection = existing.runtimeConfig.aiConnection;
+    }
     const nextAiBinding = aiConnectionBindingSchema.safeParse(requestedRuntimeConfig?.aiConnection ?? existing.runtimeConfig.aiConnection).data;
     if (nextAiBinding) {
       await assertCanUpdateAgent(req, existing);
