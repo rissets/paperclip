@@ -1,4 +1,14 @@
-export type OrchestratorRoute = "data_agent" | "knowledge_agent" | "hybrid" | "direct";
+export type OrchestratorRoute =
+  | "data_agent"
+  | "knowledge_agent"
+  | "research_agent"
+  | "analytics_engineer_agent"
+  | "prediction_agent"
+  | "action_agent"
+  | "onboarding_orchestrator"
+  | "agent_builder"
+  | "hybrid"
+  | "direct";
 
 export interface Citation {
   sourceName: string;
@@ -8,7 +18,16 @@ export interface Citation {
 }
 
 export interface SpecialistExecution {
-  agent: "data_agent" | "knowledge_agent";
+  agent:
+    | "data_agent"
+    | "knowledge_agent"
+    | "research_agent"
+    | "analytics_engineer_agent"
+    | "prediction_agent"
+    | "action_agent"
+    | "onboarding_orchestrator"
+    | "agent_builder"
+    | string;
   task: string;
   query?: string;
   resultsSummary?: string;

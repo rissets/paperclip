@@ -111,8 +111,14 @@ export class TypeSafeJevService {
         type: "choice",
         instructions: "Agen mana yang paling berwenang menangani query ini?",
         criteria: {
-          data_agent: "DataAgent: Query analitik tabular, filter data, profil perusahaan/entitas, atau SQL database eksternal",
-          knowledge_agent: "KnowledgeAgent: Pertanyaan dokumen RAG, kebijakan internal, SOP, SLA, manual",
+          data_agent: "DataAgent: Query analitik tabular, filter data, profil perusahaan/entitas PT/CV di AHU_DB, atau SQL database eksternal",
+          knowledge_agent: "KnowledgeAgent: Dokumen RAG internal, kebijakan perusahaan, SOP, SLA, manual operasional",
+          research_agent: "ResearchAgent: Riset pasar eksternal, intelijen industri, verifikasi fakta dan analisis kompetitor",
+          analytics_engineer_agent: "AnalyticsEngineerAgent: Analisis data lanjutan, visualisasi grafik/chart, pemodelan statistik, Python/Polars",
+          prediction_agent: "PredictionAgent: Prediksi masa depan, forecasting penjualan/stok, estimasi tren",
+          action_agent: "ActionAgent: Eksekusi mutasi data, automasi operasional, integrasi API/tiket",
+          onboarding_orchestrator: "OnboardingOrchestrator: Onboarding data source baru, integrasi database, penyerapan file",
+          agent_builder: "AgentBuilder: Pembuatan atau konfigurasi agen baru dan arsitektur tim",
           hybrid: "Hybrid: Membutuhkan data angka/profil sekaligus regulasi/kebijakan dokumen",
           direct: "Direct: Sapaan atau percakapan umum tanpa perlu data internal",
         },
@@ -375,10 +381,22 @@ export class TypeSafeJevService {
         const options = Object.keys(q.criteria || {});
         let selected = options[0] || "other";
         if (key === "route") {
-          if (query.includes("profil") || query.includes("pt") || query.includes("perseroan") || query.includes("tabel") || query.includes("sales")) {
+          if (query.includes("profil") || query.includes("pt") || query.includes("perseroan") || query.includes("tabel") || query.includes("sales") || query.includes("omzet") || query.includes("revenue")) {
             selected = "data_agent";
-          } else if (query.includes("sop") || query.includes("sla") || query.includes("kebijakan")) {
+          } else if (query.includes("sop") || query.includes("sla") || query.includes("kebijakan") || query.includes("manual") || query.includes("aturan")) {
             selected = "knowledge_agent";
+          } else if (query.includes("riset") || query.includes("kompetitor") || query.includes("pasar") || query.includes("tren") || query.includes("research")) {
+            selected = "research_agent";
+          } else if (query.includes("chart") || query.includes("grafik") || query.includes("visualisasi") || query.includes("statistik") || query.includes("korelasi")) {
+            selected = "analytics_engineer_agent";
+          } else if (query.includes("prediksi") || query.includes("forecast") || query.includes("estimasi") || query.includes("churn")) {
+            selected = "prediction_agent";
+          } else if (query.includes("kirim") || query.includes("email") || query.includes("notifikasi") || query.includes("tiket") || query.includes("mutasi") || query.includes("action")) {
+            selected = "action_agent";
+          } else if (query.includes("onboard") || query.includes("database") || query.includes("connect") || query.includes("ingest")) {
+            selected = "onboarding_orchestrator";
+          } else if (query.includes("buat agen") || query.includes("create agent") || query.includes("builder")) {
+            selected = "agent_builder";
           }
         }
         answers[key] = {

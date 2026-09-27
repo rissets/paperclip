@@ -357,6 +357,41 @@ describe("TypeSafe Jev System One Decision Plane", () => {
     expect(formatted).toContain("KBLI 46511");
     expect(formatted).toContain("Sumber Data Internal");
   });
+
+  it("semantically routes multi-agent requests across all specialist agents", async () => {
+    const { TypeSafeJevService } = await import("../services/typesafe-jev.js");
+    const jev = new TypeSafeJevService();
+
+    const sources = [
+      { id: "ds_db", name: "AHU_DB", type: "mariadb", tables: ["tbl_perseroan"] },
+      { id: "ds_csv", name: "Sales Q3", type: "csv", tables: ["sales"] },
+      { id: "ds_rag", name: "Corporate SOP", type: "rag_document" },
+    ];
+
+    const dataRes = await jev.routeUserQuery("tampilkan omzet penjualan cabang jakarta", sources);
+    expect(dataRes.route).toBe("data_agent");
+
+    const knowRes = await jev.routeUserQuery("apa isi SOP dan aturan cuti perusahaan?", sources);
+    expect(knowRes.route).toBe("knowledge_agent");
+
+    const researchRes = await jev.routeUserQuery("riset pasar kompetitor cloud di Asia Tenggara", sources);
+    expect(researchRes.route).toBe("research_agent");
+
+    const analyticsRes = await jev.routeUserQuery("buatkan visualisasi grafik dan chart pertumbuhan user", sources);
+    expect(analyticsRes.route).toBe("analytics_engineer_agent");
+
+    const predRes = await jev.routeUserQuery("prediksi dan forecasting tren penjualan bulan depan", sources);
+    expect(predRes.route).toBe("prediction_agent");
+
+    const actionRes = await jev.routeUserQuery("kirim notifikasi email dan ubah tiket CRM", sources);
+    expect(actionRes.route).toBe("action_agent");
+
+    const onbRes = await jev.routeUserQuery("onboard database postgres baru dan upload file", sources);
+    expect(onbRes.route).toBe("onboarding_orchestrator");
+
+    const buildRes = await jev.routeUserQuery("buat agen baru untuk divisi logistik", sources);
+    expect(buildRes.route).toBe("agent_builder");
+  });
 });
 
 
