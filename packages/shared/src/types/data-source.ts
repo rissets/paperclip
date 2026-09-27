@@ -30,9 +30,23 @@ export interface TableRelation {
   relationType: "one_to_many" | "many_to_one" | "one_to_one";
 }
 
-export interface ColumnDefinition {
+export interface JsonSubField {
   name: string;
   dataType: "string" | "number" | "boolean" | "date" | "unknown";
+  sampleValues: (string | number | boolean | null)[];
+  description?: string;
+}
+
+export interface JsonColumnStructure {
+  isJson: boolean;
+  kind: "object" | "array_of_objects" | "primitive_array" | "scalar";
+  subFields: JsonSubField[];
+  clickhouseType: string;
+}
+
+export interface ColumnDefinition {
+  name: string;
+  dataType: "string" | "number" | "boolean" | "date" | "json" | "unknown";
   nullCount: number;
   nullRatio: number;
   distinctCount: number;
@@ -43,17 +57,38 @@ export interface ColumnDefinition {
   isPrimaryKey?: boolean;
   isForeignKey?: boolean;
   foreignKeyTarget?: { table: string; column: string };
+  isJson?: boolean;
+  jsonStructure?: JsonColumnStructure;
+  clickhouseType?: string;
+}
+
+export interface NestedSemanticDimension {
+  parentColumn: string;
+  fieldPath: string;
+  name: string;
+  description: string;
+  dataType: string;
+  sampleValues?: string[];
+}
+
+export interface ClickhouseSchemaDefinition {
+  createTableDdl: string;
+  engine: string;
+  orderBy: string[];
+  columnTypes: Record<string, string>;
 }
 
 export interface TableSemanticModel {
   tableName: string;
   description: string;
   dimensions: { name: string; description: string; sampleValues?: string[] }[];
+  nestedDimensions?: NestedSemanticDimension[];
   metrics: { name: string; expression: string; description: string; aggregation: "sum" | "avg" | "count" | "min" | "max" }[];
   primaryKey?: string;
   foreignKeys?: { column: string; foreignTable: string; foreignColumn: string }[];
   relationships?: TableRelation[];
   synonyms: Record<string, string[]>;
+  clickhouseSchema?: ClickhouseSchemaDefinition;
 }
 
 export interface DataSource {

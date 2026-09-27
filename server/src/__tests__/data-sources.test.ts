@@ -155,6 +155,126 @@ describe("Database Integration Service", () => {
       /Security Violation/i,
     );
   });
+
+  it("inspects top 5 sample rows to detect JSON columns, map subfields, and generate ClickHouse DDL", async () => {
+    const { DatabaseIntegrationService } = await import("../services/database-integration.js");
+    const service = new DatabaseIntegrationService();
+
+    // 5 sample rows representing real AHU_DB perseroan data (row 1 has null modal_dasar, row 2-5 have JSON)
+    const sampleRows = [
+      null,
+      JSON.stringify([
+        {
+          id: 1,
+          data: [
+            {
+              nama_badan_hukum: "PT HARAPAN MAJU",
+              jabatan: "DIREKTUR UTAMA",
+              jumlah_lembar: 500,
+              total_nominal: 50000000,
+              is_active: true,
+            },
+          ],
+        },
+      ]),
+      JSON.stringify([
+        {
+          id: 2,
+          data: [
+            {
+              nama_badan_hukum: "BUDI SANTOSO",
+              jabatan: "KOMISARIS",
+              jumlah_lembar: 200,
+              total_nominal: 20000000,
+              npwp: "012345678901234",
+            },
+          ],
+        },
+      ]),
+      null,
+      JSON.stringify([
+        {
+          id: 3,
+          data: [
+            {
+              nama_badan_hukum: "PT INVESTASI BERSAMA",
+              jabatan: "DIREKTUR",
+              jumlah_lembar: 300,
+              total_nominal: 30000000,
+            },
+          ],
+        },
+      ]),
+    ];
+
+    const inspection = service.inspectColumn("pemegang_saham", "longtext", sampleRows);
+
+    expect(inspection.isJson).toBe(true);
+    expect(inspection.dataType).toBe("json");
+    expect(inspection.jsonStructure).toBeDefined();
+    expect(inspection.jsonStructure?.kind).toBe("array_of_objects");
+
+    const subFieldNames = inspection.jsonStructure?.subFields.map((s) => s.name);
+    expect(subFieldNames).toContain("nama_badan_hukum");
+    expect(subFieldNames).toContain("jabatan");
+    expect(subFieldNames).toContain("jumlah_lembar");
+    expect(subFieldNames).toContain("npwp");
+
+    // ClickHouse type should be an Array(Tuple(...))
+    expect(inspection.clickhouseType).toContain("Array(Tuple(");
+    expect(inspection.clickhouseType).toContain("nama_badan_hukum String");
+    expect(inspection.clickhouseType).toContain("jumlah_lembar Float64");
+
+    // Test semantic model generation with nested dimensions and ClickHouse DDL
+    const mockColumns: any[] = [
+      {
+        name: "id_perseroan",
+        dataType: "string",
+        role: "identifier",
+        isPrimaryKey: true,
+        sampleValues: ["UUID-001"],
+        clickhouseType: "String",
+      },
+      {
+        name: "nama_perseroan",
+        dataType: "string",
+        role: "dimension",
+        sampleValues: ["PT BAGUS HARAPAN TRITUNGGAL"],
+        clickhouseType: "String",
+      },
+      {
+        name: "pemegang_saham",
+        dataType: "json",
+        role: "dimension",
+        isJson: true,
+        jsonStructure: inspection.jsonStructure,
+        sampleValues: sampleRows.slice(0, 5),
+        clickhouseType: inspection.clickhouseType,
+      },
+    ];
+
+    const semanticModel = (service as any).buildSemanticModel("tbl_perseroan", mockColumns, [], "id_perseroan");
+
+    // Check nested dimensions
+    expect(semanticModel.nestedDimensions).toBeDefined();
+    const nestedNames = semanticModel.nestedDimensions.map((nd: any) => nd.name);
+    expect(nestedNames).toContain("pemegang_saham.nama_badan_hukum");
+    expect(nestedNames).toContain("pemegang_saham.jabatan");
+
+    // Check synonyms for nested dimensions
+    expect(semanticModel.synonyms["pemegang_saham.nama_badan_hukum"]).toBeDefined();
+    expect(semanticModel.synonyms["pemegang_saham.nama_badan_hukum"]).toContain("pemegang saham");
+
+    // Check ClickHouse schema DDL
+    expect(semanticModel.clickhouseSchema).toBeDefined();
+    expect(semanticModel.clickhouseSchema.engine).toBe("MergeTree");
+    expect(semanticModel.clickhouseSchema.orderBy).toEqual(["id_perseroan"]);
+    expect(semanticModel.clickhouseSchema.createTableDdl).toContain("CREATE TABLE IF NOT EXISTS `tbl_perseroan`");
+    expect(semanticModel.clickhouseSchema.createTableDdl).toContain("`id_perseroan` String");
+    expect(semanticModel.clickhouseSchema.createTableDdl).toContain("`pemegang_saham` Array(Tuple(");
+    expect(semanticModel.clickhouseSchema.createTableDdl).toContain("ENGINE = MergeTree()");
+    expect(semanticModel.clickhouseSchema.createTableDdl).toContain("ORDER BY (`id_perseroan`)");
+  });
 });
 
 describe("TypeSafe Jev System One Decision Plane", () => {

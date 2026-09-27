@@ -7,6 +7,10 @@ import type {
   TableSemanticModel,
   TableRelation,
   SqlQueryResult,
+  JsonSubField,
+  JsonColumnStructure,
+  NestedSemanticDimension,
+  ClickhouseSchemaDefinition,
 } from "@paperclipai/shared";
 
 export interface InspectedTableResult {
@@ -189,12 +193,12 @@ export class DatabaseIntegrationService {
           const nullRatio = samples.length > 0 ? nullCount / samples.length : 0;
           const distinctCount = new Set(samples.filter((v: any) => v !== null)).size;
 
-          const dataType = this.mapPostgresType(col.data_type);
-          const role = this.determineRole(colName, dataType, isPk, Boolean(colFk));
+          const inspection = this.inspectColumn(colName, col.data_type, samples);
+          const role = this.determineRole(colName, inspection.dataType, isPk, Boolean(colFk));
 
           let min: any = null;
           let max: any = null;
-          if (dataType === "number") {
+          if (inspection.dataType === "number") {
             const numVals = samples.filter((v: any) => typeof v === "number");
             if (numVals.length > 0) {
               min = Math.min(...numVals);
@@ -204,7 +208,7 @@ export class DatabaseIntegrationService {
 
           return {
             name: colName,
-            dataType,
+            dataType: inspection.dataType,
             nullCount,
             nullRatio,
             distinctCount,
@@ -217,6 +221,9 @@ export class DatabaseIntegrationService {
             foreignKeyTarget: colFk
               ? { table: colFk.targetTable, column: colFk.targetColumn }
               : undefined,
+            isJson: inspection.isJson,
+            jsonStructure: inspection.jsonStructure,
+            clickhouseType: inspection.clickhouseType,
           };
         });
 
@@ -340,12 +347,12 @@ export class DatabaseIntegrationService {
           const nullRatio = samples.length > 0 ? nullCount / samples.length : 0;
           const distinctCount = new Set(samples.filter((v: any) => v !== null)).size;
 
-          const dataType = this.mapMysqlType(rawDataType);
-          const role = this.determineRole(colName, dataType, isPk, Boolean(colFk));
+          const inspection = this.inspectColumn(colName, rawDataType, samples);
+          const role = this.determineRole(colName, inspection.dataType, isPk, Boolean(colFk));
 
           let min: any = null;
           let max: any = null;
-          if (dataType === "number") {
+          if (inspection.dataType === "number") {
             const numVals = samples.filter((v: any) => typeof v === "number");
             if (numVals.length > 0) {
               min = Math.min(...numVals);
@@ -355,7 +362,7 @@ export class DatabaseIntegrationService {
 
           return {
             name: colName,
-            dataType,
+            dataType: inspection.dataType,
             nullCount,
             nullRatio,
             distinctCount,
@@ -368,6 +375,9 @@ export class DatabaseIntegrationService {
             foreignKeyTarget: colFk
               ? { table: colFk.targetTable, column: colFk.targetColumn }
               : undefined,
+            isJson: inspection.isJson,
+            jsonStructure: inspection.jsonStructure,
+            clickhouseType: inspection.clickhouseType,
           };
         });
 
@@ -498,30 +508,225 @@ export class DatabaseIntegrationService {
 
   // --- Helper Methods ---
 
-  private mapPostgresType(pgType: string): "string" | "number" | "boolean" | "date" | "unknown" {
-    const t = pgType.toLowerCase();
-    if (t.includes("int") || t.includes("numeric") || t.includes("decimal") || t.includes("real") || t.includes("double") || t.includes("float")) {
-      return "number";
+  /**
+   * Inspect a column by checking its raw database type and the top 5 sample rows.
+   * If the column contains JSON (native JSON type or JSON string), it parses the
+   * structures across the sample rows, extracts nested sub-fields, determines the
+   * structure kind, and generates a corresponding ClickHouse data type and nested dimensions.
+   */
+  public inspectColumn(
+    colName: string,
+    rawDataType: string,
+    samples: any[],
+  ): {
+    dataType: "string" | "number" | "boolean" | "date" | "json" | "unknown";
+    isJson: boolean;
+    jsonStructure?: JsonColumnStructure;
+    clickhouseType: string;
+  } {
+    const rawLower = (rawDataType || "").toLowerCase();
+    const isDeclaredJson = rawLower.includes("json");
+
+    // Take top 5 non-null/non-undefined sample values
+    const nonNullSamples = samples.filter((v) => v !== null && v !== undefined && v !== "");
+    const top5Samples = nonNullSamples.slice(0, 5);
+
+    // Check if values are JSON strings or objects
+    const parsedSamples: any[] = [];
+    let isJson = isDeclaredJson;
+
+    for (const val of top5Samples) {
+      if (typeof val === "object" && val !== null) {
+        parsedSamples.push(val);
+        isJson = true;
+      } else if (typeof val === "string") {
+        const trimmed = val.trim();
+        if (
+          (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+          (trimmed.startsWith("[") && trimmed.endsWith("]"))
+        ) {
+          try {
+            const parsed = JSON.parse(trimmed);
+            if (typeof parsed === "object" && parsed !== null) {
+              parsedSamples.push(parsed);
+              isJson = true;
+            }
+          } catch {
+            // Not valid JSON string
+          }
+        }
+      }
     }
-    if (t.includes("char") || t.includes("text") || t.includes("uuid") || t.includes("json")) {
-      return "string";
+
+    if (isJson && parsedSamples.length > 0) {
+      // Determine kind: array_of_objects, primitive_array, object, or scalar
+      let kind: "object" | "array_of_objects" | "primitive_array" | "scalar" = "object";
+      const firstSample = parsedSamples[0];
+
+      if (Array.isArray(firstSample)) {
+        const firstItem = firstSample.find((item) => item !== null && item !== undefined);
+        if (firstItem && typeof firstItem === "object") {
+          kind = "array_of_objects";
+        } else {
+          kind = "primitive_array";
+        }
+      } else if (typeof firstSample === "object") {
+        kind = "object";
+      }
+
+      // Collect union of subfields across top 5 samples
+      const subFieldsMap = new Map<string, JsonSubField>();
+
+      for (const sample of parsedSamples) {
+        if (kind === "array_of_objects" && Array.isArray(sample)) {
+          for (const item of sample) {
+            if (!item || typeof item !== "object") continue;
+
+            // Handle nested wrapper like AHU_DB: [ { id: 1, data: [ { sub_field: "..." } ] } ]
+            const targets: any[] = Array.isArray(item.data) ? [item, ...item.data] : [item];
+
+            for (const target of targets) {
+              if (!target || typeof target !== "object") continue;
+              for (const [k, v] of Object.entries(target)) {
+                if (
+                  !k ||
+                  k === "data" ||
+                  k === "mxyplyzyk" ||
+                  k.startsWith("dummy") ||
+                  k === "FormDataPerseroanDummy"
+                ) {
+                  continue;
+                }
+                const subType = this.inferValueType(v);
+                if (!subFieldsMap.has(k)) {
+                  subFieldsMap.set(k, {
+                    name: k,
+                    dataType: subType,
+                    sampleValues: [],
+                    description: `Sub-field '${k}' in ${colName}`,
+                  });
+                }
+                const sf = subFieldsMap.get(k)!;
+                if (v !== null && v !== undefined && v !== "" && sf.sampleValues.length < 3) {
+                  sf.sampleValues.push(typeof v === "object" ? JSON.stringify(v) : (v as any));
+                }
+              }
+            }
+          }
+        } else if (kind === "object" && typeof sample === "object") {
+          for (const [k, v] of Object.entries(sample)) {
+            if (!k) continue;
+            const subType = this.inferValueType(v);
+            if (!subFieldsMap.has(k)) {
+              subFieldsMap.set(k, {
+                name: k,
+                dataType: subType,
+                sampleValues: [],
+                description: `Sub-field '${k}' in ${colName}`,
+              });
+            }
+            const sf = subFieldsMap.get(k)!;
+            if (v !== null && v !== undefined && v !== "" && sf.sampleValues.length < 3) {
+              sf.sampleValues.push(typeof v === "object" ? JSON.stringify(v) : (v as any));
+            }
+          }
+        }
+      }
+
+      const subFields = Array.from(subFieldsMap.values());
+
+      // Generate ClickHouse type for the JSON column
+      let clickhouseType = "String";
+      if (kind === "primitive_array") {
+        clickhouseType = "Array(String)";
+      } else if (kind === "array_of_objects" && subFields.length > 0) {
+        const tupleElements = subFields
+          .slice(0, 15)
+          .map((sf) => `${this.sanitizeChIdentifier(sf.name)} ${this.mapSubFieldToChType(sf.dataType)}`)
+          .join(", ");
+        clickhouseType = `Array(Tuple(${tupleElements}))`;
+      } else if (kind === "object" && subFields.length > 0) {
+        const tupleElements = subFields
+          .slice(0, 15)
+          .map((sf) => `${this.sanitizeChIdentifier(sf.name)} ${this.mapSubFieldToChType(sf.dataType)}`)
+          .join(", ");
+        clickhouseType = `Tuple(${tupleElements})`;
+      }
+
+      return {
+        dataType: "json",
+        isJson: true,
+        jsonStructure: {
+          isJson: true,
+          kind,
+          subFields,
+          clickhouseType,
+        },
+        clickhouseType,
+      };
     }
-    if (t.includes("bool")) {
-      return "boolean";
-    }
-    if (t.includes("date") || t.includes("time")) {
-      return "date";
-    }
-    return "unknown";
+
+    // Not JSON - map to ClickHouse standard type
+    const standardChType = this.mapStandardToClickhouseType(rawDataType);
+    const genericType = this.mapRawTypeToGeneric(rawDataType);
+
+    return {
+      dataType: genericType,
+      isJson: false,
+      clickhouseType: standardChType,
+    };
   }
 
-  private mapMysqlType(myType: string): "string" | "number" | "boolean" | "date" | "unknown" {
-    const t = myType.toLowerCase();
-    if (t.includes("int") || t.includes("decimal") || t.includes("float") || t.includes("double")) {
-      return "number";
+  private sanitizeChIdentifier(name: string): string {
+    return name.replace(/[^a-zA-Z0-9_]/g, "_");
+  }
+
+  private mapSubFieldToChType(dataType: string): string {
+    switch (dataType) {
+      case "number":
+        return "Float64";
+      case "boolean":
+        return "UInt8";
+      case "date":
+        return "DateTime64(3, 'UTC')";
+      case "string":
+      default:
+        return "String";
     }
-    if (t.includes("char") || t.includes("text") || t.includes("blob") || t.includes("enum") || t.includes("json")) {
-      return "string";
+  }
+
+  private mapStandardToClickhouseType(rawDataType: string): string {
+    const t = (rawDataType || "").toLowerCase();
+    if (t.includes("bigint") || t === "int8") return "Int64";
+    if (t.includes("tinyint(1)") || t === "boolean" || t === "bool") return "UInt8";
+    if (t.includes("smallint") || t.includes("tinyint") || t === "int2") return "Int32";
+    if (t.includes("int") || t === "serial") return "Int64";
+    if (
+      t.includes("numeric") ||
+      t.includes("decimal") ||
+      t.includes("float") ||
+      t.includes("double") ||
+      t.includes("real")
+    ) {
+      return "Float64";
+    }
+    if (t === "date") return "Date32";
+    if (t.includes("time") || t.includes("date")) return "DateTime64(3, 'UTC')";
+    if (t.includes("uuid")) return "UUID";
+    return "String";
+  }
+
+  private mapRawTypeToGeneric(rawType: string): "string" | "number" | "boolean" | "date" | "unknown" {
+    const t = (rawType || "").toLowerCase();
+    if (
+      t.includes("int") ||
+      t.includes("numeric") ||
+      t.includes("decimal") ||
+      t.includes("real") ||
+      t.includes("double") ||
+      t.includes("float")
+    ) {
+      return "number";
     }
     if (t.includes("bool") || t === "tinyint(1)") {
       return "boolean";
@@ -529,14 +734,51 @@ export class DatabaseIntegrationService {
     if (t.includes("date") || t.includes("time") || t.includes("year")) {
       return "date";
     }
+    if (t.includes("char") || t.includes("text") || t.includes("blob") || t.includes("uuid") || t.includes("enum")) {
+      return "string";
+    }
     return "unknown";
   }
 
-  private determineRole(name: string, dataType: string, isPk: boolean, isFk: boolean): "dimension" | "metric" | "identifier" | "timestamp" | "attribute" {
+  private inferValueType(val: any): "string" | "number" | "boolean" | "date" | "unknown" {
+    if (typeof val === "boolean") return "boolean";
+    if (typeof val === "number") return "number";
+    if (typeof val === "string") {
+      const trimmed = val.trim();
+      if (/^\d{4}-\d{2}-\d{2}/.test(trimmed) || /^\d{2}-\d{2}-\d{4}/.test(trimmed)) {
+        return "date";
+      }
+      if (!isNaN(Number(trimmed)) && trimmed !== "" && !trimmed.startsWith("0")) {
+        return "number";
+      }
+      return "string";
+    }
+    return "string";
+  }
+
+  private mapPostgresType(pgType: string): "string" | "number" | "boolean" | "date" | "unknown" {
+    return this.mapRawTypeToGeneric(pgType);
+  }
+
+  private mapMysqlType(myType: string): "string" | "number" | "boolean" | "date" | "unknown" {
+    return this.mapRawTypeToGeneric(myType);
+  }
+
+  private determineRole(
+    name: string,
+    dataType: string,
+    isPk: boolean,
+    isFk: boolean,
+  ): "dimension" | "metric" | "identifier" | "timestamp" | "attribute" {
     if (isPk || isFk || name.toLowerCase().endsWith("_id") || name.toLowerCase() === "id") {
       return "identifier";
     }
-    if (dataType === "date" || name.toLowerCase().includes("date") || name.toLowerCase().includes("time") || name.toLowerCase().includes("_at")) {
+    if (
+      dataType === "date" ||
+      name.toLowerCase().includes("date") ||
+      name.toLowerCase().includes("time") ||
+      name.toLowerCase().includes("_at")
+    ) {
       return "timestamp";
     }
     if (dataType === "number") {
@@ -559,6 +801,23 @@ export class DatabaseIntegrationService {
         sampleValues: c.sampleValues.map((v) => String(v)),
       }));
 
+    // Extract nested dimensions from JSON columns
+    const nestedDimensions: NestedSemanticDimension[] = [];
+    for (const c of columns) {
+      if (c.isJson && c.jsonStructure?.subFields) {
+        for (const sf of c.jsonStructure.subFields) {
+          nestedDimensions.push({
+            parentColumn: c.name,
+            fieldPath: sf.name,
+            name: `${c.name}.${sf.name}`,
+            description: sf.description || `Nested attribute '${sf.name}' inside JSON column '${c.name}'`,
+            dataType: sf.dataType,
+            sampleValues: sf.sampleValues.map((v) => (typeof v === "object" ? JSON.stringify(v) : String(v))),
+          });
+        }
+      }
+    }
+
     const metrics = columns
       .filter((c) => c.role === "metric")
       .map((c) => ({
@@ -575,6 +834,32 @@ export class DatabaseIntegrationService {
         foreignTable: c.foreignKeyTarget!.table,
         foreignColumn: c.foreignKeyTarget!.column,
       }));
+
+    // Build ClickHouse Schema Definition
+    const columnTypes: Record<string, string> = {};
+    for (const c of columns) {
+      columnTypes[c.name] = c.clickhouseType || "String";
+    }
+
+    const ddlColumns = columns
+      .map((c) => {
+        const chType = c.clickhouseType || "String";
+        const comment = c.isJson ? ` COMMENT 'JSON nested: ${c.jsonStructure?.kind}'` : "";
+        return `  \`${c.name}\` ${chType}${comment}`;
+      })
+      .join(",\n");
+
+    const orderBy = primaryKey ? [primaryKey] : [];
+    const orderByClause = orderBy.length > 0 ? `\`${orderBy.join("`, `")}\`` : "tuple()";
+
+    const createTableDdl = `CREATE TABLE IF NOT EXISTS \`${tableName}\` (\n${ddlColumns}\n) ENGINE = MergeTree()\nORDER BY (${orderByClause});`;
+
+    const clickhouseSchema: ClickhouseSchemaDefinition = {
+      createTableDdl,
+      engine: "MergeTree",
+      orderBy,
+      columnTypes,
+    };
 
     // Comprehensive Bilingual Synonyms Dictionary
     const synonyms: Record<string, string[]> = {};
@@ -621,15 +906,55 @@ export class DatabaseIntegrationService {
       synonyms[col.name] = Array.from(matchedSynonyms);
     }
 
+    // Nested dimensions synonyms
+    for (const nd of nestedDimensions) {
+      const matched = new Set<string>([nd.name, nd.fieldPath]);
+      const fieldLower = nd.fieldPath.toLowerCase();
+
+      for (const [key, list] of Object.entries(bilingualMapping)) {
+        if (fieldLower.includes(key)) {
+          list.forEach((s) => matched.add(`${nd.parentColumn}.${s}`));
+          list.forEach((s) => matched.add(s));
+        }
+      }
+
+      // Legal & corporate entity specific synonyms
+      if (
+        fieldLower.includes("badan_hukum") ||
+        fieldLower.includes("pemegangsaham") ||
+        fieldLower.includes("pemegang_saham")
+      ) {
+        ["pemegang saham", "nama pemegang saham", "owner", "shareholder", "pemilik saham"].forEach((s) =>
+          matched.add(s),
+        );
+      }
+      if (fieldLower.includes("jabatan") || fieldLower.includes("direksi")) {
+        ["jabatan", "direktur", "komisaris", "posisi", "direksi", "pengurus"].forEach((s) => matched.add(s));
+      }
+      if (fieldLower.includes("harga_per_lembar") || fieldLower.includes("harga_perlembar")) {
+        ["harga per lembar", "nominal saham", "nilai saham per lembar"].forEach((s) => matched.add(s));
+      }
+      if (fieldLower.includes("jumlah_saham") || fieldLower.includes("jumlah_lembar")) {
+        ["jumlah saham", "total lembar saham", "banyaknya lembar saham"].forEach((s) => matched.add(s));
+      }
+      if (fieldLower.includes("maksud") || fieldLower.includes("tujuan")) {
+        ["maksud perseroan", "kegiatan usaha", "bidang bisnis", "sektor usaha"].forEach((s) => matched.add(s));
+      }
+
+      synonyms[nd.name] = Array.from(matched);
+    }
+
     return {
       tableName,
-      description: `External database table '${tableName}' with ${columns.length} columns and ${relations.length} relationships.`,
+      description: `External database table '${tableName}' with ${columns.length} columns, ${relations.length} relationships, and ${nestedDimensions.length} nested JSON attributes.`,
       dimensions,
+      nestedDimensions,
       metrics,
       primaryKey,
       foreignKeys,
       relationships: relations,
       synonyms,
+      clickhouseSchema,
     };
   }
 

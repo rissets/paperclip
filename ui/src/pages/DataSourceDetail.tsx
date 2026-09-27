@@ -27,6 +27,7 @@ export function DataSourceDetail() {
 
   const [activeTab, setActiveTab] = useState<string>("schema");
   const [selectedTableIndex, setSelectedTableIndex] = useState(0);
+  const [expandedJsonCol, setExpandedJsonCol] = useState<string | null>(null);
 
   // Structured Query Tester state
   const [queryMetric, setQueryMetric] = useState("");
@@ -320,7 +321,14 @@ export function DataSourceDetail() {
                         <td className="p-3 font-medium flex items-center gap-1.5">
                           {col.isPrimaryKey && <Key className="h-3 w-3 text-amber-500 shrink-0" />}
                           {col.isForeignKey && <GitBranch className="h-3 w-3 text-primary shrink-0" />}
-                          {col.name}
+                          <div>
+                            <div>{col.name}</div>
+                            {col.clickhouseType && (
+                              <div className="text-xs text-muted-foreground font-mono mt-0.5 truncate max-w-xs" title={col.clickhouseType}>
+                                CH: {col.clickhouseType}
+                              </div>
+                            )}
+                          </div>
                         </td>
                         <td className="p-3">
                           <span
@@ -337,7 +345,47 @@ export function DataSourceDetail() {
                             {col.role}
                           </span>
                         </td>
-                        <td className="p-3 text-muted-foreground font-mono">{col.dataType}</td>
+                        <td className="p-3">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="text-muted-foreground font-mono text-xs">{col.dataType}</span>
+                            {col.isJson && (
+                              <span className="rounded bg-indigo-500/10 px-1.5 py-0.5 text-xs font-semibold text-indigo-500">
+                                JSON ({col.jsonStructure?.kind || "nested"})
+                              </span>
+                            )}
+                          </div>
+                          {col.isJson && col.jsonStructure?.subFields?.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => setExpandedJsonCol(expandedJsonCol === col.name ? null : col.name)}
+                              className="mt-1 text-xs text-primary hover:underline block font-medium"
+                            >
+                              {expandedJsonCol === col.name ? "Hide sub-fields" : `View ${col.jsonStructure.subFields.length} sub-fields`}
+                            </button>
+                          )}
+                          {expandedJsonCol === col.name && col.jsonStructure?.subFields && (
+                            <div className="mt-2 p-2.5 rounded-lg bg-muted/60 border border-border text-xs space-y-1.5 max-w-md">
+                              <div className="font-semibold text-foreground text-xs uppercase tracking-wider">
+                                Sub-fields from sample rows ({col.jsonStructure.subFields.length})
+                              </div>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-48 overflow-y-auto">
+                                {col.jsonStructure.subFields.map((sf: any) => (
+                                  <div key={sf.name} className="p-1.5 rounded bg-background border border-border text-xs">
+                                    <div className="flex justify-between font-mono">
+                                      <span className="font-medium text-foreground truncate">{sf.name}</span>
+                                      <span className="text-muted-foreground">{sf.dataType}</span>
+                                    </div>
+                                    {sf.sampleValues && sf.sampleValues.length > 0 && (
+                                      <div className="text-xs text-muted-foreground truncate mt-0.5">
+                                        e.g. {sf.sampleValues.join(", ")}
+                                      </div>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </td>
                         <td className="p-3">
                           {col.isPrimaryKey && (
                             <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-xs font-semibold text-amber-600">
@@ -403,6 +451,51 @@ export function DataSourceDetail() {
                   </div>
                 )}
 
+              {/* Nested JSON Dimensions */}
+              {activeTable.semanticModel?.nestedDimensions &&
+                activeTable.semanticModel.nestedDimensions.length > 0 && (
+                  <div className="rounded-xl border border-border bg-card p-5 shadow-sm space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h3 className="font-semibold text-sm text-foreground flex items-center gap-2">
+                        <Sparkles className="h-4 w-4 text-indigo-500" /> Nested JSON Dimensions (
+                        {activeTable.semanticModel.nestedDimensions.length} Virtual Attributes)
+                      </h3>
+                      <span className="text-xs text-muted-foreground">
+                        Mapped from sample rows for AI semantic querying
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 max-h-80 overflow-y-auto pr-1">
+                      {activeTable.semanticModel.nestedDimensions.map((nd: any) => {
+                        const synList = activeTable.semanticModel?.synonyms?.[nd.name] || [];
+                        return (
+                          <div
+                            key={nd.name}
+                            className="p-3 rounded-lg border border-border bg-muted/40 text-xs space-y-1"
+                          >
+                            <div className="flex items-center justify-between font-mono">
+                              <span className="font-semibold text-foreground truncate">{nd.name}</span>
+                              <span className="text-muted-foreground uppercase">{nd.dataType}</span>
+                            </div>
+                            <p className="text-muted-foreground text-xs truncate">{nd.description}</p>
+                            {synList.length > 0 && (
+                              <div className="flex flex-wrap gap-1 pt-1">
+                                {synList.slice(0, 3).map((syn: string) => (
+                                  <span
+                                    key={syn}
+                                    className="rounded bg-background border border-border px-1 py-0.5 text-xs text-muted-foreground"
+                                  >
+                                    {syn}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {/* Metrics */}
                 <div className="rounded-xl border border-border bg-card p-5 shadow-sm space-y-4">
@@ -463,6 +556,26 @@ export function DataSourceDetail() {
                   </div>
                 </div>
               </div>
+
+              {/* ClickHouse Schema & DDL */}
+              {activeTable.semanticModel?.clickhouseSchema && (
+                <div className="rounded-xl border border-border bg-card p-5 shadow-sm space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h3 className="font-semibold text-sm text-foreground flex items-center gap-2">
+                      <Database className="h-4 w-4 text-emerald-500" /> ClickHouse Analytical Schema & DDL
+                    </h3>
+                    <span className="text-xs text-muted-foreground font-mono">
+                      Engine: {activeTable.semanticModel.clickhouseSchema.engine}
+                    </span>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Auto-generated ClickHouse table definition with mapped tuple columns and MergeTree ordering.
+                  </p>
+                  <pre className="p-4 rounded-lg bg-muted border border-border font-mono text-xs overflow-x-auto text-foreground whitespace-pre">
+                    {activeTable.semanticModel.clickhouseSchema.createTableDdl}
+                  </pre>
+                </div>
+              )}
             </div>
           )}
 
