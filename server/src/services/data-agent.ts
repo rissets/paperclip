@@ -73,66 +73,95 @@ export class DataAgentService {
       }
     }
 
-    // 2. Handle Entity Profiling on External Databases (AHU_DB / tbl_perseroan / ahu_cv)
+    // 2. Dynamic Entity Profiling Across All Connected External Databases & Tables
     if (isProfiling) {
-      const dbSource = allSources.find(
+      const dbSources = allSources.filter(
         (s) => s.sourceType === "mariadb" || s.sourceType === "mysql" || s.sourceType === "postgres",
       );
 
-      if (dbSource) {
-        // Clean company search term
-        let searchTerm = query
-          .replace(/^(profiling|profil|tolong\s+profiling|cari\s+profil|carikan|info|data)\s+/i, "")
-          .replace(/^(pt|cv|kantor|perusahaan)\s+/i, "")
-          .replace(/[?.,!]+$/, "")
-          .trim()
-          .toUpperCase();
+      // 1. Clean generic conversational lead-in phrases (command/intent verbs)
+      const cleanQuery = query
+        .replace(/^(profiling|profil|tolong\s+profiling|cari\s+profil|carikan|cari|info|data|tampilkan|detail|siapa|cek|search|lookup|find|show)\s+/i, "")
+        .replace(/[?.,!]+$/, "")
+        .trim();
 
-        if (searchTerm.length >= 2) {
-          try {
-            // First try exact match on tbl_perseroan
-            let sql = `SELECT * FROM tbl_perseroan WHERE nama_perseroan = '${searchTerm.replace(/'/g, "''")}' LIMIT 5`;
-            let res = await this.dataSourcesService.querySql(companyId, dbSource.id, sql, 5);
+      if (cleanQuery.length >= 2) {
+        for (const dbSource of dbSources) {
+          const dsTables = tables.filter((t) => t.dataSourceId === dbSource.id);
+          const quote = dbSource.sourceType === "postgres" ? `"` : "`";
 
-            // If not found, try LIKE prefix search
-            if (res.rows.length === 0) {
-              const prefixTerm = searchTerm.split(" ").slice(0, 2).join(" ");
-              sql = `SELECT * FROM tbl_perseroan WHERE nama_perseroan LIKE '${prefixTerm.replace(/'/g, "''")}%' LIMIT 5`;
-              res = await this.dataSourcesService.querySql(companyId, dbSource.id, sql, 5);
-            }
+          for (const tbl of dsTables) {
+            const cols = (tbl.schemaDefinition as any[]) || [];
+            const semModel = (tbl.semanticModel as any) || {};
 
-            if (res.rows.length > 0) {
-              const row = res.rows[0];
-              const summary = this.formatCompanyProfile(row, dbSource.name);
-              return {
-                agent: "data_agent",
-                task: `Profil entitas internal: ${row.nama_perseroan || searchTerm}`,
-                query: sql,
-                resultsSummary: summary,
-                dataPreview: res.rows,
-              };
-            }
+            // Dynamic searchable columns: from semanticModel or columns flagged as identifier/identity/isSearchable
+            const searchableColNames: string[] = semModel.searchableColumns && semModel.searchableColumns.length > 0
+              ? semModel.searchableColumns
+              : cols
+                  .filter((c: any) => c.isSearchable || c.role === "identifier" || c.semanticCategory === "identity" || /^(nama_|nama$|name$|_name|title|judul|kode_|code|label)/i.test(c.name))
+                  .map((c: any) => c.name);
 
-            // Fallback: check ahu_cv if not found in tbl_perseroan
-            try {
-              const cvSql = `SELECT * FROM ahu_cv WHERE nama = '${searchTerm.replace(/'/g, "''")}' OR nama LIKE '${searchTerm.replace(/'/g, "''")}%' LIMIT 3`;
-              const cvRes = await this.dataSourcesService.querySql(companyId, dbSource.id, cvSql, 3);
-              if (cvRes.rows.length > 0) {
-                const cvRow = cvRes.rows[0];
-                const summary = this.formatCvProfile(cvRow, dbSource.name);
-                return {
-                  agent: "data_agent",
-                  task: `Profil legalitas CV: ${cvRow.nama || searchTerm}`,
-                  query: cvSql,
-                  resultsSummary: summary,
-                  dataPreview: cvRes.rows,
-                };
+            // Dynamic candidate search terms:
+            // Check if cleanQuery starts with any entity name defined for this table (e.g. "Pelanggan", "Perseroan", "Produk", "Vendor")
+            const tableEntities: string[] = (semModel.entities || []).concat(
+              tbl.tableName.replace(/^(tbl_|table_|tb_|m_|t_)/i, "").split(/[\s_\-]+/)
+            ).filter((e: string) => e && e.length > 1);
+
+            const candidateTerms: string[] = [cleanQuery];
+
+            // If the clean query starts with an entity word known to this table, also generate stripped candidate
+            for (const ent of tableEntities) {
+              const entRegex = new RegExp(`^${ent}\\s+`, "i");
+              if (entRegex.test(cleanQuery)) {
+                const stripped = cleanQuery.replace(entRegex, "").trim();
+                if (stripped.length >= 2 && !candidateTerms.includes(stripped)) {
+                  candidateTerms.push(stripped);
+                }
               }
-            } catch {
-              // ahu_cv fallback error ignored
             }
-          } catch (err: any) {
-            console.warn("[DataAgent] SQL entity search error:", err.message);
+
+            // Search across all candidate terms and searchable columns
+            for (const sTerm of candidateTerms) {
+              if (sTerm.length < 2) continue;
+
+              for (const colName of searchableColNames) {
+                try {
+                  const escapedExact = sTerm.replace(/'/g, "''");
+                  // 1. Exact match
+                  let sql = `SELECT * FROM ${quote}${tbl.tableName}${quote} WHERE ${quote}${colName}${quote} = '${escapedExact}' LIMIT 5`;
+                  let res = await this.dataSourcesService.querySql(companyId, dbSource.id, sql, 5);
+
+                  // 2. Prefix match fallback if exact match returns 0 rows
+                  if (res.rows.length === 0) {
+                    const prefixTerm = sTerm.split(" ").slice(0, 2).join(" ");
+                    sql = `SELECT * FROM ${quote}${tbl.tableName}${quote} WHERE ${quote}${colName}${quote} LIKE '${prefixTerm.replace(/'/g, "''")}%' LIMIT 5`;
+                    res = await this.dataSourcesService.querySql(companyId, dbSource.id, sql, 5);
+                  }
+
+                  if (res.rows.length > 0) {
+                    const matchedRow = res.rows[0];
+                    const summary = this.formatDynamicEntityProfile(
+                      matchedRow,
+                      tbl.tableName,
+                      dbSource.name,
+                      cols,
+                      semModel.jsonStructures,
+                      semModel.entities
+                    );
+                    return {
+                      agent: "data_agent",
+                      task: `Profil entitas internal: ${matchedRow[colName] || sTerm}`,
+                      query: sql,
+                      resultsSummary: summary,
+                      dataPreview: res.rows,
+                    };
+                  }
+                } catch (err: any) {
+                  // Table/column query error logged quietly, continue to next candidate table
+                  console.warn(`[DataAgent] Dynamic query on ${tbl.tableName}.${colName} error:`, err.message);
+                }
+              }
+            }
           }
         }
       }
@@ -354,107 +383,327 @@ export class DataAgentService {
   }
 
   /**
-   * Helper to format rich Indonesian company profile from tbl_perseroan
+   * Dynamically formats any entity record from any database table into a rich, structured Markdown profile.
+   * Discovers primary identifiers, attributes, dates, financial values, locations, and parses nested JSON arrays/objects.
    */
-  private formatCompanyProfile(row: any, sourceName: string): string {
-    const namaPerseroan = row.nama_perseroan || "N/A";
-    const nomorSk = row.nomor_sk || "-";
-    const tglSk = row.tanggal_sk ? new Date(row.tanggal_sk).toLocaleDateString("id-ID", { dateStyle: "long" }) : "-";
-    const status = row.status_perseroan || "Aktif";
-    const npwp = row.npwp_perseroan || "-";
-    const jenis = row.jenis_perseroan || "PMDN";
-    const tahun = row.tahun_pendirian || "-";
-    const notaris = row.nama_notaris || "-";
-    const alamat = [
-      row.alamat_perseroan,
-      row.kelurahan,
-      row.kecamatan_nama_perseroan,
-      row.kabupaten_nama_perseroan,
-      row.provinsi_nama_perseroan,
-    ].filter(Boolean).join(", ");
+  public formatDynamicEntityProfile(
+    row: any,
+    tableName: string,
+    sourceName: string,
+    columns: any[] = [],
+    jsonStructures?: any,
+    entities?: string[]
+  ): string {
+    if (!row || typeof row !== "object") return "Data record kosong.";
 
-    // Format Modal
-    let modalDisetorStr = "-";
-    if (row.modal_disetorkan) {
-      const num = Number(row.modal_disetorkan);
-      modalDisetorStr = isNaN(num) ? String(row.modal_disetorkan) : `Rp ${num.toLocaleString("id-ID")}`;
-    }
+    const keys = Object.keys(row);
+    const handledKeys = new Set<string>();
 
-    // Parse Pemegang Saham / Pengurus
-    let shareholdersList: any[] = [];
-    if (row.pemegang_saham) {
-      try {
-        const parsed = typeof row.pemegang_saham === "string" ? JSON.parse(row.pemegang_saham) : row.pemegang_saham;
-        if (Array.isArray(parsed)) {
-          for (const item of parsed) {
-            const dataArr = item.data || [item];
-            for (const d of dataArr) {
-              if (d.nama_badan_hukum || d.nama) {
-                shareholdersList.push({
-                  nama: d.nama_badan_hukum || d.nama,
-                  jabatan: d.jabatan || "Pemegang Saham",
-                  lembar: d.jumlah_lembar_saham_modal_ditempatkan || d.jumlah_lembar || "-",
-                  nilai: d.total_harga_saham_yang_dipegang ? `Rp ${Number(d.total_harga_saham_yang_dipegang).toLocaleString("id-ID")}` : "-",
-                  email: d.email || "-",
-                  telepon: d.no_telepon_dewan || "-",
-                });
-              }
-            }
-          }
+    // 1. Identify Entity Name / Title
+    let titleVal = "";
+    let titleCol = "";
+    for (const c of columns) {
+      if (c.role === "identifier" || c.semanticCategory === "identity" || /^(nama_|nama$|name$|_name|title|judul|label)/i.test(c.name)) {
+        if (row[c.name] && String(row[c.name]).trim().length > 0) {
+          titleVal = String(row[c.name]).trim();
+          titleCol = c.name;
+          break;
         }
-      } catch {
-        // ignore parse error
       }
     }
-
-    // Parse Kegiatan / KBLI
-    let kegiatanList: any[] = [];
-    if (row.kegiatan) {
-      try {
-        const parsed = typeof row.kegiatan === "string" ? JSON.parse(row.kegiatan) : row.kegiatan;
-        if (Array.isArray(parsed)) {
-          kegiatanList = parsed;
-        }
-      } catch {
-        // ignore
+    if (!titleVal) {
+      const fallbackKey = keys.find((k) => /^(nama|name|title|judul|code|kode)/i.test(k) && row[k]);
+      if (fallbackKey) {
+        titleVal = String(row[fallbackKey]).trim();
+        titleCol = fallbackKey;
+      } else {
+        titleVal = row[keys[0]] ? String(row[keys[0]]) : tableName;
       }
     }
+    if (titleCol) handledKeys.add(titleCol);
 
-    let out = `### Profil Resmi: PT ${namaPerseroan}\n\n`;
-    out += `> **Status Data:** Terverifikasi 100% dari Sumber Data Internal (**${sourceName}** &mdash; \`tbl_perseroan\`).\n`;
+    let out = `### Profil Data: ${titleVal}\n\n`;
+    out += `> **Status Data:** Terverifikasi 100% dari Sumber Data Internal (**${sourceName}** &mdash; \`${tableName}\`).\n`;
     out += `> *Pengambilan data dilakukan secara lokal dari database resmi tanpa menggunakan pencarian publik eksternal.*\n\n`;
 
-    out += `#### 1. Identitas & Legalitas Perseroan\n`;
-    out += `- **Nama Resmi:** PT ${namaPerseroan}\n`;
-    out += `- **Nomor SK Kemenkumham:** \`${nomorSk}\`\n`;
-    out += `- **Tanggal SK Pengesahan:** ${tglSk}\n`;
-    out += `- **NPWP Perseroan:** \`${npwp}\`\n`;
-    out += `- **Status Perseroan:** ${status.toUpperCase()}\n`;
-    out += `- **Jenis Perseroan:** ${jenis}\n`;
-    out += `- **Tahun Pendirian:** ${tahun}\n`;
-    out += `- **Notaris Pembuat Akta:** ${notaris}\n\n`;
+    // 2. Identify and Parse JSON Columns
+    const jsonFields: { key: string; label: string; data: any }[] = [];
+    for (const k of keys) {
+      const colDef = columns.find((c) => c.name === k);
+      let isJson = colDef?.semanticCategory === "nested_structure" || colDef?.isJson || colDef?.dataType === "json";
+      let parsedData: any = null;
 
-    out += `#### 2. Domisili & Alamat Terdaftar\n`;
-    out += `- **Alamat Lengkap:** ${alamat || "-"}\n\n`;
+      if (jsonStructures && jsonStructures[k]) {
+        isJson = true;
+      }
 
-    out += `#### 3. Struktur Permodalan\n`;
-    out += `- **Total Modal Disetor:** **${modalDisetorStr}**\n\n`;
+      const val = row[k];
+      if (val && typeof val === "object") {
+        isJson = true;
+        parsedData = val;
+      } else if (typeof val === "string" && (val.trim().startsWith("[") || val.trim().startsWith("{"))) {
+        try {
+          parsedData = JSON.parse(val);
+          isJson = true;
+        } catch {
+          // not valid json
+        }
+      }
 
-    if (shareholdersList.length > 0) {
-      out += `#### 4. Susunan Dewan Pengurus & Pemegang Saham (BOD / BOC)\n`;
-      out += `| Nama Lengkap | Jabatan | Jumlah Saham | Nilai Saham | Kontak / Email |\n`;
-      out += `|---|---|---|---|---|\n`;
-      for (const s of shareholdersList) {
-        out += `| **${s.nama}** | ${s.jabatan} | ${s.lembar} | ${s.nilai} | ${s.email} |\n`;
+      if (isJson && parsedData) {
+        handledKeys.add(k);
+        jsonFields.push({
+          key: k,
+          label: colDef?.humanLabel || this.humanizeLabel(k),
+          data: parsedData,
+        });
+      }
+    }
+
+    // 3. Location / Domisili / Alamat (from semanticCategory === "location")
+    const locationKeys = keys.filter((k) => {
+      if (handledKeys.has(k)) return false;
+      const colDef = columns.find((c) => c.name === k);
+      return colDef?.semanticCategory === "location" || this.getOrDeduceCategory(k, colDef) === "location";
+    });
+    let locationParts: string[] = [];
+    for (const lk of locationKeys) {
+      handledKeys.add(lk);
+      if (row[lk] && String(row[lk]).trim() !== "" && String(row[lk]).trim() !== "-") {
+        locationParts.push(String(row[lk]).trim());
+      }
+    }
+
+    // 4. Financial / Permodalan / Nilai / Metrik (from semanticCategory === "financial" or role === "metric")
+    const financialKeys = keys.filter((k) => {
+      if (handledKeys.has(k)) return false;
+      const colDef = columns.find((c) => c.name === k);
+      return colDef?.semanticCategory === "financial" || colDef?.role === "metric" || this.getOrDeduceCategory(k, colDef) === "financial";
+    });
+    const financialEntries: { label: string; value: string }[] = [];
+    for (const fk of financialKeys) {
+      handledKeys.add(fk);
+      const val = row[fk];
+      if (val !== undefined && val !== null && String(val).trim() !== "") {
+        const num = Number(val);
+        const valStr = !isNaN(num) && typeof val !== "boolean"
+          ? (num >= 1000 ? `Rp ${num.toLocaleString("id-ID")}` : num.toLocaleString("id-ID"))
+          : String(val);
+        const colDef = columns.find((c) => c.name === fk);
+        financialEntries.push({ label: colDef?.humanLabel || this.humanizeLabel(fk), value: valStr });
+      }
+    }
+
+    // 5. Contact / Kontak & Komunikasi (from semanticCategory === "contact")
+    const contactKeys = keys.filter((k) => {
+      if (handledKeys.has(k)) return false;
+      const colDef = columns.find((c) => c.name === k);
+      return colDef?.semanticCategory === "contact" || this.getOrDeduceCategory(k, colDef) === "contact";
+    });
+    const contactEntries: { label: string; value: string }[] = [];
+    for (const ck of contactKeys) {
+      handledKeys.add(ck);
+      const val = row[ck];
+      if (val !== undefined && val !== null && String(val).trim() !== "") {
+        const colDef = columns.find((c) => c.name === ck);
+        contactEntries.push({ label: colDef?.humanLabel || this.humanizeLabel(ck), value: String(val) });
+      }
+    }
+
+    // 6. Identity & Status Attributes (from semanticCategory === "identity" | "status" or role === "identifier")
+    const identityKeys = keys.filter((k) => {
+      if (handledKeys.has(k)) return false;
+      const colDef = columns.find((c) => c.name === k);
+      const cat = colDef?.semanticCategory || this.getOrDeduceCategory(k, colDef);
+      return cat === "identity" || cat === "status" || colDef?.role === "identifier";
+    });
+    const identityEntries: { label: string; value: string }[] = [];
+    for (const ik of identityKeys) {
+      handledKeys.add(ik);
+      const val = row[ik];
+      if (val !== undefined && val !== null && String(val).trim() !== "") {
+        let valStr = String(val);
+        if (/tanggal|date|tgl/i.test(ik) && !isNaN(Date.parse(valStr))) {
+          valStr = new Date(valStr).toLocaleDateString("id-ID", { dateStyle: "long" });
+        } else if (/status/i.test(ik)) {
+          valStr = valStr.toUpperCase();
+        } else if (/nomor|no_|sk|npwp|id|kode|akta/i.test(ik)) {
+          valStr = `\`${valStr}\``;
+        }
+        const colDef = columns.find((c) => c.name === ik);
+        identityEntries.push({ label: colDef?.humanLabel || this.humanizeLabel(ik), value: valStr });
+      }
+    }
+
+    // 7. Temporal Attributes (from semanticCategory === "temporal" or role === "timestamp")
+    const temporalKeys = keys.filter((k) => {
+      if (handledKeys.has(k)) return false;
+      const colDef = columns.find((c) => c.name === k);
+      const cat = colDef?.semanticCategory || this.getOrDeduceCategory(k, colDef);
+      return cat === "temporal" || colDef?.role === "timestamp";
+    });
+    const temporalEntries: { label: string; value: string }[] = [];
+    for (const tk of temporalKeys) {
+      handledKeys.add(tk);
+      const val = row[tk];
+      if (val !== undefined && val !== null && String(val).trim() !== "") {
+        let valStr = String(val);
+        if (!isNaN(Date.parse(valStr)) && valStr.length > 5) {
+          valStr = new Date(valStr).toLocaleDateString("id-ID", { dateStyle: "long" });
+        }
+        const colDef = columns.find((c) => c.name === tk);
+        temporalEntries.push({ label: colDef?.humanLabel || this.humanizeLabel(tk), value: valStr });
+      }
+    }
+
+    // Render 1: Identitas & Legalitas
+    out += `#### 1. Identitas & Atribut Utama\n`;
+    out += `- **Nama / Entitas:** ${titleVal}\n`;
+    for (const entry of identityEntries) {
+      out += `- **${entry.label}:** ${entry.value}\n`;
+    }
+    out += `\n`;
+
+    // Render 2: Domisili & Lokasi
+    if (locationParts.length > 0) {
+      out += `#### 2. Domisili & Lokasi\n`;
+      out += `- **Alamat / Lokasi:** ${locationParts.join(", ")}\n\n`;
+    }
+
+    // Render 3: Keuangan & Permodalan
+    if (financialEntries.length > 0) {
+      out += `#### 3. Metrik & Finansial\n`;
+      for (const entry of financialEntries) {
+        out += `- **${entry.label}:** **${entry.value}**\n`;
       }
       out += `\n`;
     }
 
-    if (kegiatanList.length > 0) {
-      out += `#### 5. Maksud, Tujuan & Bidang Usaha (KBLI Terdaftar)\n`;
-      for (const k of kegiatanList.slice(0, 8)) {
-        const tujuanStr = Array.isArray(k.tujuan) ? k.tujuan.slice(0, 2).join("; ") : "";
-        out += `- **KBLI ${k.id || ""}:** ${k.maksud || ""}${tujuanStr ? ` &mdash; *(${tujuanStr})*` : ""}\n`;
+    // Render 4: Kontak & Komunikasi
+    if (contactEntries.length > 0) {
+      out += `#### 4. Kontak & Komunikasi\n`;
+      for (const entry of contactEntries) {
+        out += `- **${entry.label}:** ${entry.value}\n`;
+      }
+      out += `\n`;
+    }
+
+    // Render 5: Waktu & Periode
+    if (temporalEntries.length > 0) {
+      out += `#### 5. Waktu & Periode\n`;
+      for (const entry of temporalEntries) {
+        out += `- **${entry.label}:** ${entry.value}\n`;
+      }
+      out += `\n`;
+    }
+
+    // Render 4: JSON Bersarang (Pengurus/Saham/KBLI/Line Items)
+    let sectionIdx = 4;
+    for (const jf of jsonFields) {
+      const data = jf.data;
+      if (Array.isArray(data) && data.length > 0) {
+        // Flatten nested data arrays (e.g. [{id: 1, data: [{...}]}])
+        let flatItems: any[] = [];
+        for (const item of data) {
+          if (item && Array.isArray(item.data)) {
+            flatItems.push(...item.data);
+          } else if (item) {
+            flatItems.push(item);
+          }
+        }
+
+        if (flatItems.length > 0) {
+          // Case A: Susunan Pengurus / Pemegang Saham
+          const isShareholderLike = flatItems.some(
+            (it) => it.nama_badan_hukum || it.nama || it.jabatan || it.jumlah_lembar || it.lembar
+          );
+          if (isShareholderLike) {
+            out += `#### ${sectionIdx}. Susunan ${jf.label}\n`;
+            out += `| Nama Lengkap / Badan Usaha | Jabatan | Saham / Lembar | Nilai Nominal | Kontak / Detail |\n`;
+            out += `|---|---|---|---|---|\n`;
+            for (const it of flatItems) {
+              const name = it.nama_badan_hukum || it.nama || "-";
+              const jab = it.jabatan || "Anggota";
+              const lembar = it.jumlah_lembar_saham_modal_ditempatkan || it.jumlah_lembar || it.lembar || "-";
+              let nilai = it.total_harga_saham_yang_dipegang || it.total_nominal || it.nilai || "-";
+              if (nilai !== "-" && !isNaN(Number(nilai))) {
+                nilai = `Rp ${Number(nilai).toLocaleString("id-ID")}`;
+              }
+              const contact = it.email || it.telepon || it.npwp || "-";
+              out += `| **${name}** | ${jab} | ${lembar} | ${nilai} | ${contact} |\n`;
+            }
+            out += `\n`;
+            sectionIdx++;
+            continue;
+          }
+
+          // Case B: KBLI / Kegiatan Usaha
+          const isKbliLike = flatItems.some((it) => it.maksud || it.tujuan || (it.id && it.deskripsi));
+          if (isKbliLike) {
+            out += `#### ${sectionIdx}. ${jf.label}\n`;
+            for (const k of flatItems.slice(0, 10)) {
+              const tujuanStr = Array.isArray(k.tujuan) ? k.tujuan.slice(0, 2).join("; ") : (k.tujuan || "");
+              out += `- **${k.id ? `KBLI ${k.id}:` : ""}** ${k.maksud || k.deskripsi || ""}${tujuanStr ? ` &mdash; *(${tujuanStr})*` : ""}\n`;
+            }
+            out += `\n`;
+            sectionIdx++;
+            continue;
+          }
+
+          // Case C: Generic Array of Objects -> Markdown Table
+          if (typeof flatItems[0] === "object" && flatItems[0] !== null) {
+            const tableKeys = Array.from(
+              new Set(flatItems.flatMap((it) => (it && typeof it === "object" ? Object.keys(it) : [])))
+            ).slice(0, 5);
+
+            if (tableKeys.length > 0) {
+              out += `#### ${sectionIdx}. ${jf.label}\n`;
+              out += `| ${tableKeys.map((k) => this.humanizeLabel(k)).join(" | ")} |\n`;
+              out += `| ${tableKeys.map(() => "---").join(" | ")} |\n`;
+              for (const it of flatItems.slice(0, 10)) {
+                const rowCells = tableKeys.map((k) => {
+                  const val = it[k];
+                  if (val === undefined || val === null) return "-";
+                  if (typeof val === "object") return JSON.stringify(val);
+                  return String(val);
+                });
+                out += `| ${rowCells.join(" | ")} |\n`;
+              }
+              out += `\n`;
+              sectionIdx++;
+              continue;
+            }
+          }
+
+          // Case D: Primitives array
+          out += `#### ${sectionIdx}. ${jf.label}\n`;
+          for (const it of flatItems.slice(0, 10)) {
+            out += `- ${String(it)}\n`;
+          }
+          out += `\n`;
+          sectionIdx++;
+        }
+      } else if (typeof data === "object" && data !== null) {
+        // Single object key-values
+        out += `#### ${sectionIdx}. ${jf.label}\n`;
+        for (const [k, v] of Object.entries(data)) {
+          if (v !== undefined && v !== null) {
+            out += `- **${this.humanizeLabel(k)}:** ${typeof v === "object" ? JSON.stringify(v) : String(v)}\n`;
+          }
+        }
+        out += `\n`;
+        sectionIdx++;
+      }
+    }
+
+    // Render 5: Remaining non-handled attributes
+    const remainingKeys = keys.filter(
+      (k) => !handledKeys.has(k) && row[k] !== undefined && row[k] !== null && String(row[k]).trim() !== ""
+    );
+    if (remainingKeys.length > 0) {
+      out += `#### Informasi Tambahan\n`;
+      for (const rk of remainingKeys.slice(0, 10)) {
+        out += `- **${this.humanizeLabel(rk)}:** ${String(row[rk])}\n`;
       }
       out += `\n`;
     }
@@ -462,27 +711,50 @@ export class DataAgentService {
     return out;
   }
 
-  private formatCvProfile(row: any, sourceName: string): string {
-    const namaCv = row.nama || "N/A";
-    const noDaftar = row.no_pendaftaran || "-";
-    const status = row.status || "Aktif";
-    const npwp = row.npwp_no || "-";
-    const alamat = row.alamat || "-";
-    const modal = row.modal ? `Rp ${Number(row.modal).toLocaleString("id-ID")}` : "-";
-    const aktaNo = row.akta_no || "-";
-    const aktaTgl = row.akta_tgl ? new Date(row.akta_tgl).toLocaleDateString("id-ID", { dateStyle: "long" }) : "-";
+  private getOrDeduceCategory(key: string, colDef?: any): string {
+    if (colDef?.semanticCategory) return colDef.semanticCategory;
+    if (colDef?.role === "identifier") return "identity";
+    if (colDef?.role === "metric") return "financial";
+    if (colDef?.role === "timestamp") return "temporal";
 
-    let out = `### Profil Resmi: CV ${namaCv}\n\n`;
-    out += `> **Status Data:** Terverifikasi 100% dari Sumber Data Internal (**${sourceName}** &mdash; \`ahu_cv\`).\n\n`;
-    out += `#### 1. Identitas & Pendaftaran CV\n`;
-    out += `- **Nama Badan Usaha:** CV ${namaCv}\n`;
-    out += `- **Nomor Pendaftaran Kemenkumham:** \`${noDaftar}\`\n`;
-    out += `- **NPWP:** \`${npwp}\`\n`;
-    out += `- **Status Usaha:** ${status.toUpperCase()}\n`;
-    out += `- **Akta Notaris:** No. ${aktaNo} (${aktaTgl})\n\n`;
-    out += `#### 2. Domisili & Modal\n`;
-    out += `- **Alamat Terdaftar:** ${alamat}\n`;
-    out += `- **Modal Usaha:** **${modal}**\n\n`;
-    return out;
+    const lower = key.toLowerCase();
+    if (/(^id$|_id$|^id_|nomor|no_|sk_|code|kode|sku|npwp|nik|reg)/i.test(lower)) return "identity";
+    if (/(status|state|kondisi|active|aktif|flag|is_)/i.test(lower)) return "status";
+    if (/(alamat|address|street|jalan|kelurahan|desa|kecamatan|kabupaten|kota|city|provinsi|province|state|country|negara|pos|zip|postal|region|wilayah)/i.test(lower)) return "location";
+    if (/(modal|harga|price|nilai|total|amount|nominal|biaya|cost|omset|pendapatan|revenue|saldo|fee|tax|pajak|tarif|disetor|balance|salary|gaji)/i.test(lower)) return "financial";
+    if (/(email|mail|phone|telepon|telp|hp|handphone|fax|mobile|kontak|contact|website|url)/i.test(lower)) return "contact";
+    if (/(tanggal|date|tgl|created|updated|waktu|time|tahun|year|bulan|month|period|periode|timestamp)/i.test(lower)) return "temporal";
+    if (/(jenis|tipe|type|category|kategori|kelompok|group|divisi|division|departemen|department|sektor|sector|role|jabatan|kbli)/i.test(lower)) return "classification";
+    if (/(keterangan|deskripsi|description|catatan|notes|remark|memo|detail|bio|summary)/i.test(lower)) return "content";
+    return "general";
+  }
+
+  private humanizeLabel(key: string): string {
+    return key
+      .replace(/_/g, " ")
+      .replace(/([a-z])([A-Z])/g, "$1 $2")
+      .split(" ")
+      .map((word) => {
+        const lower = word.toLowerCase();
+        if (lower === "sk") return "SK";
+        if (lower === "npwp") return "NPWP";
+        if (lower === "id") return "ID";
+        if (lower === "cv") return "CV";
+        if (lower === "pt") return "PT";
+        if (lower === "kbli") return "KBLI";
+        if (lower === "tgl") return "Tanggal";
+        if (lower === "no") return "Nomor";
+        return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+      })
+      .join(" ");
+  }
+
+  private formatCompanyProfile(row: any, sourceName: string): string {
+    const formatted = this.formatDynamicEntityProfile(row, "tbl_perseroan", sourceName);
+    return formatted.replace("### Profil Data: ", "### Profil Data: PT ");
+  }
+
+  private formatCvProfile(row: any, sourceName: string): string {
+    return this.formatDynamicEntityProfile(row, "ahu_cv", sourceName);
   }
 }

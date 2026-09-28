@@ -122,7 +122,7 @@ export const ENTERPRISE_AGENT_ROSTER: EnterpriseAgentSpec[] = [
     role: "engineer",
     category: "runtime",
     capabilities:
-      "Internal database analytics, company legal profiling on AHU_DB (tbl_perseroan), tabular metrics aggregation on CSV and Excel datasets, ClickHouse execution",
+      "Internal database analytics, legal & commercial entity profiling across connected databases, tabular metrics aggregation on CSV and Excel datasets, ClickHouse execution",
     reportsToHomseo: true,
   },
   {

@@ -121,32 +121,33 @@ curl -sS -X POST "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/data-so
 
 ---
 
-## 5. Indonesian Legal Entity & Company Profiling (`AHU_DB`)
+## 5. Dynamic Discovery & Generic Entity Profiling
 
-When an Indonesian legal entity database (`AHU_DB`) is connected:
+Paperclip agents dynamically discover connected data sources and profile domain entities without requiring hardcoded table names, static schema assumptions, or hardcoded entity prefixes.
 
-### Mandatory Rule
-**NEVER search the public internet or external web (e.g. LinkedIn, Google, BidIntel) for Indonesian company legal profiles.** Always query the internal `tbl_perseroan` or `ahu_cv` table.
+### Ingestion & Onboarding Stage
+During data source onboarding, the `DatabaseIntegrationAgent` (or `StructuredIngestionAgent`):
+1. **Discovers Schema & Types**: Introspects tables, columns, data types, and primary/foreign keys.
+2. **Detects JSON Structures**: Samples top rows to extract nested keys (e.g., shareholders, management, line items).
+3. **Assigns Semantic Categories**: Categorizes columns into standardized categories:
+   - `identity`: primary identifiers, entity names, registration/SK numbers, codes.
+   - `location`: addresses, cities, provinces, postal codes, countries.
+   - `financial`: authorized/paid capital, prices, totals, balances.
+   - `contact`: phone numbers, emails, websites.
+   - `temporal`: establishment dates, decree dates, transaction timestamps.
+   - `status`: active, closed, pending, cancelled.
+   - `classification`: entity types, business sectors, categories.
+   - `nested_structure`: parsed JSON objects/arrays (directors, shareholders, items).
+   - `content`: descriptions, articles of association, notes.
+4. **Builds Semantic Entities & Searchable Columns**: Generates human-friendly labels and registers `entities` and `searchableColumns` in `semanticModel` for downstream routing.
 
-### Profiling Query Pattern
-```bash
-curl -sS -X POST "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/data-sources/$DATA_SOURCE_ID/query-sql" \
-  ${AUTH_HEADER:+-H "$AUTH_HEADER"} \
-  -H "Content-Type: application/json" \
-  -d '{
-    "sql": "SELECT id_perseroan, nama_perseroan, npwp_perseroan, nomor_sk, tanggal_sk, status_perseroan, jenis_perseroan, tahun_pendirian, alamat_perseroan, modal_dasar, modal_disetorkan, nama_notaris, pemegang_saham, kegiatan, provinsi_nama_perseroan, kabupaten_nama_perseroan FROM tbl_perseroan WHERE nama_perseroan = \"[NAMA_PERUSAHAAN]\" LIMIT 5"
-  }'
-```
+### Runtime Dynamic Profiling Protocol
+When answering entity profiling queries:
+1. **Dynamic Entity Resolution**: The `DataAgent` inspects active data sources from `GET /api/companies/$PAPERCLIP_COMPANY_ID/data-sources` and matches the user query against discovered `entities` and `searchableColumns`.
+2. **Internal-First Priority**: Never query public web search engines if an internal database or data source holds relevant enterprise/entity records.
+3. **Targeted Query Formulation**: Runs exact search, and if 0 rows returned, uses indexed B-Tree prefix match (`WHERE col LIKE "TERM%"`).
+4. **Dynamic Profile Formatting**: Groups row fields dynamically by their onboarding `semanticCategory` (Identitas, Lokasi, Keuangan/Modal, Pengurus/Struktur, Status, dll.) and formats parsed JSON arrays into readable markdown tables.
+5. **Grounded Provenance**: Concludes with a dynamic provenance citation referencing the actual data source and table name:
+   > *Terverifikasi dari database resmi internal [Nama Data Source] ([Nama Tabel]).*
 
-If exact match returns 0 rows, use prefix match:
-`WHERE nama_perseroan LIKE "[NAMA_PERUSAHAAN_PREFIX]%"`
-
-### Report Formatting
-Extract and format:
-1. **Legalitas:** Nomor SK Kemenkumham, Tanggal SK, Status (Aktif/Tertutup), NPWP.
-2. **Domisili:** Alamat lengkap, Kota, Provinsi.
-3. **Modal:** Modal Disetor & Modal Dasar (Rupiah).
-4. **Pengurus & Pemegang Saham:** Tabel memuat Nama, Jabatan (BOD/BOC), Lembar Saham, Nilai Saham, Email.
-5. **Kegiatan Usaha / KBLI:** Daftar maksud dan tujuan terdaftar.
-6. **Provenance Tag:** *Terverifikasi dari database resmi internal AHU_DB (tbl_perseroan).*
 

@@ -179,6 +179,10 @@ export class StructuredIngestionService {
         role = "dimension";
       }
 
+      const semanticCategory = this.determineSemanticCategory(colName, dataType, role === "identifier");
+      const humanLabel = this.humanizeLabel(colName);
+      const isSearchable = this.isSearchableColumn(colName, role, semanticCategory);
+
       columns.push({
         name: colName,
         dataType,
@@ -189,6 +193,9 @@ export class StructuredIngestionService {
         max: maxVal,
         sampleValues,
         role,
+        semanticCategory,
+        humanLabel,
+        isSearchable,
       });
 
       // Semantic model building
@@ -233,9 +240,24 @@ export class StructuredIngestionService {
       synonyms[colName] = Array.from(new Set(synList));
     }
 
+    const cleanTableName = tableName.replace(/^(tbl_|table_|tb_|m_|t_)/i, "").toLowerCase();
+    const tableWords = cleanTableName.split(/[\s_\-]+/).filter((w) => w.length > 2);
+    const entities = Array.from(
+      new Set([
+        this.humanizeLabel(cleanTableName),
+        ...tableWords.map((w) => this.humanizeLabel(w)),
+      ]),
+    );
+
+    const searchableColumns = columns
+      .filter((c) => c.isSearchable || c.role === "identifier" || c.semanticCategory === "identity")
+      .map((c) => c.name);
+
     const semanticModel: TableSemanticModel = {
       tableName,
       description: `Structured analytical table '${tableName}' with ${rowCount} records and ${columns.length} columns.`,
+      entities,
+      searchableColumns,
       dimensions,
       metrics,
       primaryKey,
@@ -248,5 +270,87 @@ export class StructuredIngestionService {
       semanticModel,
       rows: cleanRows,
     };
+  }
+
+  public static determineSemanticCategory(
+    colName: string,
+    dataType: string,
+    isPk: boolean,
+  ): "identity" | "location" | "financial" | "contact" | "temporal" | "status" | "classification" | "nested_structure" | "content" | "general" {
+    const lower = colName.toLowerCase();
+
+    if (
+      isPk ||
+      /(^id$|_id$|^id_|nomor|no_|sk_|code|kode|sku|npwp|nik|reg|uuid|passport)/i.test(lower) ||
+      /(^nama$|^name$|nama_|name_|_name|_nama|title|judul)/i.test(lower)
+    ) {
+      return "identity";
+    }
+    if (/(status|state|kondisi|active|aktif|flag|is_|enabled|valid)/i.test(lower)) {
+      return "status";
+    }
+    if (
+      /(alamat|address|street|jalan|kelurahan|desa|kecamatan|kabupaten|kota|city|provinsi|province|state|country|negara|pos|zip|postal|region|wilayah|latitude|longitude|lat|lon|lng)/i.test(
+        lower,
+      )
+    ) {
+      return "location";
+    }
+    if (
+      /(modal|harga|price|nilai|total|amount|nominal|biaya|cost|omset|pendapatan|revenue|saldo|fee|tax|pajak|tarif|disetor|balance|salary|gaji|uang)/i.test(
+        lower,
+      )
+    ) {
+      return "financial";
+    }
+    if (/(email|mail|phone|telepon|telp|hp|handphone|fax|mobile|kontak|contact|website|url)/i.test(lower)) {
+      return "contact";
+    }
+    if (
+      dataType === "date" ||
+      /(tanggal|date|tgl|created|updated|waktu|time|tahun|year|bulan|month|period|periode|timestamp)/i.test(lower)
+    ) {
+      return "temporal";
+    }
+    if (
+      /(jenis|tipe|type|category|kategori|kelompok|group|divisi|division|departemen|department|sektor|sector|role|jabatan|kbli)/i.test(
+        lower,
+      )
+    ) {
+      return "classification";
+    }
+    if (/(keterangan|deskripsi|description|catatan|notes|remark|memo|detail|bio|summary)/i.test(lower)) {
+      return "content";
+    }
+    if (dataType === "number") return "financial";
+    return "general";
+  }
+
+  public static humanizeLabel(name: string): string {
+    return name
+      .replace(/_/g, " ")
+      .replace(/([a-z])([A-Z])/g, "$1 $2")
+      .split(" ")
+      .map((word) => {
+        const lower = word.toLowerCase();
+        if (lower === "sk") return "SK";
+        if (lower === "npwp") return "NPWP";
+        if (lower === "id") return "ID";
+        if (lower === "cv") return "CV";
+        if (lower === "pt") return "PT";
+        if (lower === "kbli") return "KBLI";
+        if (lower === "tgl") return "Tanggal";
+        if (lower === "no") return "Nomor";
+        if (lower === "pk") return "PK";
+        if (lower === "fk") return "FK";
+        return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+      })
+      .join(" ");
+  }
+
+  public static isSearchableColumn(colName: string, role: string, semanticCategory: string): boolean {
+    if (role === "identifier") return true;
+    if (semanticCategory === "identity") return true;
+    return /^(nama_|nama$|name$|_name|title|judul|kode_|code|label)/i.test(colName);
   }
 }

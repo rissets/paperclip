@@ -166,6 +166,7 @@ export class TypeSafeJevService {
       routeChoices["prediction_agent"] = "PredictionAgent: Prediksi masa depan, forecasting penjualan/stok, estimasi tren";
       routeChoices["action_agent"] = "ActionAgent: Eksekusi mutasi data, automasi operasional, integrasi API/tiket";
       routeChoices["onboarding_orchestrator"] = "OnboardingOrchestrator: Onboarding data source baru, integrasi database, penyerapan file";
+      routeChoices["agent_builder"] = "AgentBuilder: Buat agen baru, rancang agent custom, susun arsitektur multi-agent";
     }
 
     routeChoices["hybrid"] = "Hybrid: Membutuhkan data angka/analitik terstruktur sekaligus regulasi/kebijakan dokumen";
@@ -664,57 +665,68 @@ export class TypeSafeJevService {
       }
     }
 
-    // Generate suggested queries and reasoning steps for database tables
+    // Generate suggested queries dynamically based on table schemas
     const suggestedQueries: SuggestedQueryTemplate[] = [];
-    const hasPerseroan = tables.some((t) => t.name.toLowerCase() === "tbl_perseroan");
-    const hasCV = tables.some((t) => t.name.toLowerCase() === "ahu_cv");
-    const hasPerson = tables.some((t) => t.name.toLowerCase() === "digi_person_company_relation");
 
-    if (hasPerseroan) {
-      suggestedQueries.push(
-        {
-          title: "Profil Legalitas Perseroan Terbatas (PT)",
-          query: "Cari profil legalitas, SK Menkumham, dan status keaktifan PT berdasarkan nama",
-          category: "legal_profiling",
-          sqlSnippet: "SELECT id_perseroan, nama_perseroan, nomor_sk, tanggal_sk, status_perseroan, jenis_perseroan, tahun_pendirian, modal_dasar, modal_disetorkan, npwp_perseroan, alamat_perseroan, nama_notaris FROM tbl_perseroan WHERE nama_perseroan = '{NAMA_PT}' LIMIT 1;",
-          description: "Pencarian exact match cepat pada kolom nama_perseroan yang berindeks",
-        },
-        {
-          title: "Struktur Pengurus & Pemegang Saham (JSON)",
-          query: "Dapatkan daftar pemegang saham, direktur, dan komisaris dari kolom JSON pemegang_saham",
-          category: "json_extraction",
-          sqlSnippet: "SELECT id_perseroan, nama_perseroan, pemegang_saham FROM tbl_perseroan WHERE nama_perseroan = '{NAMA_PT}' LIMIT 1;",
-          description: "Mengambil data dewan direksi, komisaris, persentase saham dari kolom JSON pemegang_saham",
-        },
-        {
-          title: "Pencarian Nama Perusahaan Berdasarkan Awalan (Prefix Match)",
-          query: "Daftar perusahaan PT yang namanya diawali kata tertentu",
+    for (const t of tables) {
+      const colNames: string[] = (t.columns || []).map((c: any) => (typeof c === "string" ? c : c?.name || ""));
+      const idCol = colNames.find((c) => /^(id|id_|_id)$/i.test(c) || c.toLowerCase().endsWith("_id") || c.toLowerCase().startsWith("id_"));
+      const nameCol = colNames.find((c) => /^(nama_|nama$|name$|_name|title|judul|kode_|label)/i.test(c));
+      const jsonCols = colNames.filter((c) => /(saham|kegiatan|pengurus|detail|items|meta|payload|config|json|data)/i.test(c));
+      const metricCols = colNames.filter((c) => /(total|harga|price|modal|nominal|jumlah|amount|omset|pendapatan|biaya|qty|kuantitas|saldo)/i.test(c));
+
+      if (nameCol) {
+        suggestedQueries.push({
+          title: `Pencarian Entitas '${t.name}' (Exact Match)`,
+          query: `Cari data lengkap dalam tabel ${t.name} berdasarkan ${nameCol}`,
           category: "filtering",
-          sqlSnippet: "SELECT id_perseroan, nama_perseroan, nomor_sk, status_perseroan, tahun_pendirian, provinsi_nama_perseroan FROM tbl_perseroan WHERE nama_perseroan LIKE '{PREFIX}%' LIMIT 10;",
-          description: "Pencarian cepat menggunakan index B-Tree pada nama_perseroan",
-        },
-      );
+          sqlSnippet: `SELECT * FROM \`${t.name}\` WHERE \`${nameCol}\` = '{SEARCH_VALUE}' LIMIT 1;`,
+          description: `Pencarian exact match cepat pada kolom ${nameCol}`,
+        });
+        suggestedQueries.push({
+          title: `Pencarian Awalan '${t.name}' (Prefix Match)`,
+          query: `Daftar record dalam tabel ${t.name} dengan awalan ${nameCol} tertentu`,
+          category: "filtering",
+          sqlSnippet: `SELECT * FROM \`${t.name}\` WHERE \`${nameCol}\` LIKE '{PREFIX}%' LIMIT 10;`,
+          description: `Pencarian prefix cepat memanfaatkan indeks pada ${nameCol}`,
+        });
+      } else if (idCol) {
+        suggestedQueries.push({
+          title: `Lookup '${t.name}' Berdasarkan ID`,
+          query: `Cari record ${t.name} berdasarkan ${idCol}`,
+          category: "filtering",
+          sqlSnippet: `SELECT * FROM \`${t.name}\` WHERE \`${idCol}\` = '{ID_VALUE}' LIMIT 1;`,
+          description: `Direct primary key lookup pada ${t.name}`,
+        });
+      }
+
+      for (const jc of jsonCols) {
+        const displayCol = nameCol ? `\`${nameCol}\`` : (idCol ? `\`${idCol}\`` : "*");
+        suggestedQueries.push({
+          title: `Ekstraksi Kolom Terstruktur (${jc}) pada ${t.name}`,
+          query: `Ambil data terperinci dari kolom JSON ${jc} pada tabel ${t.name}`,
+          category: "json_extraction",
+          sqlSnippet: `SELECT ${displayCol}, \`${jc}\` FROM \`${t.name}\` ${nameCol ? `WHERE \`${nameCol}\` = '{SEARCH_VALUE}'` : ""} LIMIT 1;`,
+          description: `Mengambil data terstruktur dan sub-field dari kolom JSON ${jc}`,
+        });
+      }
+
+      if (metricCols.length > 0) {
+        const mCol = metricCols[0];
+        suggestedQueries.push({
+          title: `Agregasi Total & Rata-rata ${mCol} pada ${t.name}`,
+          query: `Hitung agregasi metrik ${mCol} dari tabel ${t.name}`,
+          category: "aggregation",
+          sqlSnippet: `SELECT COUNT(*) as total_records, SUM(\`${mCol}\`) as sum_${mCol}, AVG(\`${mCol}\`) as avg_${mCol} FROM \`${t.name}\`;`,
+          description: `Perhitungan total dan rata-rata metrik ${mCol}`,
+        });
+      }
     }
 
-    if (hasCV) {
-      suggestedQueries.push({
-        title: "Pencarian Profil CV (Persekutuan Komanditer)",
-        query: "Cari data pendaftaran CV berdasarkan nama badan usaha",
-        category: "legal_profiling",
-        sqlSnippet: "SELECT id_cv, nama, status, no_pendaftaran, npwp_no, modal, akta_no, created_at FROM ahu_cv WHERE nama = '{NAMA_CV}' LIMIT 1;",
-        description: "Pencarian data pendaftaran dan status CV di Kemenkumham",
-      });
-    }
-
-    if (hasPerson) {
-      suggestedQueries.push({
-        title: "Relasi Afiliasi & Jabatan Perorangan",
-        query: "Cari daftar perusahaan tempat seseorang menjabat sebagai direksi/pemegang saham",
-        category: "filtering",
-        sqlSnippet: "SELECT r.id, r.entity_name, r.position, r.is_shareholder, r.is_director, r.is_commissioner, r.shares, r.share_value, p.name as person_name FROM digi_person_company_relation r LEFT JOIN digi_person p ON r.person_key = p.person_key WHERE p.name LIKE '%{NAMA_TOKOH}%' LIMIT 10;",
-        description: "Join antara tabel relasi perusahaan dan identitas digital perorangan",
-      });
-    }
+    const allJsonColsCount = tables.reduce(
+      (acc, t) => acc + (t.columns || []).filter((c: any) => /(saham|kegiatan|pengurus|detail|items|meta|payload|config|json|data)/i.test(typeof c === "string" ? c : c?.name || "")).length,
+      0
+    );
 
     const reasoningSteps: OnboardingReasoningStep[] = [
       {
@@ -737,8 +749,8 @@ export class TypeSafeJevService {
         name: "Deep JSON Column Introspection & Query Optimization",
         agent: "DatabaseIntegrationAgent",
         decisionSpec: "db.json_structure.v1",
-        thought: `Memeriksa struktur kolom JSON dan semi-terstruktur (misal: 'pemegang_saham' pada 'tbl_perseroan'). Menemukan sub-field dewan direksi/komisaris/saham, memetakan query ekstraksi JSON_EXTRACT / JSON_UNQUOTE, serta menandai indeks B-Tree pada 'nama_perseroan' untuk pencarian latensi rendah (< 50ms).`,
-        findings: { indexedSearch: "nama_perseroan", hasPerseroan, hasCV },
+        thought: `Memeriksa struktur kolom JSON dan semi-terstruktur (${allJsonColsCount} kolom terdeteksi). Menemukan sub-field data, memetakan template query ekstraksi JSON, serta menandai indeks B-Tree pada kolom identifier untuk pencarian latensi rendah (< 50ms).`,
+        findings: { jsonColumnsDetected: allJsonColsCount, tablesInspected: tables.length },
       },
       {
         stage: 4,
@@ -769,7 +781,19 @@ export class TypeSafeJevService {
     const queryTerms = query.split(/[\s,._\-?!=+]+/g).filter((w) => w.length >= 2);
 
     const sources: SourceRosterEntry[] = state?.registered_sources || [];
-    const agents: AgentRosterEntry[] = state?.registered_agents || [];
+    let agents: AgentRosterEntry[] = state?.registered_agents || [];
+    if (agents.length === 0) {
+      agents = [
+        { id: "ag_data", name: "DataAgent", title: "Data Agent Specialist", capabilities: "Internal database analytics, entity legal profiling, tabular metrics aggregation, query data, omzet, penjualan, transaksi, angka" },
+        { id: "ag_know", name: "KnowledgeAgent", title: "Knowledge Agent Specialist", capabilities: "RAG semantic search, policy, sop, aturan, regulasi, dokumen internal, manual operasional" },
+        { id: "ag_research", name: "ResearchAgent", title: "Research Agent Specialist", capabilities: "External market intelligence, riset pasar, kompetitor, intelijen industri, tren eksternal" },
+        { id: "ag_analytics", name: "AnalyticsEngineerAgent", title: "Analytics Engineer Specialist", capabilities: "Analisis data lanjutan, visualisasi grafik, chart, diagram, pemodelan statistik" },
+        { id: "ag_pred", name: "PredictionAgent", title: "Prediction Agent Specialist", capabilities: "Prediksi masa depan, forecasting, tren masa depan, proyeksi forecast estimasi mendatang" },
+        { id: "ag_action", name: "ActionAgent", title: "Action Agent Specialist", capabilities: "Eksekusi mutasi data, automasi operasional, kirim email, kirim notifikasi, update tiket crm" },
+        { id: "ag_onb", name: "OnboardingOrchestrator", title: "Onboarding Orchestrator", capabilities: "Onboard data source baru, integrasi database postgres mysql, upload file ingestion" },
+        { id: "ag_builder", name: "AgentBuilder", title: "Agent Builder & System Composer", capabilities: "Buat agen baru, rancang agent, custom agent, compose agent" },
+      ];
+    }
 
     // Find best matching data source based on dynamic semantic profiles
     let bestSource: SourceRosterEntry | null = null;
@@ -861,7 +885,20 @@ export class TypeSafeJevService {
         let selected = options[0] || "direct";
 
         if (key === "route") {
-          if (highestSourceScore > 0 && bestSource) {
+          // Check explicit domain intent signals first
+          if (query.includes("riset") || query.includes("kompetitor") || (query.includes("pasar") && !query.includes("penjualan"))) {
+            selected = "research_agent";
+          } else if (query.includes("grafik") || query.includes("chart") || query.includes("visualisasi") || query.includes("diagram")) {
+            selected = "analytics_engineer_agent";
+          } else if (query.includes("prediksi") || query.includes("forecasting") || query.includes("ramalan") || query.includes("proyeksi")) {
+            selected = "prediction_agent";
+          } else if (query.includes("notifikasi") || query.includes("tiket") || query.includes("email") || query.includes("kirim") || query.includes("ubah tiket")) {
+            selected = "action_agent";
+          } else if (query.includes("onboard") || (query.includes("upload") && query.includes("data"))) {
+            selected = "onboarding_orchestrator";
+          } else if (query.includes("buat agen") || query.includes("bikin agen") || query.includes("agent builder")) {
+            selected = "agent_builder";
+          } else if (highestSourceScore > 0 && bestSource) {
             // Priority route driven by the matched source's semantic profile!
             if (bestSource.semanticProfile?.targetAgentAffinity) {
               selected = bestSource.semanticProfile.targetAgentAffinity;
@@ -1029,14 +1066,31 @@ export class TypeSafeJevService {
 
     let aggregation: "sum" | "avg" | "count" | "min" | "max" = "sum";
     const lowerQ = query.toLowerCase();
-    if (lowerQ.includes("rata-rata") || lowerQ.includes("average") || lowerQ.includes("mean")) {
-      aggregation = "avg";
-    } else if (lowerQ.includes("jumlah") || lowerQ.includes("count") || lowerQ.includes("berapa banyak")) {
-      aggregation = "count";
-    } else if (lowerQ.includes("maksimal") || lowerQ.includes("tertinggi") || lowerQ.includes("max")) {
-      aggregation = "max";
-    } else if (lowerQ.includes("minimal") || lowerQ.includes("terendah") || lowerQ.includes("min")) {
-      aggregation = "min";
+
+    const aggKeywords: Array<{ kw: string; agg: "sum" | "avg" | "count" | "min" | "max" }> = [
+      { kw: "total", agg: "sum" },
+      { kw: "sum", agg: "sum" },
+      { kw: "rata-rata", agg: "avg" },
+      { kw: "average", agg: "avg" },
+      { kw: "mean", agg: "avg" },
+      { kw: "jumlah", agg: "count" },
+      { kw: "count", agg: "count" },
+      { kw: "berapa banyak", agg: "count" },
+      { kw: "maksimal", agg: "max" },
+      { kw: "tertinggi", agg: "max" },
+      { kw: "max", agg: "max" },
+      { kw: "minimal", agg: "min" },
+      { kw: "terendah", agg: "min" },
+      { kw: "min", agg: "min" },
+    ];
+
+    let earliestIdx = Infinity;
+    for (const item of aggKeywords) {
+      const idx = lowerQ.indexOf(item.kw);
+      if (idx !== -1 && idx < earliestIdx) {
+        earliestIdx = idx;
+        aggregation = item.agg;
+      }
     }
 
     let groupBy: string | undefined;

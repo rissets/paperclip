@@ -142,6 +142,9 @@ export interface ColumnDefinition {
   max?: string | number | null;
   sampleValues: (string | number | boolean | null)[];
   role: "dimension" | "metric" | "identifier" | "timestamp" | "attribute";
+  semanticCategory?: "identity" | "location" | "financial" | "contact" | "temporal" | "status" | "classification" | "nested_structure" | "content" | "general";
+  humanLabel?: string;
+  isSearchable?: boolean;
   isPrimaryKey?: boolean;
   isForeignKey?: boolean;
   foreignKeyTarget?: { table: string; column: string };
@@ -169,6 +172,8 @@ export interface ClickhouseSchemaDefinition {
 export interface TableSemanticModel {
   tableName: string;
   description: string;
+  entities?: string[];
+  searchableColumns?: string[];
   dimensions: { name: string; description: string; sampleValues?: string[] }[];
   nestedDimensions?: NestedSemanticDimension[];
   metrics: { name: string; expression: string; description: string; aggregation: "sum" | "avg" | "count" | "min" | "max" }[];

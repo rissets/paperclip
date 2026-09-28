@@ -358,6 +358,53 @@ describe("TypeSafe Jev System One Decision Plane", () => {
     expect(formatted).toContain("Sumber Data Internal");
   });
 
+  it("formats generic entity profiles dynamically without hardcoded table names or prefixes", async () => {
+    const { DataAgentService } = await import("../services/data-agent.js");
+    const agent = new DataAgentService({} as any);
+
+    const mockRow = {
+      customer_id: "CUST-9821",
+      full_name: "Alexander Graham",
+      account_status: "active",
+      shipping_address: "142 Tech Valley Boulevard",
+      lifetime_spend: 45000000,
+      registered_at: "2024-01-15T00:00:00.000Z",
+      contact_email: "alexander@techvalley.io",
+      order_history: JSON.stringify([
+        { order_id: "ORD-001", item_name: "Ultra HD Monitor", quantity: 2, total_amount: 15000000 },
+        { order_id: "ORD-002", item_name: "Ergonomic Chair", quantity: 1, total_amount: 5000000 },
+      ]),
+    };
+
+    const mockColumns = [
+      { name: "customer_id", dataType: "string", role: "identifier", semanticCategory: "identity", humanLabel: "Customer ID" },
+      { name: "full_name", dataType: "string", role: "dimension", semanticCategory: "identity", humanLabel: "Full Name", isSearchable: true },
+      { name: "account_status", dataType: "string", role: "dimension", semanticCategory: "status", humanLabel: "Account Status" },
+      { name: "shipping_address", dataType: "string", role: "dimension", semanticCategory: "location", humanLabel: "Shipping Address" },
+      { name: "lifetime_spend", dataType: "number", role: "metric", semanticCategory: "financial", humanLabel: "Lifetime Spend" },
+      { name: "registered_at", dataType: "date", role: "timestamp", semanticCategory: "temporal", humanLabel: "Registration Date" },
+      { name: "contact_email", dataType: "string", role: "dimension", semanticCategory: "contact", humanLabel: "Contact Email" },
+      { name: "order_history", dataType: "json", role: "dimension", semanticCategory: "nested_structure", isJson: true, humanLabel: "Order History" },
+    ];
+
+    const formatted = agent.formatDynamicEntityProfile(
+      mockRow,
+      "customer_profiles",
+      "E-Commerce Production DB",
+      mockColumns as any,
+    );
+
+    expect(formatted).toContain("Alexander Graham");
+    expect(formatted).toContain("CUST-9821");
+    expect(formatted).toContain("ACTIVE");
+    expect(formatted).toContain("142 Tech Valley Boulevard");
+    expect(formatted).toContain("45.000.000");
+    expect(formatted).toContain("alexander@techvalley.io");
+    expect(formatted).toContain("Ultra HD Monitor");
+    expect(formatted).toContain("E-Commerce Production DB");
+    expect(formatted).toContain("customer_profiles");
+  });
+
   it("semantically routes multi-agent requests across all specialist agents", async () => {
     const { TypeSafeJevService } = await import("../services/typesafe-jev.js");
     const jev = new TypeSafeJevService();

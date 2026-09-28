@@ -196,6 +196,9 @@ export class DatabaseIntegrationService {
 
           const inspection = this.inspectColumn(colName, col.data_type, samples);
           const role = this.determineRole(colName, inspection.dataType, isPk, Boolean(colFk));
+          const semanticCategory = this.determineSemanticCategory(colName, inspection.dataType, inspection.isJson, isPk);
+          const humanLabel = this.humanizeLabel(colName);
+          const isSearchable = this.isSearchableColumn(colName, role, semanticCategory);
 
           let min: any = null;
           let max: any = null;
@@ -217,6 +220,9 @@ export class DatabaseIntegrationService {
             max,
             sampleValues: samples.slice(0, 5),
             role,
+            semanticCategory,
+            humanLabel,
+            isSearchable,
             isPrimaryKey: isPk,
             isForeignKey: Boolean(colFk),
             foreignKeyTarget: colFk
@@ -350,6 +356,9 @@ export class DatabaseIntegrationService {
 
           const inspection = this.inspectColumn(colName, rawDataType, samples);
           const role = this.determineRole(colName, inspection.dataType, isPk, Boolean(colFk));
+          const semanticCategory = this.determineSemanticCategory(colName, inspection.dataType, inspection.isJson, isPk);
+          const humanLabel = this.humanizeLabel(colName);
+          const isSearchable = this.isSearchableColumn(colName, role, semanticCategory);
 
           let min: any = null;
           let max: any = null;
@@ -371,6 +380,9 @@ export class DatabaseIntegrationService {
             max,
             sampleValues: samples.slice(0, 5),
             role,
+            semanticCategory,
+            humanLabel,
+            isSearchable,
             isPrimaryKey: isPk,
             isForeignKey: Boolean(colFk),
             foreignKeyTarget: colFk
@@ -455,13 +467,13 @@ export class DatabaseIntegrationService {
       finalSql += ` LIMIT ${limit}`;
     }
 
-    // Query Optimization for High-Volume Databases (AHU_DB tbl_perseroan / ahu_cv):
-    // In MariaDB, B-Tree indexes on nama_perseroan / nama_cv CANNOT be used with leading wildcards (e.g. LIKE '%NAMA%').
-    // Doing a full table scan on 1.6+ million rows across remote connections causes network hangs and timeouts.
-    // If a query contains `nama_perseroan LIKE '%XYZ%'`, optimize by removing the leading '%' so B-Tree index is utilized!
+    // Query Optimization for High-Volume Databases:
+    // In MariaDB / MySQL, B-Tree indexes CANNOT be used with leading wildcards (e.g. LIKE '%VALUE%').
+    // Doing a full table scan on millions of rows across remote connections causes network hangs and timeouts.
+    // If a query contains `col LIKE '%XYZ%'`, optimize by removing the leading '%' so B-Tree index prefix scan is utilized!
     if (config.type === "mariadb" || config.type === "mysql") {
       finalSql = finalSql.replace(
-        /(nama_perseroan|nama_cv|nama_badan_hukum)\s+LIKE\s+['"]%([^%'"\s][^'"]*?)['"]/gi,
+        /([`"\w]+)\s+LIKE\s+['"]%([^%'"\s][^'"]*?)['"]/gi,
         (_match, col, term) => {
           return `${col} LIKE '${term}'`;
         }
@@ -803,6 +815,90 @@ export class DatabaseIntegrationService {
     return "dimension";
   }
 
+  public determineSemanticCategory(
+    colName: string,
+    dataType: string,
+    isJson: boolean,
+    isPk: boolean,
+  ): "identity" | "location" | "financial" | "contact" | "temporal" | "status" | "classification" | "nested_structure" | "content" | "general" {
+    if (isJson || dataType === "json") return "nested_structure";
+    const lower = colName.toLowerCase();
+
+    if (
+      isPk ||
+      /(^id$|_id$|^id_|nomor|no_|sk_|code|kode|sku|npwp|nik|reg|uuid|passport)/i.test(lower) ||
+      /(^nama$|^name$|nama_|name_|_name|_nama|title|judul)/i.test(lower)
+    ) {
+      return "identity";
+    }
+    if (/(status|state|kondisi|active|aktif|flag|is_|enabled|valid)/i.test(lower)) {
+      return "status";
+    }
+    if (
+      /(alamat|address|street|jalan|kelurahan|desa|kecamatan|kabupaten|kota|city|provinsi|province|state|country|negara|pos|zip|postal|region|wilayah|latitude|longitude|lat|lon|lng)/i.test(
+        lower,
+      )
+    ) {
+      return "location";
+    }
+    if (
+      /(modal|harga|price|nilai|total|amount|nominal|biaya|cost|omset|pendapatan|revenue|saldo|fee|tax|pajak|tarif|disetor|balance|salary|gaji|uang)/i.test(
+        lower,
+      )
+    ) {
+      return "financial";
+    }
+    if (/(email|mail|phone|telepon|telp|hp|handphone|fax|mobile|kontak|contact|website|url)/i.test(lower)) {
+      return "contact";
+    }
+    if (
+      dataType === "date" ||
+      /(tanggal|date|tgl|created|updated|waktu|time|tahun|year|bulan|month|period|periode|timestamp)/i.test(lower)
+    ) {
+      return "temporal";
+    }
+    if (
+      /(jenis|tipe|type|category|kategori|kelompok|group|divisi|division|departemen|department|sektor|sector|role|jabatan|kbli)/i.test(
+        lower,
+      )
+    ) {
+      return "classification";
+    }
+    if (/(keterangan|deskripsi|description|catatan|notes|remark|memo|detail|bio|summary)/i.test(lower)) {
+      return "content";
+    }
+    if (dataType === "number") return "financial";
+    return "general";
+  }
+
+  public humanizeLabel(name: string): string {
+    return name
+      .replace(/_/g, " ")
+      .replace(/([a-z])([A-Z])/g, "$1 $2")
+      .split(" ")
+      .map((word) => {
+        const lower = word.toLowerCase();
+        if (lower === "sk") return "SK";
+        if (lower === "npwp") return "NPWP";
+        if (lower === "id") return "ID";
+        if (lower === "cv") return "CV";
+        if (lower === "pt") return "PT";
+        if (lower === "kbli") return "KBLI";
+        if (lower === "tgl") return "Tanggal";
+        if (lower === "no") return "Nomor";
+        if (lower === "pk") return "PK";
+        if (lower === "fk") return "FK";
+        return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+      })
+      .join(" ");
+  }
+
+  public isSearchableColumn(colName: string, role: string, semanticCategory: string): boolean {
+    if (role === "identifier") return true;
+    if (semanticCategory === "identity") return true;
+    return /^(nama_|nama$|name$|_name|title|judul|kode_|code|label)/i.test(colName);
+  }
+
   private buildSemanticModel(
     tableName: string,
     columns: ColumnDefinition[],
@@ -968,75 +1064,96 @@ export class DatabaseIntegrationService {
       }
     }
 
-    // Generate tailored suggested queries for the table
+    // Generate dynamically tailored suggested queries based purely on inspected columns and JSON structures
     const suggestedQueries: SuggestedQueryTemplate[] = [];
-    const tblLower = tableName.toLowerCase();
 
-    if (tblLower === "tbl_perseroan") {
-      suggestedQueries.push(
-        {
-          title: "Profil Legalitas Perseroan Terbatas (PT)",
-          query: "Cari profil legalitas, SK Menkumham, dan status keaktifan PT berdasarkan nama",
-          category: "legal_profiling",
-          sqlSnippet: "SELECT id_perseroan, nama_perseroan, nomor_sk, tanggal_sk, status_perseroan, jenis_perseroan, tahun_pendirian, modal_dasar, modal_disetorkan, npwp_perseroan, alamat_perseroan, nama_notaris FROM tbl_perseroan WHERE nama_perseroan = '{NAMA_PT}' LIMIT 1;",
-          description: "Pencarian exact match cepat pada kolom nama_perseroan yang berindeks",
-        },
-        {
-          title: "Struktur Pengurus & Pemegang Saham (JSON)",
-          query: "Dapatkan daftar pemegang saham, direktur, dan komisaris dari kolom JSON pemegang_saham",
-          category: "json_extraction",
-          sqlSnippet: "SELECT id_perseroan, nama_perseroan, pemegang_saham FROM tbl_perseroan WHERE nama_perseroan = '{NAMA_PT}' LIMIT 1;",
-          description: "Mengambil data dewan direksi, komisaris, persentase saham dari kolom JSON pemegang_saham",
-        },
-        {
-          title: "Pencarian Nama Perusahaan Berdasarkan Awalan (Prefix Match)",
-          query: "Daftar perusahaan PT yang namanya diawali kata tertentu",
-          category: "filtering",
-          sqlSnippet: "SELECT id_perseroan, nama_perseroan, nomor_sk, status_perseroan, tahun_pendirian, provinsi_nama_perseroan FROM tbl_perseroan WHERE nama_perseroan LIKE '{PREFIX}%' LIMIT 10;",
-          description: "Pencarian cepat menggunakan index B-Tree pada nama_perseroan",
-        },
-      );
-    } else if (tblLower === "ahu_cv") {
+    // Identify key columns dynamically from schema inspection
+    const idCol = columns.find((c) => c.isPrimaryKey || c.name.toLowerCase() === "id" || c.name.toLowerCase().startsWith("id_"))?.name || primaryKey;
+    const nameCol = columns.find((c) => /^(nama_|nama$|name$|_name|title|judul|kode_|label)/i.test(c.name))?.name;
+    const jsonCols = columns.filter((c) => c.isJson);
+    const metricCols = columns.filter((c) => ["number", "integer", "bigint", "float", "double", "decimal"].includes(c.dataType.toLowerCase()));
+    const statusCol = columns.find((c) => /^(status|state|kondisi|aktif)/i.test(c.name))?.name;
+
+    // 1. Dynamic Search / Lookup Queries
+    if (nameCol) {
       suggestedQueries.push({
-        title: "Pencarian Profil CV (Persekutuan Komanditer)",
-        query: "Cari data pendaftaran CV berdasarkan nama badan usaha",
-        category: "legal_profiling",
-        sqlSnippet: "SELECT id_cv, nama, status, no_pendaftaran, npwp_no, modal, akta_no, created_at FROM ahu_cv WHERE nama = '{NAMA_CV}' LIMIT 1;",
-        description: "Pencarian data pendaftaran dan status CV di Kemenkumham",
-      });
-    } else if (tblLower === "digi_person_company_relation") {
-      suggestedQueries.push({
-        title: "Relasi Afiliasi & Jabatan Perorangan",
-        query: "Cari daftar perusahaan tempat seseorang menjabat sebagai direksi/pemegang saham",
+        title: `Pencarian Entitas '${tableName}' Berdasarkan ${nameCol} (Exact Match)`,
+        query: `Cari data lengkap dalam tabel ${tableName} berdasarkan ${nameCol}`,
         category: "filtering",
-        sqlSnippet: "SELECT r.id, r.entity_name, r.position, r.is_shareholder, r.is_director, r.is_commissioner, r.shares, r.share_value, p.name as person_name FROM digi_person_company_relation r LEFT JOIN digi_person p ON r.person_key = p.person_key WHERE p.name LIKE '%{NAMA_TOKOH}%' LIMIT 10;",
-        description: "Join antara tabel relasi perusahaan dan identitas digital perorangan",
+        sqlSnippet: `SELECT * FROM \`${tableName}\` WHERE \`${nameCol}\` = '{SEARCH_VALUE}' LIMIT 1;`,
+        description: `Pencarian exact match cepat pada kolom ${nameCol}`,
       });
-    } else {
-      if (primaryKey) {
-        suggestedQueries.push({
-          title: `Lookup ${tableName} by Primary Key`,
-          query: `Cari record ${tableName} berdasarkan ID`,
-          category: "filtering",
-          sqlSnippet: `SELECT * FROM \`${tableName}\` WHERE \`${primaryKey}\` = {ID} LIMIT 1;`,
-          description: `Direct primary key lookup on ${tableName}`,
-        });
-      }
-      if (metrics.length > 0) {
-        const topMetric = metrics[0];
-        suggestedQueries.push({
-          title: `Agregasi Total ${topMetric.name}`,
-          query: `Hitung total nilai ${topMetric.name} pada tabel ${tableName}`,
-          category: "aggregation",
-          sqlSnippet: `SELECT ${topMetric.expression} as total_${topMetric.name} FROM \`${tableName}\`;`,
-          description: `Global aggregation of ${topMetric.name}`,
-        });
-      }
+
+      suggestedQueries.push({
+        title: `Pencarian Awalan '${tableName}' (Prefix Match)`,
+        query: `Daftar record dalam tabel ${tableName} dengan awalan ${nameCol} tertentu`,
+        category: "filtering",
+        sqlSnippet: `SELECT * FROM \`${tableName}\` WHERE \`${nameCol}\` LIKE '{PREFIX}%' LIMIT 10;`,
+        description: `Pencarian prefix cepat memanfaatkan indeks pada ${nameCol}`,
+      });
+    } else if (idCol) {
+      suggestedQueries.push({
+        title: `Lookup ${tableName} Berdasarkan ${idCol}`,
+        query: `Cari record ${tableName} berdasarkan ID`,
+        category: "filtering",
+        sqlSnippet: `SELECT * FROM \`${tableName}\` WHERE \`${idCol}\` = '{ID_VALUE}' LIMIT 1;`,
+        description: `Direct primary key lookup pada ${tableName}`,
+      });
     }
+
+    // 2. Dynamic JSON Extraction Queries
+    for (const jc of jsonCols) {
+      const displayCol = nameCol ? `\`${nameCol}\`` : (idCol ? `\`${idCol}\`` : "*");
+      suggestedQueries.push({
+        title: `Ekstraksi Kolom Terstruktur (${jc.name}) pada ${tableName}`,
+        query: `Ambil data terperinci dari kolom JSON ${jc.name} pada tabel ${tableName}`,
+        category: "json_extraction",
+        sqlSnippet: `SELECT ${displayCol}, \`${jc.name}\` FROM \`${tableName}\` ${nameCol ? `WHERE \`${nameCol}\` = '{SEARCH_VALUE}'` : ""} LIMIT 1;`,
+        description: `Mengambil data terstruktur dan sub-field dari kolom JSON ${jc.name}`,
+      });
+    }
+
+    // 3. Dynamic Metric Aggregation
+    if (metricCols.length > 0) {
+      const mCol = metricCols[0].name;
+      suggestedQueries.push({
+        title: `Total & Rata-rata ${mCol} pada ${tableName}`,
+        query: `Hitung agregasi metrik ${mCol} dari tabel ${tableName}`,
+        category: "aggregation",
+        sqlSnippet: `SELECT COUNT(*) as total_records, SUM(\`${mCol}\`) as sum_${mCol}, AVG(\`${mCol}\`) as avg_${mCol} FROM \`${tableName}\`;`,
+        description: `Perhitungan total dan rata-rata metrik ${mCol}`,
+      });
+    }
+
+    // 4. Dynamic Categorical Grouping
+    if (statusCol) {
+      suggestedQueries.push({
+        title: `Distribusi Berdasarkan ${statusCol} pada ${tableName}`,
+        query: `Berapa banyak record untuk setiap status ${statusCol} di tabel ${tableName}?`,
+        category: "aggregation",
+        sqlSnippet: `SELECT \`${statusCol}\`, COUNT(*) as jumlah FROM \`${tableName}\` GROUP BY \`${statusCol}\` ORDER BY jumlah DESC;`,
+        description: `Analisis pengelompokan frekuensi berdasarkan ${statusCol}`,
+      });
+    }
+
+    const cleanTableName = tableName.replace(/^(tbl_|table_|tb_|m_|t_)/i, "").toLowerCase();
+    const tableWords = cleanTableName.split(/[\s_\-]+/).filter((w) => w.length > 2);
+    const entities = Array.from(
+      new Set([
+        this.humanizeLabel(cleanTableName),
+        ...tableWords.map((w) => this.humanizeLabel(w)),
+      ]),
+    );
+
+    const searchableColumns = columns
+      .filter((c) => c.isSearchable || c.role === "identifier" || c.semanticCategory === "identity")
+      .map((c) => c.name);
 
     return {
       tableName,
       description: `External database table '${tableName}' with ${columns.length} columns, ${relations.length} relationships, and ${nestedDimensions.length} nested JSON attributes.`,
+      entities,
+      searchableColumns,
       dimensions,
       nestedDimensions,
       metrics,
