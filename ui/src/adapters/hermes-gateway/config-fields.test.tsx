@@ -55,6 +55,7 @@ describe("HermesGatewayConfigFields", () => {
       config: {
         apiBaseUrl: "http://127.0.0.1:8642",
         apiKey: { type: "secret_ref", secretId: "11111111-1111-4111-8111-111111111111", version: "latest" },
+        provider: "openai",
         paperclipApiUrl: "http://127.0.0.1:3100",
         sessionKeyStrategy: "issue",
       },
@@ -64,6 +65,7 @@ describe("HermesGatewayConfigFields", () => {
     const text = result.container.textContent ?? "";
     expect(text).toContain("API base URL");
     expect(text).toContain("API key");
+    expect(text).toContain("Provider ID");
     expect(text).toContain("Paperclip API URL");
     expect(text).toContain("Session key strategy");
     expect(text).toContain("Timeout seconds");
@@ -74,6 +76,7 @@ describe("HermesGatewayConfigFields", () => {
 
     const urlInput = result.container.querySelector<HTMLInputElement>('input[value="http://127.0.0.1:8642"]');
     expect(urlInput).toBeTruthy();
+    expect(result.container.querySelector<HTMLInputElement>('input[value="openai"]')).toBeTruthy();
 
     const apiKeyInput = Array.from(result.container.querySelectorAll<HTMLInputElement>('input[type="password"]'))
       .find((input) => input.placeholder.includes("Stored secret"));

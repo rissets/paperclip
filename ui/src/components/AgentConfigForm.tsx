@@ -1715,7 +1715,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
           )}
 
           {renderAdapterFields("adapter")}
-          {isLocal && (<>
+          {(isLocal || adapterType === "hermes_gateway") && (<>
               <ModelDropdown
                 models={models}
                 value={currentModelId}
@@ -1739,14 +1739,19 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                 }}
                 open={modelOpen}
                 onOpenChange={setModelOpen}
-                defaultLabel={adapterType === "claude_local" ? `Default (${DEFAULT_CLAUDE_LOCAL_MODEL})` : undefined}
+                defaultLabel={adapterType === "hermes_gateway"
+                  ? "Default (Hermes Gateway)"
+                  : adapterType === "claude_local" ? `Default (${DEFAULT_CLAUDE_LOCAL_MODEL})` : undefined}
+                hint={adapterType === "hermes_gateway"
+                  ? "Optional model ID sent to Hermes with every run. Default uses the model configured on the Hermes Gateway."
+                  : undefined}
                 allowDefault={adapterType !== "opencode_local" && adapterType !== "pi_local" && adapterType !== "paperclip_runner"}
                 required={adapterType === "opencode_local" || adapterType === "pi_local"}
                 groupByProvider={adapterType === "opencode_local" || adapterType === "pi_local"}
                 creatable
                 detectedModel={detectedModel}
                 detectedModelCandidates={[]}
-                onDetectModel={adapterType === "opencode_local" || adapterType === "paperclip_runner"
+                onDetectModel={adapterType === "opencode_local" || adapterType === "paperclip_runner" || adapterType === "hermes_gateway"
                   ? undefined
                   : async () => {
                       const result = await refetchDetectedModel();
@@ -3692,6 +3697,7 @@ function ExperimentalBadge() {
 export function ModelDropdown({
   models,
   value,
+  hint,
   onChange,
   open,
   onOpenChange,
@@ -3710,6 +3716,7 @@ export function ModelDropdown({
 }: {
   models: AdapterModel[];
   value: string;
+  hint?: string;
   onChange: (id: string) => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -3798,7 +3805,7 @@ export function ModelDropdown({
   }
 
   return (
-    <Field label="Model" hint={help.model}>
+    <Field label="Model" hint={hint ?? help.model}>
       <Popover
         open={open}
         onOpenChange={(nextOpen) => {

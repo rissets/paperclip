@@ -130,6 +130,7 @@ export function HermesGatewayConfigFields({
   };
 
   const apiBaseUrl = String(readValue("apiBaseUrl", "") ?? "");
+  const provider = String(readValue("provider", "") ?? "");
   const paperclipApiUrl = String(readValue("paperclipApiUrl", "") ?? "");
   const sessionKeyStrategy = String(readValue("sessionKeyStrategy", DEFAULT_SESSION_KEY_STRATEGY) ?? DEFAULT_SESSION_KEY_STRATEGY);
   const timeoutSec = Number(readValue("timeoutSec", DEFAULT_TIMEOUT_SEC) ?? DEFAULT_TIMEOUT_SEC);
@@ -162,6 +163,19 @@ export function HermesGatewayConfigFields({
         placeholder="Hermes API_SERVER_KEY, not PAPERCLIP_API_KEY"
         stored={!isCreate && hasStoredApiKey && !editApiKeyValue}
       />
+
+      <Field
+        label="Provider ID"
+        hint="Optional Hermes provider id paired with the model selected above. Leave blank when Hermes can infer it."
+      >
+        <DraftInput
+          value={provider}
+          onCommit={(v) => writeValue("provider", v || undefined)}
+          immediate
+          className={inputClass}
+          placeholder="Hermes provider id"
+        />
+      </Field>
 
       <Field
         label="Paperclip API URL"

@@ -1,4 +1,13 @@
-export type DataSourceType = "csv" | "excel" | "rag_document" | "postgres" | "mariadb" | "mysql";
+export type DataSourceType =
+  | "csv"
+  | "excel"
+  | "rag_document"
+  | "postgres"
+  | "mariadb"
+  | "mysql"
+  | "api_rest"
+  | "mqtt_iot"
+  | "cctv_feed";
 export type DataSourceStatus = "onboarding" | "processing" | "ready" | "error";
 
 export interface DatabaseConnectionConfig {
@@ -11,6 +20,64 @@ export interface DatabaseConnectionConfig {
   ssl?: boolean;
   allowedSchemas?: string[];
   allowedTables?: string[];
+}
+
+export interface ApiConnectionConfig {
+  baseUrl: string;
+  authType?: "bearer" | "basic" | "api_key" | "none";
+  apiKey?: string;
+  headerName?: string;
+  headers?: Record<string, string>;
+  openApiUrl?: string;
+}
+
+export interface IotConnectionConfig {
+  brokerUrl: string;
+  clientId?: string;
+  username?: string;
+  password?: string;
+  topics: string[];
+}
+
+export interface CctvConnectionConfig {
+  streamUrl: string;
+  frigateUrl?: string;
+  cameraName: string;
+  location?: string;
+}
+
+export interface SemanticMetric {
+  name: string;
+  column?: string;
+  expression?: string;
+  aggregation: "sum" | "avg" | "count" | "min" | "max";
+  format?: string;
+  description?: string;
+  synonyms?: string[];
+}
+
+export interface SemanticDimension {
+  name: string;
+  column?: string;
+  type?: string;
+  description?: string;
+  sampleValues?: string[];
+}
+
+export interface DataSourceSemanticProfile {
+  version: string;
+  onboardedBy: string;
+  decisionSpecRefs: string[];
+  domain?: string;
+  targetAgentAffinity?: string;
+  entities: string[];
+  metrics?: SemanticMetric[];
+  dimensions?: SemanticDimension[];
+  primaryTopics?: string[];
+  tableRoles?: Record<string, string>;
+  relationships?: TableRelation[];
+  summary: string;
+  onboardedAt: string;
 }
 
 export interface DatabaseConnectionTestResult {
@@ -103,6 +170,7 @@ export interface DataSource {
   mimeType: string | null;
   storagePath: string | null;
   metadata: Record<string, unknown> | null;
+  semanticProfile?: DataSourceSemanticProfile | null;
   tables?: DataSourceTable[];
   chunks?: DataSourceChunk[];
   createdAt: string | Date;

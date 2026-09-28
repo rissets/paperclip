@@ -42,6 +42,7 @@ export class DataSourcesService {
         ...ds,
         sourceType: ds.sourceType as any,
         status: ds.status as any,
+        semanticProfile: (ds.metadata as any)?.semanticProfile || null,
         tables: tables as any[],
       });
     }
@@ -76,9 +77,136 @@ export class DataSourcesService {
       ...ds,
       sourceType: ds.sourceType as any,
       status: ds.status as any,
+      semanticProfile: (ds.metadata as any)?.semanticProfile || null,
       tables: tables as any[],
       chunks: chunks as any[],
     };
+  }
+
+  /**
+   * Automatically backfill missing semantic profiles for existing data sources
+   * and ensure the full 17-agent enterprise roster is registered.
+   */
+  async backfillSemanticProfiles(companyId: string): Promise<number> {
+    const { EnterpriseAgentRosterService } = await import("./enterprise-agent-roster.js");
+    const rosterService = new EnterpriseAgentRosterService(this.db);
+    await rosterService.ensureEnterpriseRoster(companyId);
+
+    const list = await this.db
+      .select()
+      .from(dataSources)
+      .where(eq(dataSources.companyId, companyId));
+
+    let updatedCount = 0;
+    const { TypeSafeJevService } = await import("./typesafe-jev.js");
+    const jev = new TypeSafeJevService();
+
+    for (const ds of list) {
+      const existingProfile = (ds.metadata as any)?.semanticProfile;
+      if (existingProfile) continue;
+
+      if (ds.sourceType === "rag_document") {
+        const chunks = await this.db
+          .select({ content: dataSourceChunks.content })
+          .from(dataSourceChunks)
+          .where(eq(dataSourceChunks.dataSourceId, ds.id))
+          .limit(3);
+
+        const sampleText = chunks.map((c) => c.content).join("\n\n") || ds.name;
+        const domainResult = await jev.evaluateDocumentDomain(ds.name, sampleText);
+
+        const profile = {
+          version: "1.0.0",
+          onboardedBy: "KnowledgeIngestionAgent",
+          decisionSpecRefs: ["rag.domain_classify.v1", "rag.target_agent_affinity.v1", "rag.passage_relevance.v1"],
+          domain: domainResult.domain,
+          targetAgentAffinity: domainResult.targetAgentAffinity,
+          entities: domainResult.entities,
+          primaryTopics: domainResult.primaryTopics,
+          summary: domainResult.summary,
+          onboardedAt: new Date().toISOString(),
+        };
+
+        await this.db
+          .update(dataSources)
+          .set({
+            metadata: {
+              ...((ds.metadata as any) || {}),
+              onboardedBy: "KnowledgeIngestionAgent",
+              semanticProfile: profile,
+            },
+            updatedAt: new Date(),
+          })
+          .where(eq(dataSources.id, ds.id));
+
+        updatedCount++;
+      } else if (ds.sourceType === "postgres" || ds.sourceType === "mariadb" || ds.sourceType === "mysql") {
+        const tables = await this.db
+          .select()
+          .from(dataSourceTables)
+          .where(eq(dataSourceTables.dataSourceId, ds.id));
+
+        const tableNames = tables.map((t) => t.tableName);
+        const profile = {
+          version: "1.0.0",
+          onboardedBy: "DatabaseIntegrationAgent",
+          decisionSpecRefs: ["db.table_role.v1", "db.join_candidates.v1"],
+          domain: "relational_database",
+          targetAgentAffinity: "data_agent",
+          entities: tableNames.length > 0 ? tableNames : [ds.name],
+          tableRoles: Object.fromEntries(tableNames.map((n) => [n, "dimension_table"])),
+          summary: `Database ${ds.sourceType} dengan tabel [${tableNames.join(", ")}].`,
+          onboardedAt: new Date().toISOString(),
+        };
+
+        await this.db
+          .update(dataSources)
+          .set({
+            metadata: {
+              ...((ds.metadata as any) || {}),
+              onboardedBy: "DatabaseIntegrationAgent",
+              semanticProfile: profile,
+            },
+            updatedAt: new Date(),
+          })
+          .where(eq(dataSources.id, ds.id));
+
+        updatedCount++;
+      } else if (ds.sourceType === "csv" || ds.sourceType === "excel") {
+        const tables = await this.db
+          .select()
+          .from(dataSourceTables)
+          .where(eq(dataSourceTables.dataSourceId, ds.id));
+
+        const tableNames = tables.map((t) => t.tableName);
+        const profile = {
+          version: "1.0.0",
+          onboardedBy: "StructuredIngestionAgent",
+          decisionSpecRefs: ["struct.column_role.v1", "struct.entity_metric_mapping.v1", "struct.sync_strategy.v1"],
+          domain: ds.name,
+          targetAgentAffinity: "data_agent",
+          entities: tableNames.length > 0 ? tableNames : [ds.name],
+          summary: `Dataset terstruktur berisikan tabel [${tableNames.join(", ")}].`,
+          onboardedAt: new Date().toISOString(),
+        };
+
+        await this.db
+          .update(dataSources)
+          .set({
+            metadata: {
+              ...((ds.metadata as any) || {}),
+              onboardedBy: "StructuredIngestionAgent",
+              semanticProfile: profile,
+            },
+            updatedAt: new Date(),
+          })
+          .where(eq(dataSources.id, ds.id));
+
+        updatedCount++;
+      }
+    }
+
+    return updatedCount;
   }
 
   /**

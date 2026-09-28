@@ -307,6 +307,39 @@ describe("HTTP logger redaction", () => {
     });
   });
 
+  it("keeps Composio reconnect credentials out of error responses and logs", async () => {
+    const apiKey = "composio-reconnect-key-canary-9f5a";
+    const chunks: string[] = [];
+    const stream = new Writable({
+      write(chunk, _encoding, callback) {
+        chunks.push(chunk.toString());
+        callback();
+      },
+    });
+    const app = express();
+    app.use(express.json());
+    app.use(
+      createHttpLogger(pino({ redact: [...HTTP_LOG_REDACT_PATHS] }, stream)),
+    );
+    app.post("/api/tool-connections/:connectionId/reconnect", (req, _res, next) => {
+      next(new HttpError(502, `provider rejected ${apiKey}`, { reqBody: req.body }));
+    });
+    app.use(errorHandler);
+
+    const response = await request(app)
+      .post("/api/tool-connections/connection-1/reconnect")
+      .send({ credentialValues: { "credentials.authorization": apiKey } });
+
+    expect(response.status).toBe(502);
+    expect(JSON.stringify(response.body)).not.toContain(apiKey);
+    const output = chunks.join("");
+    expect(output).not.toContain(apiKey);
+    const log = JSON.parse(output.trim());
+    expect(log.reqBody).toEqual({ credentialValues: "[Redacted]" });
+    expect(log.errorContext).toEqual({ name: "Error" });
+    expect(log.err.message).toBe("Secret-sensitive request failed");
+  });
+
   it("defines the HTTP auth and cookie header paths that must be redacted", () => {
     expect(HTTP_LOG_REDACT_PATHS).toContain("req.headers.authorization");
     expect(HTTP_LOG_REDACT_PATHS).toContain("req.headers.cookie");
@@ -322,7 +355,11 @@ describe("HTTP logger redaction", () => {
       'req.headers["x-telegram-bot-api-secret-token"]',
     );
     expect(HTTP_LOG_REDACT_PATHS).toContain("reqBody.credentials");
+    expect(HTTP_LOG_REDACT_PATHS).toContain("reqBody.credentialValues");
     expect(HTTP_LOG_REDACT_PATHS).toContain("errorContext.details.credentials");
+    expect(HTTP_LOG_REDACT_PATHS).toContain(
+      "errorContext.details.reqBody.credentialValues",
+    );
   });
 
   it("redacts request and response header secrets from pino-http output", async () => {

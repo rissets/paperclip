@@ -331,7 +331,8 @@ describe("New agent setup", () => {
   });
   it("configures Hermes Gateway URL and its top-level secret reference", async () => {
     await render("hermes_gateway");
-    expect(container.querySelector('[aria-label="Model"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Model"]')).toBeTruthy();
+    await fill("Model", "openai/gpt-4.1");
     await fill("Hermes API base URL", "https://hermes.example.com");
     await fill("API_SERVER_KEY", "hermes-test-key");
     await click("Finish setup");
@@ -339,7 +340,9 @@ describe("New agent setup", () => {
       adapterConfig: { apiBaseUrl: "https://hermes.example.com" },
       testCredentials: { API_SERVER_KEY: "hermes-test-key" },
     });
+    expect(api.testEnvironment.mock.calls[0][2].adapterConfig.model).toBe("openai/gpt-4.1");
     expect(api.hire.mock.calls[0][1].adapterConfig.apiKey).toMatchObject({ type: "secret_ref", secretId: "org-secret-1" });
+    expect(api.hire.mock.calls[0][1].adapterConfig.model).toBe("openai/gpt-4.1");
     expect(JSON.stringify(api.hire.mock.calls)).not.toContain("hermes-test-key");
   });
   it("uses the shared Grok connection flow and hides ignored Kimi and OpenCode effort controls", async () => {

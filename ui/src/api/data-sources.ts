@@ -108,4 +108,41 @@ export const dataSourcesApi = {
       `/companies/${encodeURIComponent(companyId)}/data-sources/${encodeURIComponent(dataSourceId)}/query-sql`,
       { sql, limit },
     ),
+
+  connectApi: (
+    companyId: string,
+    config: any,
+    options: { name?: string; description?: string } = {},
+  ) =>
+    api.post<DataSource>(
+      `/companies/${encodeURIComponent(companyId)}/data-sources/connect-api`,
+      { config, ...options },
+    ),
+
+  connectIot: (
+    companyId: string,
+    config: any,
+    options: { name?: string; description?: string } = {},
+  ) =>
+    api.post<DataSource>(
+      `/companies/${encodeURIComponent(companyId)}/data-sources/connect-iot`,
+      { config, ...options },
+    ),
+
+  connectCctv: (
+    companyId: string,
+    config: any,
+    options: { name?: string; description?: string } = {},
+  ) =>
+    api.post<DataSource>(
+      `/companies/${encodeURIComponent(companyId)}/data-sources/connect-cctv`,
+      { config, ...options },
+    ),
+
+  backfillProfiles: (companyId: string) =>
+    api.post<{ success: boolean; updatedCount: number }>(
+      `/companies/${encodeURIComponent(companyId)}/data-sources/backfill-profiles`,
+      {},
+    ),
 };
+

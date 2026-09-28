@@ -16,6 +16,12 @@ import {
   GitBranch,
   Key,
   Terminal,
+  Bot,
+  Globe,
+  Radio,
+  Video,
+  Workflow,
+  Target,
 } from "lucide-react";
 import { useCompany } from "@/context/CompanyContext";
 import { dataSourcesApi } from "@/api/data-sources";
@@ -209,6 +215,32 @@ export function DataSourceDetail() {
                   </>
                 )}
               </p>
+
+              {/* JEV Semantic Profile Header Tags */}
+              {ds.semanticProfile && (
+                <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                  <span className="inline-flex items-center gap-1 rounded-md bg-primary/10 px-2 py-0.5 text-xs font-semibold text-primary border border-primary/20">
+                    <Bot className="h-3 w-3" />
+                    Onboarded by {ds.semanticProfile.onboardedBy || "Onboarding Orchestrator"}
+                  </span>
+                  {ds.semanticProfile.domain && (
+                    <span className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-0.5 text-xs font-mono uppercase text-foreground border border-border">
+                      Domain: {ds.semanticProfile.domain}
+                    </span>
+                  )}
+                  {ds.semanticProfile.targetAgentAffinity && (
+                    <span className="inline-flex items-center gap-1 rounded-md bg-secondary/80 px-2 py-0.5 text-xs font-medium text-secondary-foreground border border-border">
+                      <Target className="h-3 w-3 text-primary" />
+                      Agent Affinity: {ds.semanticProfile.targetAgentAffinity}
+                    </span>
+                  )}
+                  {ds.semanticProfile.decisionSpecRefs && (
+                    <span className="inline-flex items-center gap-1 rounded-md bg-card px-2 py-0.5 text-xs font-mono text-muted-foreground border border-border">
+                      JEV Specs: {ds.semanticProfile.decisionSpecRefs.join(", ")}
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -291,7 +323,21 @@ export function DataSourceDetail() {
             >
               Aggregator Tester
             </button>
+            <button
+              onClick={() => setActiveTab("jev")}
+              className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors whitespace-nowrap flex items-center gap-1.5 ${
+                activeTab === "jev"
+                  ? "bg-primary text-primary-foreground font-semibold"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <Sparkles className="h-4 w-4" />
+              JEV Semantic Profile & DecisionSpecs
+            </button>
           </div>
+
+          {/* Tab: JEV Semantic Profile */}
+          {activeTab === "jev" && <JevSemanticProfileView ds={ds} />}
 
           {/* Tab 1: Schema & Profiling */}
           {activeTab === "schema" && activeTable && (
@@ -822,56 +868,270 @@ export function DataSourceDetail() {
       {/* RAG Knowledge Document View */}
       {ds.sourceType === "rag_document" && (
         <div className="space-y-6">
-          <div className="rounded-xl border border-border bg-card p-5 shadow-sm space-y-4">
-            <h3 className="font-semibold text-sm text-foreground flex items-center gap-2">
-              <Sparkles className="h-4 w-4 text-primary" /> Hybrid Vector & Lexical RAG Search
-            </h3>
-            <p className="text-xs text-muted-foreground">
-              Test semantic search across chunked passages in this document as performed by KnowledgeAgent.
-            </p>
+          <div className="flex items-center gap-2 border-b border-border pb-2 overflow-x-auto">
+            <button
+              onClick={() => setActiveTab("rag-search")}
+              className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors whitespace-nowrap ${
+                activeTab !== "jev" ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              Hybrid RAG Search Tester
+            </button>
+            <button
+              onClick={() => setActiveTab("jev")}
+              className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors whitespace-nowrap flex items-center gap-1.5 ${
+                activeTab === "jev" ? "bg-primary text-primary-foreground font-semibold" : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <Sparkles className="h-4 w-4" />
+              JEV Semantic Profile & DecisionSpecs
+            </button>
+          </div>
 
-            <form onSubmit={handleRunSearch} className="flex gap-2">
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Ask a question or enter keywords (e.g. SLA uptime guarantee)..."
-                className="flex-1 rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
-              />
-              <button
-                type="submit"
-                disabled={searchMutation.isPending || !searchQuery.trim()}
-                className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors shadow-sm"
-              >
-                {searchMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Search"}
-              </button>
-            </form>
+          {activeTab === "jev" ? (
+            <JevSemanticProfileView ds={ds} />
+          ) : (
+            <div className="rounded-xl border border-border bg-card p-5 shadow-sm space-y-4">
+              <h3 className="font-semibold text-sm text-foreground flex items-center gap-2">
+                <Sparkles className="h-4 w-4 text-primary" /> Hybrid Vector & Lexical RAG Search
+              </h3>
+              <p className="text-xs text-muted-foreground">
+                Test semantic search across chunked passages in this document as performed by KnowledgeAgent.
+              </p>
 
-            {searchMutation.data && (
-              <div className="space-y-3 pt-3">
-                <h4 className="text-xs font-semibold text-foreground">
-                  Search Results ({searchMutation.data.length} matches):
-                </h4>
-                {searchMutation.data.length === 0 ? (
-                  <p className="text-xs text-muted-foreground">No matching chunks found.</p>
-                ) : (
-                  searchMutation.data.map((res) => (
-                    <div key={res.chunkId} className="p-4 rounded-lg bg-muted border border-border text-xs space-y-1">
-                      <div className="flex justify-between items-center">
-                        <span className="font-semibold text-foreground">{res.title}</span>
-                        <span className="rounded bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
-                          Score: {(res.score * 100).toFixed(1)}%
-                        </span>
+              <form onSubmit={handleRunSearch} className="flex gap-2">
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Ask a question or enter keywords (e.g. SLA uptime guarantee)..."
+                  className="flex-1 rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                />
+                <button
+                  type="submit"
+                  disabled={searchMutation.isPending || !searchQuery.trim()}
+                  className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors shadow-sm"
+                >
+                  {searchMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Search"}
+                </button>
+              </form>
+
+              {searchMutation.data && (
+                <div className="space-y-3 pt-3">
+                  <h4 className="text-xs font-semibold text-foreground">
+                    Search Results ({searchMutation.data.length} matches):
+                  </h4>
+                  {searchMutation.data.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">No matching chunks found.</p>
+                  ) : (
+                    searchMutation.data.map((res) => (
+                      <div key={res.chunkId} className="p-4 rounded-lg bg-muted border border-border text-xs space-y-1">
+                        <div className="flex justify-between items-center">
+                          <span className="font-semibold text-foreground">{res.title}</span>
+                          <span className="rounded bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
+                            Score: {(res.score * 100).toFixed(1)}%
+                          </span>
+                        </div>
+                        <p className="text-muted-foreground">{res.content}</p>
                       </div>
-                      <p className="text-muted-foreground">{res.content}</p>
-                    </div>
-                  ))
-                )}
-              </div>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Stream & API View */}
+      {(ds.sourceType === "api_rest" || ds.sourceType === "mqtt_iot" || ds.sourceType === "cctv_feed") && (
+        <div className="space-y-6">
+          <div className="flex items-center gap-2 border-b border-border pb-2 overflow-x-auto">
+            <button
+              onClick={() => setActiveTab("stream-config")}
+              className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors whitespace-nowrap ${
+                activeTab !== "jev" ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              Stream & Transport Configuration
+            </button>
+            <button
+              onClick={() => setActiveTab("jev")}
+              className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors whitespace-nowrap flex items-center gap-1.5 ${
+                activeTab === "jev" ? "bg-primary text-primary-foreground font-semibold" : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <Sparkles className="h-4 w-4" />
+              JEV Semantic Profile & DecisionSpecs
+            </button>
+          </div>
+
+          {activeTab === "jev" ? (
+            <JevSemanticProfileView ds={ds} />
+          ) : (
+            <div className="rounded-xl border border-border bg-card p-5 shadow-sm space-y-4">
+              <h3 className="font-semibold text-sm text-foreground flex items-center gap-2">
+                <Globe className="h-4 w-4 text-primary" /> Live Stream Connection Specs
+              </h3>
+              <pre className="rounded-lg bg-muted p-4 text-xs font-mono text-foreground overflow-x-auto">
+                {JSON.stringify(ds.metadata, null, 2)}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function JevSemanticProfileView({ ds }: { ds: any }) {
+  const profile = ds.semanticProfile;
+  if (!profile) {
+    return (
+      <div className="rounded-xl border border-dashed border-border p-8 text-center bg-card">
+        <Sparkles className="mx-auto h-8 w-8 text-muted-foreground opacity-50" />
+        <h4 className="mt-2 text-sm font-semibold text-foreground">No JEV Semantic Profile Available</h4>
+        <p className="text-xs text-muted-foreground mt-1 max-w-sm mx-auto">
+          This data source has not been mapped with TypeSafe JEV System One DecisionSpecs yet. Click "Sync JEV Profiles" on the data sources page to generate it.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Overview Cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* Onboarding Agent */}
+        <div className="rounded-xl border border-border bg-card p-4 shadow-sm space-y-1">
+          <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <span>Onboarding Specialist</span>
+            <Bot className="h-4 w-4 text-primary" />
+          </div>
+          <p className="text-base font-bold text-foreground truncate">{profile.onboardedBy || "Onboarding Orchestrator"}</p>
+          <p className="text-xs text-muted-foreground">Autonomous ingestion agent</p>
+        </div>
+
+        {/* Domain Classification */}
+        <div className="rounded-xl border border-border bg-card p-4 shadow-sm space-y-1">
+          <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <span>Domain Classification</span>
+            <Sparkles className="h-4 w-4 text-amber-500" />
+          </div>
+          <p className="text-base font-bold text-foreground uppercase font-mono">{profile.domain || "General"}</p>
+          <p className="text-xs text-muted-foreground">Confidence: {((profile.confidence ?? 0.85) * 100).toFixed(0)}%</p>
+        </div>
+
+        {/* Downstream Agent Affinity */}
+        <div className="rounded-xl border border-border bg-card p-4 shadow-sm space-y-1">
+          <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <span>Target Agent Affinity</span>
+            <Target className="h-4 w-4 text-emerald-500" />
+          </div>
+          <p className="text-base font-bold text-foreground truncate">{profile.targetAgentAffinity || "Homseo Orchestrator"}</p>
+          <p className="text-xs text-muted-foreground">Recommended consumer agent</p>
+        </div>
+
+        {/* DecisionSpecs Executed */}
+        <div className="rounded-xl border border-border bg-card p-4 shadow-sm space-y-1">
+          <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <span>JEV DecisionSpecs</span>
+            <Workflow className="h-4 w-4 text-blue-500" />
+          </div>
+          <p className="text-base font-bold text-foreground">{profile.decisionSpecRefs?.length || 0} Specs</p>
+          <p className="text-xs text-muted-foreground font-mono truncate">{profile.decisionSpecRefs?.join(", ")}</p>
+        </div>
+      </div>
+
+      {/* Primary Entities & Key Topics */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="rounded-xl border border-border bg-card p-5 shadow-sm space-y-3">
+          <h4 className="text-sm font-semibold text-foreground flex items-center gap-2">
+            <Layers className="h-4 w-4 text-primary" /> Primary Entities Identified
+          </h4>
+          <p className="text-xs text-muted-foreground">
+            Core enterprise objects discovered by the JEV model to enable direct query routing and entity lookup.
+          </p>
+          <div className="flex flex-wrap gap-2 pt-1">
+            {profile.entities && profile.entities.length > 0 ? (
+              profile.entities.map((ent: string) => (
+                <span
+                  key={ent}
+                  className="rounded-lg bg-primary/10 border border-primary/20 px-2.5 py-1 text-xs font-semibold text-primary"
+                >
+                  {ent}
+                </span>
+              ))
+            ) : (
+              <span className="text-xs text-muted-foreground italic">No primary entities isolated.</span>
             )}
           </div>
         </div>
+
+        <div className="rounded-xl border border-border bg-card p-5 shadow-sm space-y-3">
+          <h4 className="text-sm font-semibold text-foreground flex items-center gap-2">
+            <Sparkles className="h-4 w-4 text-amber-500" /> Semantic Topics & Context
+          </h4>
+          <p className="text-xs text-muted-foreground">
+            Semantic clusters and thematic keywords indexed for intelligent agent retrieval.
+          </p>
+          <div className="flex flex-wrap gap-2 pt-1">
+            {profile.topics && profile.topics.length > 0 ? (
+              profile.topics.map((top: string) => (
+                <span
+                  key={top}
+                  className="rounded-lg bg-muted border border-border px-2.5 py-1 text-xs font-medium text-foreground"
+                >
+                  {top}
+                </span>
+              ))
+            ) : (
+              <span className="text-xs text-muted-foreground italic">Domain topics inferred automatically.</span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Semantic Metrics Table */}
+      {profile.metrics && profile.metrics.length > 0 && (
+        <div className="rounded-xl border border-border bg-card p-5 shadow-sm space-y-3">
+          <h4 className="text-sm font-semibold text-foreground flex items-center gap-2">
+            <Play className="h-4 w-4 text-primary fill-current" /> Numerical Metrics Discovered by JEV
+          </h4>
+          <div className="rounded-lg border border-border overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-muted text-muted-foreground font-medium border-b border-border">
+                <tr>
+                  <th className="p-2.5">Metric Name</th>
+                  <th className="p-2.5">Target Column / Expression</th>
+                  <th className="p-2.5">Default Aggregation</th>
+                  <th className="p-2.5">Format</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border text-foreground">
+                {profile.metrics.map((m: any, idx: number) => (
+                  <tr key={idx} className="hover:bg-muted/50">
+                    <td className="p-2.5 font-semibold text-primary">{m.name}</td>
+                    <td className="p-2.5 font-mono text-muted-foreground">{m.expression || m.column}</td>
+                    <td className="p-2.5 uppercase font-medium">{m.aggregation || "SUM"}</td>
+                    <td className="p-2.5 text-muted-foreground">{m.format || "number"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
       )}
+
+      {/* Raw DecisionSpec Metadata Audit */}
+      <div className="rounded-xl border border-border bg-card p-5 shadow-sm space-y-3">
+        <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+          DecisionSpec Execution Trace
+        </h4>
+        <pre className="rounded-lg bg-muted p-4 text-xs font-mono overflow-x-auto text-foreground max-h-60">
+          {JSON.stringify(profile, null, 2)}
+        </pre>
+      </div>
     </div>
   );
 }

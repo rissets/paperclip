@@ -18,6 +18,7 @@ const SENSITIVE_KEYS = new Set<string>([
   // sync with every connector.
   "credential",
   "credentials",
+  "credentialvalues",
   "password",
   "currentpassword",
   "newpassword",

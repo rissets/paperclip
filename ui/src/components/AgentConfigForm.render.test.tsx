@@ -1051,6 +1051,44 @@ describe("AgentConfigForm environment selector", () => {
     expect(result.container.textContent).toContain("Hermes Gateway fields");
   });
 
+  it("lets Hermes Gateway agents select and save a manual model ID", async () => {
+    const result = await renderForm(
+      [makeEnvironment({ id: "local-1", name: "Local", driver: "local" })],
+      {
+        adapterType: "hermes_gateway",
+        adapterConfig: { model: "openai/old-model" },
+      },
+    );
+    roots.push(result.root);
+
+    expect(result.container.textContent).toContain("openai/old-model");
+    const modelButton = findButton(result.container, "openai/old-model");
+    expect(modelButton).toBeTruthy();
+    await clickElement(modelButton);
+
+    const search = document.body.querySelector<HTMLInputElement>(
+      'input[placeholder="Search models... (type to create)"]',
+    );
+    expect(search).toBeTruthy();
+    await act(async () => setInputValue(search!, "anthropic/claude-sonnet-4-6"));
+    await flushReact();
+
+    const manualChoice = Array.from(document.body.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Use manual model"),
+    );
+    expect(manualChoice).toBeTruthy();
+    await clickElement(manualChoice);
+
+    const save = findButton(result.container, "Save");
+    expect(save).toBeTruthy();
+    await clickElement(save);
+    expect(result.onSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        adapterConfig: expect.objectContaining({ model: "anthropic/claude-sonnet-4-6" }),
+      }),
+    );
+  });
+
   it("tests a Codex agent after clearing the primary model to the adapter default", async () => {
     const result = await renderForm([
       makeEnvironment({ id: "local-1", name: "Local", driver: "local" }),

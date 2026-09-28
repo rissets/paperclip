@@ -6678,7 +6678,9 @@ export function toolAccessService(
       const configPath = credentialRefConfigPath(ref);
       try {
         const grantRef = grant?.credentialSecretRefs.find(
-          (candidate) => candidate.configPath === configPath,
+          (candidate) =>
+            candidate.configPath === configPath ||
+            candidate.configPath === ref.name,
         );
         value =
           grantRef && grant
@@ -13973,12 +13975,30 @@ export function toolAccessService(
     const galleryEntry = sourceTemplateKey
       ? getConnectableAppDefinition(sourceTemplateKey)
       : null;
+    const existingApiKeyHeaderRef = connection.credentialRefs.find(
+      (ref) =>
+        ref.placement === "header" &&
+        typeof ref.key === "string" &&
+        ref.key.toLowerCase() === "x-api-key",
+    );
     const credentialFields = galleryEntry
       ? credentialFieldsFor(
           galleryEntry,
           connectionMethodForConnection(galleryEntry, connection).key,
         )
-      : [
+      : existingApiKeyHeaderRef
+        ? [
+            {
+              label: "App key",
+              configPath: existingApiKeyHeaderRef.name,
+              helpUrl: "",
+              required: false,
+              placement: "header" as const,
+              key: existingApiKeyHeaderRef.key,
+              prefix: existingApiKeyHeaderRef.prefix ?? undefined,
+            },
+          ]
+        : [
           {
             label: "App key",
             configPath: "credentials.authorization",
@@ -14002,13 +14022,81 @@ export function toolAccessService(
       undefined,
       actor,
     );
-    const credentialSecretRefs = [
+    let credentialSecretRefs = [
       ...(personalIdentity?.grant?.credentialSecretRefs ??
         connection.credentialSecretRefs),
     ];
     const credentialRefs: McpConnectionCredentialRef[] = [
       ...(connection.credentialRefs ?? []),
     ];
+    const connectionUrl =
+      typeof connection.transportConfig.url === "string"
+        ? connection.transportConfig.url
+        : typeof connection.config.url === "string"
+          ? connection.config.url
+          : null;
+    const isComposioToolRouter = (() => {
+      if (!connectionUrl) return false;
+      try {
+        const url = new URL(connectionUrl);
+        return (
+          url.protocol === "https:" &&
+          url.hostname.toLowerCase() === "backend.composio.dev" &&
+          /^\/tool_router\/[^/]+\/mcp\/?$/i.test(url.pathname)
+        );
+      } catch {
+        return false;
+      }
+    })();
+    if (
+      personalIdentity &&
+      isComposioToolRouter &&
+      providedFields.some(
+        (field) => field.key?.toLowerCase() === "x-api-key",
+      )
+    ) {
+      // Composio Tool Router authenticates with x-api-key, not a Bearer token.
+      // A previous generic reconnect could have persisted the same value under
+      // Authorization; stop sending that unused header and drop its grant ref.
+      credentialRefs.splice(
+        0,
+        credentialRefs.length,
+        ...credentialRefs.filter(
+          (ref) => ref.key?.toLowerCase() !== "authorization",
+        ),
+      );
+      credentialSecretRefs = credentialSecretRefs.filter(
+        (ref) => ref.configPath !== "credentials.authorization",
+      );
+    }
+
+    const createCredentialSecret = async (
+      field: (typeof credentialFields)[number],
+      value: string,
+    ) => {
+      const metadata = {
+        name: `${connection.name} ${field.label} ${randomUUID().slice(0, 8)}`,
+        key: `tool_app.${randomUUID()}.${field.configPath.replace(/[^a-z0-9_:-]+/gi, "_")}`,
+        provider: "local_encrypted" as const,
+        description: `Credential for ${connection.name} (${field.configPath}).`,
+      };
+      return personalIdentity
+        ? db.transaction(async (tx) => {
+            const vault = secretService(tx as unknown as Db);
+            const definition = await vault.createUserSecretDefinition(
+              companyId,
+              metadata,
+              actorForSecret(actor),
+            );
+            return vault.createCurrentUserSecretValue(
+              companyId,
+              personalIdentity.subjectUserId,
+              { definitionId: definition.id, value },
+              actorForSecret(actor),
+            );
+          })
+        : secrets.create(companyId, { ...metadata, value }, actorForSecret(actor));
+    };
 
     for (const field of providedFields) {
       const value = input.credentialValues[field.configPath]!.trim();
@@ -14016,27 +14104,54 @@ export function toolAccessService(
         (ref) => ref.configPath === field.configPath,
       );
       if (existing) {
-        await secrets.rotate(
-          existing.secretId,
-          { value },
-          actorForSecret(actor),
-        );
+        const existingSecret = await secrets.getById(existing.secretId);
+        if (
+          personalIdentity &&
+          existingSecret?.scope === "user" &&
+          existingSecret.ownerUserId === personalIdentity.subjectUserId
+        ) {
+          await secrets.rotateCurrentUserSecretValue(
+            companyId,
+            personalIdentity.subjectUserId,
+            existing.secretId,
+            { value },
+            actorForSecret(actor),
+          );
+        } else if (personalIdentity) {
+          // Legacy personal connections could point at company-scoped values.
+          // Rotating that value in place preserves the bad scope, so create an
+          // owner-bound value and move only this user's grant to the new ref.
+          const replacement = await createCredentialSecret(field, value);
+          credentialSecretRefs = credentialSecretRefs.map((ref) =>
+            ref.configPath === field.configPath
+              ? { ...ref, secretId: replacement.id, versionSelector: "latest" }
+              : ref,
+          );
+          if (field.placement === "header" && field.key) {
+            const nextCredentialRef = {
+              name: field.configPath,
+              secretId: replacement.id,
+              version: "latest",
+              placement: "header",
+              key: field.key,
+              prefix: field.prefix ?? null,
+            } satisfies McpConnectionCredentialRef;
+            const index = credentialRefs.findIndex(
+              (ref) => ref.name === field.configPath,
+            );
+            if (index >= 0) credentialRefs[index] = nextCredentialRef;
+            else credentialRefs.push(nextCredentialRef);
+          }
+        } else {
+          await secrets.rotate(
+            existing.secretId,
+            { value },
+            actorForSecret(actor),
+          );
+        }
         continue;
       }
-      const metadata = {
-        name: `${connection.name} ${field.label} ${randomUUID().slice(0, 8)}`,
-        key: `tool_app.${randomUUID()}.${field.configPath.replace(/[^a-z0-9_:-]+/gi, "_")}`,
-        provider: "local_encrypted" as const,
-        description: `Credential for ${connection.name} (${field.configPath}).`,
-      };
-      const secret = personalIdentity
-        ? await db.transaction(async (tx) => {
-            const vault = secretService(tx as unknown as Db);
-            const definition = await vault.createUserSecretDefinition(companyId, metadata, actorForSecret(actor));
-            return vault.createCurrentUserSecretValue(companyId, personalIdentity.subjectUserId,
-              { definitionId: definition.id, value }, actorForSecret(actor));
-          })
-        : await secrets.create(companyId, { ...metadata, value }, actorForSecret(actor));
+      const secret = await createCredentialSecret(field, value);
       credentialSecretRefs.push({
         secretId: secret.id,
         versionSelector: "latest",

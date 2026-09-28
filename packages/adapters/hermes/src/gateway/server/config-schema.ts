@@ -21,6 +21,12 @@ export function getConfigSchema(): AdapterConfigSchema {
         meta: { secret: true },
       },
       {
+        key: "provider",
+        label: "Provider ID",
+        type: "text",
+        hint: "Optional Hermes provider id paired with the model selected above. Leave blank when Hermes can infer it.",
+      },
+      {
         key: INSECURE_REMOTE_HTTP_ESCAPE_HATCH,
         label: "Dangerously allow remote HTTP",
         type: "toggle",

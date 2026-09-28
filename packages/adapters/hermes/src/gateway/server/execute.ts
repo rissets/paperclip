@@ -324,6 +324,8 @@ function buildInput(ctx: AdapterExecutionContext, paperclipApiUrl: string | null
 async function buildRunBody(ctx: AdapterExecutionContext, sessionKey: string | null): Promise<Record<string, unknown>> {
   const paperclipApiUrl = nonEmpty(ctx.config.paperclipApiUrl);
   const payloadTemplate = parseObject(ctx.config.payloadTemplate);
+  const model = nonEmpty(ctx.config.model) ?? nonEmpty(payloadTemplate.model);
+  const provider = nonEmpty(ctx.config.provider) ?? nonEmpty(payloadTemplate.provider);
   const configuredInput = nonEmpty(payloadTemplate.input);
   const input = configuredInput && ctx.context.conversationMode === true
     ? `${configuredInput}\n\n${buildInput(ctx, paperclipApiUrl)}`
@@ -345,6 +347,8 @@ async function buildRunBody(ctx: AdapterExecutionContext, sessionKey: string | n
   const instructions = [baseInstructions, skillInstructions].filter(Boolean).join("\n\n");
   return {
     ...payloadTemplate,
+    ...(model ? { model } : {}),
+    ...(provider ? { provider } : {}),
     input,
     instructions,
     ...(sessionKey ? { session_id: sessionKey } : {}),

@@ -75,6 +75,7 @@ import { accessService } from "../services/access.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { toolAccessPolicyService } from "../services/tool-access-policy.js";
 import { secretService } from "../services/secrets.js";
+import { syncConnectionCredentialBindings } from "../services/connection-credential-bindings.js";
 import {
   canonicalToolArguments,
   signToolArguments,
@@ -11661,6 +11662,152 @@ describeEmbeddedPostgres("tool access service", () => {
       actorType: "system", actorId: null, responsibleUserId: actor.actorId });
     expect(resolved?.value).toBe("restored-key");
     expect((await service.getConnection(connected.connectionId, company.id)).credentialSecretRefs).toEqual([]);
+  });
+
+  it("repairs a company-scoped credential ref when reconnecting a personal app", async () => {
+    const company = await createCompany(db);
+    const service = createTestToolAccessService(db);
+    mockToolsList([{ name: "search_memories", annotations: { readOnlyHint: true } }]);
+    const actor = { actorType: "user" as const, actorId: "personal-reconnect-owner" };
+    const connected = await service.connectGalleryApp(company.id, {
+      galleryKey: "mem0", grantKind: "user", credentialValues: { "credentials.authorization": "old-key" },
+    }, actor);
+    const { grants } = await service.listConnectionGrants(connected.connectionId, company.id);
+    const priorRef = grants[0]!.credentialSecretRefs[0]!;
+    const [priorSecret] = await db.select().from(companySecrets).where(eq(companySecrets.id, priorRef.secretId));
+    expect(priorSecret).toMatchObject({ scope: "user", ownerUserId: actor.actorId });
+
+    // Recreate the legacy state from before personal credentials were user-scoped.
+    await db.update(companySecrets).set({
+      scope: "company",
+      ownerUserId: null,
+      userSecretDefinitionId: null,
+    }).where(eq(companySecrets.id, priorSecret!.id));
+
+    await service.reconnectGalleryApp(connected.connectionId, company.id,
+      { credentialValues: { "credentials.authorization": "repaired-key" } }, actor);
+
+    const after = await service.listConnectionGrants(connected.connectionId, company.id);
+    const repairedRef = after.grants[0]!.credentialSecretRefs[0]!;
+    expect(repairedRef.secretId).not.toBe(priorSecret!.id);
+    const [repairedSecret] = await db.select().from(companySecrets).where(eq(companySecrets.id, repairedRef.secretId));
+    expect(repairedSecret).toMatchObject({ scope: "user", ownerUserId: actor.actorId });
+    const resolved = await secretService(db).resolveUserSecretValue(company.id, {
+      definitionId: repairedSecret!.userSecretDefinitionId!, responsibleUserId: actor.actorId,
+    }, { consumerType: "tool_connection", consumerId: connected.connectionId, configPath: repairedRef.configPath,
+      actorType: "system", actorId: null, responsibleUserId: actor.actorId });
+    expect(resolved?.value).toBe("repaired-key");
+    expect((await service.getConnection(connected.connectionId, company.id)).credentialSecretRefs).toEqual([]);
+  });
+
+  it("reconnects a personal Composio Tool Router with x-api-key and drops legacy Bearer auth", async () => {
+    const company = await createCompany(db);
+    const service = createTestToolAccessService(db);
+    const actor = { actorType: "user" as const, actorId: "composio-personal-owner" };
+    const requests: Array<{ headers: Headers; method: string }> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      const headers = new Headers(init?.headers);
+      requests.push({ headers, method: body.method });
+      if (body.method === "notifications/initialized")
+        return new Response(null, { status: 202 });
+      return mcpHttpResponse({
+        jsonrpc: "2.0",
+        id: body.id,
+        result:
+          body.method === "initialize"
+            ? { protocolVersion: "2025-06-18" }
+            : { tools: [{ name: "search_tools", annotations: { readOnlyHint: true } }] },
+      });
+    });
+
+    const connected = await service.connectGalleryApp(company.id, {
+      link: "https://backend.composio.dev/tool_router/trs_fixture/mcp",
+      name: "Composio Router",
+      authMode: "custom_headers",
+      credentialValues: { "headers.x-api-key": "old-key" },
+    });
+    const personalDefinition = await secretService(db).createUserSecretDefinition(
+      company.id,
+      {
+        key: `composio_${randomUUID()}`,
+        name: "Composio personal API key",
+        provider: "local_encrypted",
+      },
+      { userId: actor.actorId },
+    );
+    const personalValue = await secretService(db).createCurrentUserSecretValue(
+      company.id,
+      actor.actorId,
+      { definitionId: personalDefinition.id, value: "old-personal-key" },
+      { userId: actor.actorId },
+    );
+    const personalRef = {
+      secretId: personalValue.id,
+      versionSelector: "latest" as const,
+      configPath: "headers.x-api-key",
+      required: true,
+      label: "App key",
+    };
+    const legacyBearer = await secretService(db).create(company.id, {
+      name: `Legacy Composio bearer ${randomUUID().slice(0, 8)}`,
+      key: `tool_app.${randomUUID()}.credentials_authorization`,
+      provider: "local_encrypted",
+      value: "legacy-bearer",
+    });
+    const [personalConnection] = await db.update(toolConnections).set({
+      credentialPolicy: "per_user",
+      createdByUserId: actor.actorId,
+      credentialSecretRefs: [],
+      credentialRefs: [
+        {
+          name: "headers.x-api-key",
+          secretId: personalValue.id,
+          version: "latest",
+          placement: "header",
+          key: "x-api-key",
+          prefix: null,
+        },
+        {
+          name: "credentials.authorization",
+          secretId: legacyBearer.id,
+          version: "latest",
+          placement: "header",
+          key: "Authorization",
+          prefix: "Bearer ",
+        },
+      ],
+    }).where(eq(toolConnections.id, connected.connectionId)).returning();
+    await db.insert(connectionGrants).values({
+      companyId: company.id,
+      connectionId: connected.connectionId,
+      kind: "user",
+      subjectUserId: actor.actorId,
+      credentialSecretRefs: [personalRef],
+      isDefault: false,
+      createdByUserId: actor.actorId,
+    });
+    await syncConnectionCredentialBindings(db, personalConnection!, [personalRef]);
+
+    requests.length = 0;
+    const reconnected = await service.reconnectGalleryApp(
+      connected.connectionId,
+      company.id,
+      { credentialValues: { "headers.x-api-key": "new-key" } },
+      actor,
+    );
+
+    expect(reconnected.connection.healthStatus).toBe("ok");
+    expect(requests.length).toBeGreaterThan(0);
+    expect(requests.every(({ headers }) => headers.get("x-api-key") === "new-key")).toBe(true);
+    expect(requests.every(({ headers }) => !headers.has("authorization"))).toBe(true);
+    const after = await service.getConnection(connected.connectionId, company.id);
+    expect(after.credentialRefs.map((ref) => ref.key?.toLowerCase())).toEqual(["x-api-key"]);
+    const grantState = await service.listConnectionGrants(connected.connectionId, company.id);
+    expect(grantState.grants[0]!.credentialSecretRefs.map((ref) => ref.configPath)).toEqual([
+      "headers.x-api-key",
+    ]);
+    expect(JSON.stringify({ after, grantState })).not.toContain("new-key");
   });
 
   it("keeps rejected Mem0 API keys on the key-entry path rather than switching to OAuth", async () => {

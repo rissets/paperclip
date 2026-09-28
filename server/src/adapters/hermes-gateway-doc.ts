@@ -40,8 +40,14 @@ Join request minimum:
 Core fields:
 - agentDefaultsPayload.apiBaseUrl (string, required): Base URL for the Hermes API server as reachable from the Paperclip server. A default dashboard root or chat URL such as http://127.0.0.1:9119 or http://127.0.0.1:9119/chat is accepted and maps to http://127.0.0.1:9119/api.
 - agentDefaultsPayload.apiKey (string, required unless the adapter package documents another auth field): Hermes API server key matching API_SERVER_KEY. This is the Hermes gateway key, not the claimed Paperclip API key.
+- agentDefaultsPayload.model (string, optional): Per-agent Hermes model id selected in Paperclip's Model control. Leave it at Default to use the model configured on the Hermes gateway.
+- agentDefaultsPayload.provider (string, optional): Per-agent Hermes provider id paired with the model. Leave blank when Hermes can infer it.
 - agentDefaultsPayload.paperclipApiUrl (string, strongly recommended): Paperclip base URL as reachable from Hermes for invite, claim, skill bootstrap, and later Paperclip API calls.
 - agentDefaultsPayload.timeoutSec or timeoutMs (number, optional): Runtime request timeout when supported by the installed Hermes gateway adapter.
+
+Model selection:
+- The model selected in Paperclip and the optional provider are sent on each POST /v1/runs request. Hermes uses its gateway defaults when those values are omitted.
+- Use model and provider ids available on the configured Hermes gateway. Paperclip's Model control accepts a manually entered model id for custom providers.
 
 Network examples:
 - Local loopback on one host: agentDefaultsPayload.apiBaseUrl = "http://127.0.0.1:8642"; agentDefaultsPayload.paperclipApiUrl = "http://127.0.0.1:3100".

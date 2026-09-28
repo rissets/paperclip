@@ -34,6 +34,7 @@ const createConnectionGrantDelegationMock = vi.hoisted(() => vi.fn());
 const revokeConnectionGrantDelegationMock = vi.hoisted(() => vi.fn());
 const replaceConnectionGrantMembersMock = vi.hoisted(() => vi.fn());
 const startPersonalAuthorizationMock = vi.hoisted(() => vi.fn());
+const reconnectConnectionMock = vi.hoisted(() => vi.fn());
 const listUserDirectoryMock = vi.hoisted(() => vi.fn());
 const getSessionMock = vi.hoisted(() => vi.fn());
 const mockNavigate = vi.hoisted(() => vi.fn());
@@ -87,7 +88,8 @@ vi.mock("@/api/tools", () => ({
       replaceConnectionGrantMembersMock(connectionId, grantId, memberUserIds),
     startPersonalAuthorization: (companyId: string, connectionId: string, input: unknown) =>
       startPersonalAuthorizationMock(companyId, connectionId, input),
-    reconnectConnection: vi.fn(),
+    reconnectConnection: (connectionId: string, credentialValues: Record<string, string>) =>
+      reconnectConnectionMock(connectionId, credentialValues),
   },
 }));
 
@@ -414,6 +416,10 @@ describe("AppDetail", () => {
     finalizeOAuthAccessMock.mockResolvedValue({});
     putConnectionInstallsMock.mockResolvedValue({ connectionId: "conn-1", installs: [] });
     checkConnectionHealthMock.mockResolvedValue({ connection: connection(), healthStatus: "ok" });
+    reconnectConnectionMock.mockResolvedValue({
+      connection: connection({ healthStatus: "healthy" }),
+      healthStatus: "healthy",
+    });
     refreshCatalogMock.mockResolvedValue({ discoveredCount: 0, quarantinedCount: 0, catalog: [] });
     startOAuthMock.mockResolvedValue({
       connectionId: "conn-1",
@@ -1189,6 +1195,36 @@ describe("AppDetail", () => {
     expect(container.textContent).toContain("This app needs reconnecting");
     expect(container.textContent).toContain("Token expired.");
     expect(container.textContent).toContain("Which agents can use this connection?");
+  });
+
+  it("reconnects a generic MCP app through its existing x-api-key header", async () => {
+    getConnectionMock.mockResolvedValue(connection({
+      name: "Composio Router",
+      transportConfig: { url: "https://backend.composio.dev/tool_router/trs_fixture/mcp" },
+      config: { url: "https://backend.composio.dev/tool_router/trs_fixture/mcp" },
+      credentialRefs: [{
+        name: "headers.x-api-key",
+        secretId: "secret-1",
+        version: "latest",
+        placement: "header",
+        key: "x-api-key",
+        prefix: null,
+      }],
+      healthStatus: "error",
+      healthMessage: "The key did not work.",
+    }));
+
+    await renderAppDetail();
+    const input = container.querySelector<HTMLInputElement>('input[placeholder="Paste your new key"]');
+    expect(input).not.toBeNull();
+    await act(async () => setInputValue(input!, "replacement-key"));
+    await flushReact();
+    await act(async () => findButton("Check & reconnect")?.click());
+    await flushReact();
+
+    expect(reconnectConnectionMock).toHaveBeenCalledWith("conn-1", {
+      "headers.x-api-key": "replacement-key",
+    });
   });
 
   it.each(["permissions", "review"])("offers a supported replacement for an obsolete Anthropic connection on %s", async (tab) => {

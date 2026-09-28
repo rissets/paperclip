@@ -152,6 +152,8 @@ describe("execute", () => {
     const result = await execute(makeCtx({
       apiBaseUrl: "http://127.0.0.1:8642",
       apiKey: "secret-key",
+      model: "openai/gpt-4.1",
+      provider: "openai",
       timeoutSec: 5,
     }));
 
@@ -171,6 +173,8 @@ describe("execute", () => {
     });
     const body = JSON.parse(String(init.body));
     expect(body.input).toContain("Do the thing");
+    expect(body.model).toBe("openai/gpt-4.1");
+    expect(body.provider).toBe("openai");
     expect(body.session_id).toBe("paperclip:company:company-1:agent:agent-1:issue:issue-1");
   });
 

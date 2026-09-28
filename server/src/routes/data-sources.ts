@@ -100,6 +100,69 @@ export function dataSourceRoutes(db: Db) {
     },
   );
 
+  // 2d. Connect external REST / OpenAPI & run ApiIntegrationAgent onboarding
+  router.post(
+    "/companies/:companyId/data-sources/connect-api",
+    async (req: Request, res: Response) => {
+      const companyId = req.params.companyId as string;
+      await assertCompanyAccess(req, companyId);
+
+      const { config, name, description } = req.body || {};
+      if (!config || !config.baseUrl) {
+        throw badRequest("Base URL is required in API config");
+      }
+
+      const result = await onboardingOrchestrator.onboardApi(companyId, config, { name, description });
+      res.status(201).json(result);
+    },
+  );
+
+  // 2e. Connect IoT MQTT broker & run IotIntegrationAgent onboarding
+  router.post(
+    "/companies/:companyId/data-sources/connect-iot",
+    async (req: Request, res: Response) => {
+      const companyId = req.params.companyId as string;
+      await assertCompanyAccess(req, companyId);
+
+      const { config, name, description } = req.body || {};
+      if (!config || !config.brokerUrl || !config.topics) {
+        throw badRequest("Broker URL and topics are required in IoT config");
+      }
+
+      const result = await onboardingOrchestrator.onboardIot(companyId, config, { name, description });
+      res.status(201).json(result);
+    },
+  );
+
+  // 2f. Connect CCTV RTSP feed & run CctvIntegrationAgent onboarding
+  router.post(
+    "/companies/:companyId/data-sources/connect-cctv",
+    async (req: Request, res: Response) => {
+      const companyId = req.params.companyId as string;
+      await assertCompanyAccess(req, companyId);
+
+      const { config, name, description } = req.body || {};
+      if (!config || !config.streamUrl || !config.cameraName) {
+        throw badRequest("Stream URL and cameraName are required in CCTV config");
+      }
+
+      const result = await onboardingOrchestrator.onboardCctv(companyId, config, { name, description });
+      res.status(201).json(result);
+    },
+  );
+
+  // 2g. Backfill missing semantic profiles for existing data sources
+  router.post(
+    "/companies/:companyId/data-sources/backfill-profiles",
+    async (req: Request, res: Response) => {
+      const companyId = req.params.companyId as string;
+      await assertCompanyAccess(req, companyId);
+
+      const count = await dsService.backfillSemanticProfiles(companyId);
+      res.json({ success: true, updatedCount: count });
+    },
+  );
+
   // 3. Get single data source detail
   router.get("/companies/:companyId/data-sources/:id", async (req: Request, res: Response) => {
     const companyId = req.params.companyId as string;

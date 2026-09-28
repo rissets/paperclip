@@ -14,6 +14,12 @@ import {
   UploadCloud,
   Server,
   Zap,
+  Sparkles,
+  RefreshCw,
+  Globe,
+  Radio,
+  Video,
+  Bot,
 } from "lucide-react";
 import { useCompany } from "@/context/CompanyContext";
 import { dataSourcesApi } from "@/api/data-sources";
@@ -22,6 +28,9 @@ import type {
   DataSourceType,
   DatabaseConnectionConfig,
   DatabaseConnectionTestResult,
+  ApiConnectionConfig,
+  IotConnectionConfig,
+  CctvConnectionConfig,
 } from "@paperclipai/shared";
 
 export function DataSources() {
@@ -29,7 +38,7 @@ export function DataSources() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
 
-  const [activeTab, setActiveTab] = useState<"all" | "databases" | "structured" | "knowledge">("all");
+  const [activeTab, setActiveTab] = useState<"all" | "databases" | "structured" | "knowledge" | "streams">("all");
 
   // File Upload modal state
   const [isUploadOpen, setIsUploadOpen] = useState(false);
@@ -52,6 +61,36 @@ export function DataSources() {
   const [dbIsTesting, setDbIsTesting] = useState(false);
   const [dbTestResult, setDbTestResult] = useState<DatabaseConnectionTestResult | null>(null);
   const [dbConnectError, setDbConnectError] = useState<string | null>(null);
+
+  // Connect API modal state
+  const [isConnectApiOpen, setIsConnectApiOpen] = useState(false);
+  const [apiEndpoint, setApiEndpoint] = useState("");
+  const [apiMethod, setApiMethod] = useState<"GET" | "POST">("GET");
+  const [apiAuthType, setApiAuthType] = useState<"none" | "bearer" | "api_key">("none");
+  const [apiAuthToken, setApiAuthToken] = useState("");
+  const [apiCustomName, setApiCustomName] = useState("");
+  const [apiCustomDescription, setApiCustomDescription] = useState("");
+  const [apiConnectError, setApiConnectError] = useState<string | null>(null);
+
+  // Connect IoT modal state
+  const [isConnectIotOpen, setIsConnectIotOpen] = useState(false);
+  const [iotBrokerUrl, setIotBrokerUrl] = useState("mqtt://localhost:1883");
+  const [iotTopicPattern, setIotTopicPattern] = useState("sensors/+/telemetry");
+  const [iotClientId, setIotClientId] = useState("");
+  const [iotCustomName, setIotCustomName] = useState("");
+  const [iotCustomDescription, setIotCustomDescription] = useState("");
+  const [iotConnectError, setIotConnectError] = useState<string | null>(null);
+
+  // Connect CCTV modal state
+  const [isConnectCctvOpen, setIsConnectCctvOpen] = useState(false);
+  const [cctvStreamUrl, setCctvStreamUrl] = useState("rtsp://admin:pass@192.168.1.100:554/live");
+  const [cctvProtocol, setCctvProtocol] = useState<"rtsp" | "hls" | "webrtc">("rtsp");
+  const [cctvFps, setCctvFps] = useState(5);
+  const [cctvCustomName, setCctvCustomName] = useState("");
+  const [cctvCustomDescription, setCctvCustomDescription] = useState("");
+  const [cctvConnectError, setCctvConnectError] = useState<string | null>(null);
+
+  const [backfillStatus, setBackfillStatus] = useState<string | null>(null);
 
   const {
     data: dataSources = [],
@@ -105,6 +144,69 @@ export function DataSources() {
     mutationFn: (id: string) => dataSourcesApi.delete(selectedCompanyId!, id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["data-sources", selectedCompanyId] });
+    },
+  });
+
+  const connectApiMutation = useMutation({
+    mutationFn: (config: ApiConnectionConfig) =>
+      dataSourcesApi.connectApi(selectedCompanyId!, config, {
+        name: apiCustomName || undefined,
+        description: apiCustomDescription || undefined,
+      }),
+    onSuccess: (newDs) => {
+      queryClient.invalidateQueries({ queryKey: ["data-sources", selectedCompanyId] });
+      setIsConnectApiOpen(false);
+      setApiConnectError(null);
+      navigate(`/data-sources/${newDs.id}`);
+    },
+    onError: (err: any) => {
+      setApiConnectError(err?.message || "Failed to onboard API data source.");
+    },
+  });
+
+  const connectIotMutation = useMutation({
+    mutationFn: (config: IotConnectionConfig) =>
+      dataSourcesApi.connectIot(selectedCompanyId!, config, {
+        name: iotCustomName || undefined,
+        description: iotCustomDescription || undefined,
+      }),
+    onSuccess: (newDs) => {
+      queryClient.invalidateQueries({ queryKey: ["data-sources", selectedCompanyId] });
+      setIsConnectIotOpen(false);
+      setIotConnectError(null);
+      navigate(`/data-sources/${newDs.id}`);
+    },
+    onError: (err: any) => {
+      setIotConnectError(err?.message || "Failed to onboard IoT telemetry stream.");
+    },
+  });
+
+  const connectCctvMutation = useMutation({
+    mutationFn: (config: CctvConnectionConfig) =>
+      dataSourcesApi.connectCctv(selectedCompanyId!, config, {
+        name: cctvCustomName || undefined,
+        description: cctvCustomDescription || undefined,
+      }),
+    onSuccess: (newDs) => {
+      queryClient.invalidateQueries({ queryKey: ["data-sources", selectedCompanyId] });
+      setIsConnectCctvOpen(false);
+      setCctvConnectError(null);
+      navigate(`/data-sources/${newDs.id}`);
+    },
+    onError: (err: any) => {
+      setCctvConnectError(err?.message || "Failed to onboard CCTV vision stream.");
+    },
+  });
+
+  const backfillMutation = useMutation({
+    mutationFn: () => dataSourcesApi.backfillProfiles(selectedCompanyId!),
+    onSuccess: (res) => {
+      queryClient.invalidateQueries({ queryKey: ["data-sources", selectedCompanyId] });
+      setBackfillStatus(`Sync complete! ${res.updatedCount} data source(s) mapped with JEV semantic profiles.`);
+      setTimeout(() => setBackfillStatus(null), 6000);
+    },
+    onError: (err: any) => {
+      setBackfillStatus(`Sync failed: ${err?.message || "Unknown error"}`);
     },
   });
 
@@ -194,6 +296,9 @@ export function DataSources() {
     if (activeTab === "knowledge") {
       return ds.sourceType === "rag_document";
     }
+    if (activeTab === "streams") {
+      return ds.sourceType === "api_rest" || ds.sourceType === "mqtt_iot" || ds.sourceType === "cctv_feed";
+    }
     return true;
   });
 
@@ -215,30 +320,72 @@ export function DataSources() {
             Enterprise Data Sources
           </h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Connect external databases (PostgreSQL, MariaDB, MySQL), tabular files (CSV, Excel), and document knowledge bases for AI agents.
+            Connect external databases, spreadsheets, document knowledge bases, APIs, and real-time streams with autonomous JEV agent mapping.
           </p>
         </div>
-        <div className="flex items-center gap-2.5">
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => backfillMutation.mutate()}
+            disabled={backfillMutation.isPending}
+            title="Re-run TypeSafe JEV System One DecisionSpecs across all existing data sources"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-xs font-medium text-foreground shadow-sm transition-colors hover:bg-muted disabled:opacity-50"
+          >
+            <Sparkles className="h-3.5 w-3.5 text-amber-500" />
+            {backfillMutation.isPending ? "Syncing JEV..." : "Sync JEV Profiles"}
+          </button>
+          <button
+            onClick={() => setIsConnectApiOpen(true)}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-xs font-medium text-foreground shadow-sm transition-colors hover:bg-muted"
+          >
+            <Globe className="h-3.5 w-3.5 text-blue-500" />
+            Connect API
+          </button>
+          <button
+            onClick={() => setIsConnectIotOpen(true)}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-xs font-medium text-foreground shadow-sm transition-colors hover:bg-muted"
+          >
+            <Radio className="h-3.5 w-3.5 text-emerald-500" />
+            Connect IoT
+          </button>
+          <button
+            onClick={() => setIsConnectCctvOpen(true)}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-xs font-medium text-foreground shadow-sm transition-colors hover:bg-muted"
+          >
+            <Video className="h-3.5 w-3.5 text-purple-500" />
+            Connect CCTV
+          </button>
           <button
             onClick={() => {
               setIsConnectDbOpen(true);
               setDbTestResult(null);
               setDbConnectError(null);
             }}
-            className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3.5 py-2 text-sm font-medium text-foreground shadow-sm transition-colors hover:bg-muted"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-xs font-medium text-foreground shadow-sm transition-colors hover:bg-muted"
           >
-            <Server className="h-4 w-4 text-primary" />
-            Connect Database
+            <Server className="h-3.5 w-3.5 text-primary" />
+            Connect DB
           </button>
           <button
             onClick={() => setIsUploadOpen(true)}
-            className="inline-flex items-center gap-2 rounded-lg bg-primary px-3.5 py-2 text-sm font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
+            className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-xs font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
           >
-            <Plus className="h-4 w-4" />
+            <Plus className="h-3.5 w-3.5" />
             Upload File
           </button>
         </div>
       </div>
+
+      {backfillStatus && (
+        <div className="rounded-lg border border-primary/20 bg-primary/10 p-3 text-xs text-primary flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Sparkles className="h-4 w-4" />
+            <span>{backfillStatus}</span>
+          </div>
+          <button onClick={() => setBackfillStatus(null)} className="text-xs hover:underline">
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {/* Filter Tabs */}
       <div className="flex items-center gap-2 border-b border-border pb-2 overflow-x-auto">
@@ -261,11 +408,11 @@ export function DataSources() {
           }`}
         >
           Databases (
-          {
-            dataSources.filter(
-              (d) => d.sourceType === "postgres" || d.sourceType === "mariadb" || d.sourceType === "mysql",
-            ).length
-          }
+            {
+              dataSources.filter(
+                (d) => d.sourceType === "postgres" || d.sourceType === "mariadb" || d.sourceType === "mysql",
+              ).length
+            }
           )
         </button>
         <button
@@ -277,7 +424,7 @@ export function DataSources() {
           }`}
         >
           Files (CSV & Excel) (
-          {dataSources.filter((d) => d.sourceType === "csv" || d.sourceType === "excel").length}
+            {dataSources.filter((d) => d.sourceType === "csv" || d.sourceType === "excel").length}
           )
         </button>
         <button
@@ -289,7 +436,23 @@ export function DataSources() {
           }`}
         >
           Knowledge Base (RAG) (
-          {dataSources.filter((d) => d.sourceType === "rag_document").length}
+            {dataSources.filter((d) => d.sourceType === "rag_document").length}
+          )
+        </button>
+        <button
+          onClick={() => setActiveTab("streams")}
+          className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors whitespace-nowrap ${
+            activeTab === "streams"
+              ? "bg-muted text-foreground"
+              : "text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          Streams & APIs (
+            {
+              dataSources.filter(
+                (d) => d.sourceType === "api_rest" || d.sourceType === "mqtt_iot" || d.sourceType === "cctv_feed",
+              ).length
+            }
           )
         </button>
       </div>
@@ -373,6 +536,18 @@ export function DataSources() {
             badgeColor = "bg-emerald-500/10 text-emerald-600";
             icon = <FileSpreadsheet className="h-5 w-5" />;
             typeLabel = "Excel Workbook";
+          } else if (ds.sourceType === "api_rest") {
+            badgeColor = "bg-blue-500/10 text-blue-600";
+            icon = <Globe className="h-5 w-5" />;
+            typeLabel = "REST API";
+          } else if (ds.sourceType === "mqtt_iot") {
+            badgeColor = "bg-emerald-500/10 text-emerald-600";
+            icon = <Radio className="h-5 w-5" />;
+            typeLabel = "MQTT IoT";
+          } else if (ds.sourceType === "cctv_feed") {
+            badgeColor = "bg-purple-500/10 text-purple-600";
+            icon = <Video className="h-5 w-5" />;
+            typeLabel = "CCTV Vision";
           } else {
             badgeColor = "bg-sky-500/10 text-sky-600";
             icon = <FileText className="h-5 w-5" />;
@@ -425,19 +600,56 @@ export function DataSources() {
                   <p className="mt-3 text-xs text-muted-foreground line-clamp-2">{ds.description}</p>
                 )}
 
+                {/* JEV Semantic Profile Badge */}
+                {ds.semanticProfile && (
+                  <div className="mt-3 rounded-lg border border-primary/20 bg-primary/5 p-2.5 space-y-1.5 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="inline-flex items-center gap-1 font-semibold text-primary">
+                        <Bot className="h-3.5 w-3.5" />
+                        {ds.semanticProfile.onboardedBy || "Onboarding Orchestrator"}
+                      </span>
+                      {ds.semanticProfile.domain && (
+                        <span className="rounded bg-background px-1.5 py-0.5 text-xs font-mono uppercase text-muted-foreground border border-border">
+                          {ds.semanticProfile.domain}
+                        </span>
+                      )}
+                    </div>
+                    {ds.semanticProfile.entities && ds.semanticProfile.entities.length > 0 && (
+                      <div className="flex flex-wrap gap-1 pt-0.5">
+                        {ds.semanticProfile.entities.slice(0, 3).map((ent) => (
+                          <span
+                            key={ent}
+                            className="rounded bg-background border border-border px-1.5 py-0.5 text-xs text-foreground font-medium truncate max-w-xs"
+                          >
+                            {ent}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <div className="mt-4 grid grid-cols-2 gap-2 border-t border-border pt-3 text-xs">
                   <div>
                     <span className="text-muted-foreground">Volume:</span>
                     <span className="ml-1 font-medium text-foreground">
                       {isDatabase || isStructured
                         ? `${tableCount} table(s) • ${totalRows.toLocaleString()} rows`
-                        : `${chunkCount} chunks`}
+                        : ds.sourceType === "rag_document"
+                        ? `${chunkCount} chunks`
+                        : "Live Stream"}
                     </span>
                   </div>
                   <div className="text-right truncate">
                     <span className="text-muted-foreground">Type:</span>
                     <span className="ml-1 font-medium text-foreground truncate">
-                      {isDatabase ? (serverVersion ? serverVersion.split(" ")[0] : "Live DB") : ds.fileSize ? `${Math.round(ds.fileSize / 1024)} KB` : "Document"}
+                      {isDatabase
+                        ? serverVersion
+                          ? serverVersion.split(" ")[0]
+                          : "Live DB"
+                        : ds.fileSize
+                        ? `${Math.round(ds.fileSize / 1024)} KB`
+                        : typeLabel}
                     </span>
                   </div>
                 </div>
@@ -777,6 +989,346 @@ export function DataSources() {
                 >
                   {uploadMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
                   {uploadMutation.isPending ? "Onboarding..." : "Start Onboarding"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Connect API Modal */}
+      {isConnectApiOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm p-4 overflow-y-auto">
+          <div className="relative w-full max-w-lg rounded-xl border border-border bg-card p-6 shadow-xl my-8">
+            <h3 className="text-lg font-bold text-foreground flex items-center gap-2">
+              <Globe className="h-5 w-5 text-blue-500" />
+              Connect External REST API
+            </h3>
+            <p className="text-xs text-muted-foreground mt-1">
+              Onboard a live REST endpoint or OpenAPI spec via ApiIntegrationAgent.
+            </p>
+
+            {apiConnectError && (
+              <div className="mt-4 rounded-lg bg-destructive/10 p-3 text-xs text-destructive flex items-center gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                {apiConnectError}
+              </div>
+            )}
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                connectApiMutation.mutate({
+                  baseUrl: apiEndpoint,
+                  authType: apiAuthType,
+                  apiKey: apiAuthToken || undefined,
+                });
+              }}
+              className="mt-4 space-y-4"
+            >
+              <div>
+                <label className="block text-xs font-medium text-foreground mb-1">API Endpoint URL</label>
+                <input
+                  type="url"
+                  value={apiEndpoint}
+                  onChange={(e) => setApiEndpoint(e.target.value)}
+                  placeholder="https://api.company.com/v1/orders"
+                  className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                  required
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-foreground mb-1">HTTP Method</label>
+                  <select
+                    value={apiMethod}
+                    onChange={(e) => setApiMethod(e.target.value as any)}
+                    className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                  >
+                    <option value="GET">GET</option>
+                    <option value="POST">POST</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-foreground mb-1">Auth Type</label>
+                  <select
+                    value={apiAuthType}
+                    onChange={(e) => setApiAuthType(e.target.value as any)}
+                    className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                  >
+                    <option value="none">None (Public)</option>
+                    <option value="bearer">Bearer Token</option>
+                    <option value="api_key">API Key Header</option>
+                  </select>
+                </div>
+              </div>
+
+              {apiAuthType !== "none" && (
+                <div>
+                  <label className="block text-xs font-medium text-foreground mb-1">Auth Token / Secret</label>
+                  <input
+                    type="password"
+                    value={apiAuthToken}
+                    onChange={(e) => setApiAuthToken(e.target.value)}
+                    placeholder="Enter bearer token or API key"
+                    className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                    required
+                  />
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-medium text-foreground mb-1">Display Name (Optional)</label>
+                <input
+                  type="text"
+                  value={apiCustomName}
+                  onChange={(e) => setApiCustomName(e.target.value)}
+                  placeholder="e.g. ERP Orders API"
+                  className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-foreground mb-1">Description (Optional)</label>
+                <textarea
+                  value={apiCustomDescription}
+                  onChange={(e) => setApiCustomDescription(e.target.value)}
+                  placeholder="Context for agents regarding this API endpoint..."
+                  rows={2}
+                  className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                />
+              </div>
+
+              <div className="flex items-center justify-between border-t border-border pt-4">
+                <button
+                  type="button"
+                  onClick={() => setIsConnectApiOpen(false)}
+                  disabled={connectApiMutation.isPending}
+                  className="rounded-lg border border-border px-4 py-2 text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={connectApiMutation.isPending}
+                  className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors shadow-sm"
+                >
+                  {connectApiMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+                  {connectApiMutation.isPending ? "Connecting..." : "Connect API"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Connect IoT Modal */}
+      {isConnectIotOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm p-4 overflow-y-auto">
+          <div className="relative w-full max-w-lg rounded-xl border border-border bg-card p-6 shadow-xl my-8">
+            <h3 className="text-lg font-bold text-foreground flex items-center gap-2">
+              <Radio className="h-5 w-5 text-emerald-500" />
+              Connect MQTT / IoT Telemetry Stream
+            </h3>
+            <p className="text-xs text-muted-foreground mt-1">
+              Stream machine sensors, SCADA, or field devices via IotIntegrationAgent.
+            </p>
+
+            {iotConnectError && (
+              <div className="mt-4 rounded-lg bg-destructive/10 p-3 text-xs text-destructive flex items-center gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                {iotConnectError}
+              </div>
+            )}
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                connectIotMutation.mutate({
+                  brokerUrl: iotBrokerUrl,
+                  clientId: iotClientId || undefined,
+                  topics: [iotTopicPattern],
+                });
+              }}
+              className="mt-4 space-y-4"
+            >
+              <div>
+                <label className="block text-xs font-medium text-foreground mb-1">MQTT Broker URL</label>
+                <input
+                  type="text"
+                  value={iotBrokerUrl}
+                  onChange={(e) => setIotBrokerUrl(e.target.value)}
+                  placeholder="mqtt://broker.company.com:1883"
+                  className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-foreground mb-1">Topic Filter Pattern</label>
+                <input
+                  type="text"
+                  value={iotTopicPattern}
+                  onChange={(e) => setIotTopicPattern(e.target.value)}
+                  placeholder="factory/line-1/+/telemetry"
+                  className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-foreground mb-1">Display Name (Optional)</label>
+                <input
+                  type="text"
+                  value={iotCustomName}
+                  onChange={(e) => setIotCustomName(e.target.value)}
+                  placeholder="e.g. Factory Floor Sensors"
+                  className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-foreground mb-1">Description (Optional)</label>
+                <textarea
+                  value={iotCustomDescription}
+                  onChange={(e) => setIotCustomDescription(e.target.value)}
+                  placeholder="Sensor metrics details (temperature, vibration, power)..."
+                  rows={2}
+                  className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                />
+              </div>
+
+              <div className="flex items-center justify-between border-t border-border pt-4">
+                <button
+                  type="button"
+                  onClick={() => setIsConnectIotOpen(false)}
+                  disabled={connectIotMutation.isPending}
+                  className="rounded-lg border border-border px-4 py-2 text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={connectIotMutation.isPending}
+                  className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors shadow-sm"
+                >
+                  {connectIotMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+                  {connectIotMutation.isPending ? "Connecting..." : "Connect IoT Stream"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Connect CCTV Modal */}
+      {isConnectCctvOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm p-4 overflow-y-auto">
+          <div className="relative w-full max-w-lg rounded-xl border border-border bg-card p-6 shadow-xl my-8">
+            <h3 className="text-lg font-bold text-foreground flex items-center gap-2">
+              <Video className="h-5 w-5 text-purple-500" />
+              Connect CCTV & Vision Stream
+            </h3>
+            <p className="text-xs text-muted-foreground mt-1">
+              Connect RTSP, HLS, or WebRTC vision stream via CctvIntegrationAgent & VisionAgent.
+            </p>
+
+            {cctvConnectError && (
+              <div className="mt-4 rounded-lg bg-destructive/10 p-3 text-xs text-destructive flex items-center gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                {cctvConnectError}
+              </div>
+            )}
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                connectCctvMutation.mutate({
+                  streamUrl: cctvStreamUrl,
+                  cameraName: cctvCustomName || "Camera Feed",
+                  location: cctvCustomDescription || undefined,
+                });
+              }}
+              className="mt-4 space-y-4"
+            >
+              <div>
+                <label className="block text-xs font-medium text-foreground mb-1">Stream URL</label>
+                <input
+                  type="text"
+                  value={cctvStreamUrl}
+                  onChange={(e) => setCctvStreamUrl(e.target.value)}
+                  placeholder="rtsp://user:pass@camera.lan:554/stream1"
+                  className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                  required
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-foreground mb-1">Protocol</label>
+                  <select
+                    value={cctvProtocol}
+                    onChange={(e) => setCctvProtocol(e.target.value as any)}
+                    className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                  >
+                    <option value="rtsp">RTSP (Real-Time)</option>
+                    <option value="hls">HLS (HTTP Live)</option>
+                    <option value="webrtc">WebRTC</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-foreground mb-1">Sampling Rate (FPS)</label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="30"
+                    value={cctvFps}
+                    onChange={(e) => setCctvFps(Number(e.target.value))}
+                    className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-foreground mb-1">Display Name (Optional)</label>
+                <input
+                  type="text"
+                  value={cctvCustomName}
+                  onChange={(e) => setCctvCustomName(e.target.value)}
+                  placeholder="e.g. Warehouse Gate Camera"
+                  className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-foreground mb-1">Description (Optional)</label>
+                <textarea
+                  value={cctvCustomDescription}
+                  onChange={(e) => setCctvCustomDescription(e.target.value)}
+                  placeholder="Location or monitoring purpose for vision agent..."
+                  rows={2}
+                  className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                />
+              </div>
+
+              <div className="flex items-center justify-between border-t border-border pt-4">
+                <button
+                  type="button"
+                  onClick={() => setIsConnectCctvOpen(false)}
+                  disabled={connectCctvMutation.isPending}
+                  className="rounded-lg border border-border px-4 py-2 text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={connectCctvMutation.isPending}
+                  className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors shadow-sm"
+                >
+                  {connectCctvMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+                  {connectCctvMutation.isPending ? "Connecting..." : "Connect Vision Stream"}
                 </button>
               </div>
             </form>
