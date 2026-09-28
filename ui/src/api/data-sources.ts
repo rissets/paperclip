@@ -27,7 +27,7 @@ export const dataSourcesApi = {
     if (options.name) formData.append("name", options.name);
     if (options.description) formData.append("description", options.description);
 
-    return api.post<DataSource>(`/companies/${encodeURIComponent(companyId)}/data-sources/upload`, formData);
+    return api.postForm<DataSource>(`/companies/${encodeURIComponent(companyId)}/data-sources/upload`, formData);
   },
 
   delete: (companyId: string, id: string) =>

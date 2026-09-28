@@ -1,3 +1,5 @@
+import zlib from "node:zlib";
+
 export interface ParsedChunk {
   chunkIndex: number;
   title: string | null;
@@ -22,8 +24,17 @@ export class KnowledgeIngestionService {
   ): { chunks: ParsedChunk[]; totalWords: number } {
     let rawText = "";
 
-    // Text decoding
-    if (
+    const lowerName = fileName.toLowerCase();
+
+    // Check DOCX format (PKZip archive containing word/document.xml)
+    if (lowerName.endsWith(".docx") || mimeType?.includes("wordprocessingml")) {
+      const docxText = this.extractDocxText(buffer);
+      if (docxText && docxText.trim().length > 0) {
+        rawText = docxText;
+      } else {
+        rawText = this.extractPrintableText(buffer);
+      }
+    } else if (
       mimeType?.includes("text") ||
       fileName.endsWith(".txt") ||
       fileName.endsWith(".md") ||
@@ -231,4 +242,72 @@ export class KnowledgeIngestionService {
     }
     return matches.join("\n").replace(/[\r\n]{3,}/g, "\n\n");
   }
+
+  /**
+   * Extract readable text from DOCX (PKZip containing word/document.xml)
+   */
+  private static extractDocxText(buffer: Buffer): string | null {
+    try {
+      // 1. Search for End of Central Directory record: PK\x05\x06 (0x06054b50)
+      for (let i = buffer.length - 22; i >= 0; i--) {
+        if (buffer.readUInt32LE(i) === 0x06054b50) {
+          const cdCount = buffer.readUInt16LE(i + 10);
+          const cdOffset = buffer.readUInt32LE(i + 16);
+
+          let cur = cdOffset;
+          for (let j = 0; j < cdCount; j++) {
+            if (cur + 46 > buffer.length) break;
+            if (buffer.readUInt32LE(cur) !== 0x02014b50) break;
+            const compMethod = buffer.readUInt16LE(cur + 10);
+            const compSize = buffer.readUInt32LE(cur + 20);
+            const nameLen = buffer.readUInt16LE(cur + 28);
+            const extraLen = buffer.readUInt16LE(cur + 30);
+            const commentLen = buffer.readUInt16LE(cur + 32);
+            const localHeaderOffset = buffer.readUInt32LE(cur + 42);
+            const name = buffer.toString("utf8", cur + 46, cur + 46 + nameLen);
+
+            if (name === "word/document.xml") {
+              if (localHeaderOffset + 30 > buffer.length) break;
+              const localNameLen = buffer.readUInt16LE(localHeaderOffset + 26);
+              const localExtraLen = buffer.readUInt16LE(localHeaderOffset + 28);
+              const dataOffset = localHeaderOffset + 30 + localNameLen + localExtraLen;
+              if (dataOffset + compSize > buffer.length) break;
+              const compressedData = buffer.subarray(dataOffset, dataOffset + compSize);
+
+              let xml = "";
+              if (compMethod === 8) {
+                xml = zlib.inflateRawSync(compressedData).toString("utf8");
+              } else if (compMethod === 0) {
+                xml = compressedData.toString("utf8");
+              }
+
+              if (xml) {
+                return xml
+                  .replace(/<w:p[^>]*>/gi, "")
+                  .replace(/<\/w:p>/gi, "\n\n")
+                  .replace(/<\/w:tr>/gi, "\n")
+                  .replace(/<\/w:tc>/gi, "\t")
+                  .replace(/<w:br[^>]*>/gi, "\n")
+                  .replace(/<w:tab[^>]*>/gi, "\t")
+                  .replace(/<[^>]+>/g, "")
+                  .replace(/&amp;/g, "&")
+                  .replace(/&lt;/g, "<")
+                  .replace(/&gt;/g, ">")
+                  .replace(/&quot;/g, '"')
+                  .replace(/&apos;/g, "'")
+                  .trim();
+              }
+            }
+            cur += 46 + nameLen + extraLen + commentLen;
+          }
+          break;
+        }
+      }
+    } catch {
+      // Fallback to extractPrintableText
+      return null;
+    }
+    return null;
+  }
 }
+

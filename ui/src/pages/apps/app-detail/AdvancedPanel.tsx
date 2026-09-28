@@ -297,12 +297,19 @@ function ReconnectForm({
   const [values, setValues] = useState<Record<string, string>>({});
   const [single, setSingle] = useState("");
   const usesGallery = fields.length > 0 && !!galleryEntry;
+  const reconnectApiKeyHeader = connection.credentialRefs?.find(
+    (ref) =>
+      ref.placement === "header" &&
+      typeof ref.key === "string" &&
+      ref.key.toLowerCase() === "x-api-key",
+  );
+  const genericCredentialPath = reconnectApiKeyHeader?.name ?? "credentials.authorization";
 
   const reconnect = useMutation({
     mutationFn: () => {
       const credentialValues = usesGallery
         ? values
-        : { "credentials.authorization": single.trim() };
+        : { [genericCredentialPath]: single.trim() };
       return toolsApi.reconnectConnection(connection.id, credentialValues);
     },
     onSuccess: (result) => {
