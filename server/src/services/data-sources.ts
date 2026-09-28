@@ -424,11 +424,35 @@ export class DataSourcesService {
     const stopWords = new Set([
       "dan", "di", "ke", "dari", "yang", "untuk", "pada", "dengan", "ini", "itu",
       "ada", "apa", "siapa", "aja", "saja", "cek", "isinya", "bisa", "tolong",
-      "the", "and", "is", "of", "in", "to", "what", "who", "where", "how"
+      "the", "and", "is", "of", "in", "to", "what", "who", "where", "how",
+      "menurut", "dalam", "atau", "jika", "adalah", "sebagai", "oleh", "serta",
+      "halaman", "gambar", "bab"
     ]);
-    const cleanTerms = query.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((t) => t.length > 1);
+    const cleanTerms = query.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((t) => t.length > 1 || /^\d+$/.test(t));
     const contentTerms = cleanTerms.filter((t) => !stopWords.has(t));
-    const queryTerms = contentTerms.length > 0 ? contentTerms : cleanTerms;
+
+    // Strip document name boilerplate tokens when searching within a specific data source
+    const sourceNameTokens = new Set<string>();
+    if (options.dataSourceId) {
+      const [matchedDs] = await this.db
+        .select({ name: dataSources.name })
+        .from(dataSources)
+        .where(eq(dataSources.id, options.dataSourceId))
+        .limit(1);
+      if (matchedDs?.name) {
+        matchedDs.name
+          .toLowerCase()
+          .replace(/[^a-z0-9\s]/g, " ")
+          .split(/\s+/)
+          .forEach((w) => {
+            if (w.length > 2) sourceNameTokens.add(w);
+          });
+      }
+    }
+
+    const substantiveTerms = contentTerms.filter((t) => !sourceNameTokens.has(t));
+    const effectiveTerms = substantiveTerms.length >= 2 ? substantiveTerms : contentTerms;
+    const queryTerms = effectiveTerms.length > 0 ? effectiveTerms : cleanTerms;
 
     // Fetch candidate chunks
     let whereClause = eq(dataSourceChunks.companyId, companyId);
@@ -499,23 +523,31 @@ export class DataSourcesService {
 
       // 1. Lexical score
       let lexicalScore = 0;
+      let matchedContentTerms = 0;
+
       for (const term of queryTerms) {
-        if (dsNameLower.includes(term)) lexicalScore += 5.0;
-        if (titleLower.includes(term)) lexicalScore += 3.0;
+        if (dsNameLower.includes(term)) lexicalScore += 1.5;
+        if (titleLower.includes(term)) lexicalScore += 2.0;
         if (contentLower.includes(term)) {
+          matchedContentTerms++;
           const matches = contentLower.split(term).length - 1;
-          lexicalScore += Math.min(matches, 5) * 1.5;
+          lexicalScore += Math.min(matches, 5) * 2.5;
         }
+      }
+
+      // Coverage boost: prioritize passages containing multiple query keywords together
+      if (queryTerms.length > 1 && matchedContentTerms >= 2) {
+        lexicalScore += (matchedContentTerms / queryTerms.length) * 12.0;
       }
 
       // Exact phrase match boost if multi-word query exists
       if (contentTerms.length >= 2) {
         const fullPhrase = contentTerms.join(" ");
         if (contentLower.includes(fullPhrase)) {
-          lexicalScore += 10.0;
+          lexicalScore += 15.0;
         }
         if (dsNameLower.includes(fullPhrase)) {
-          lexicalScore += 15.0;
+          lexicalScore += 5.0;
         }
       }
 
@@ -526,24 +558,39 @@ export class DataSourcesService {
       }
 
       // Combined hybrid score (reciprocal fusion weighted)
-      const combinedScore = denseScore * 0.4 + Math.min(lexicalScore / 10, 1.0) * 0.6;
+      const combinedScore = denseScore * 0.3 + Math.min(lexicalScore / 35, 1.0) * 0.7;
 
       if (combinedScore > 0.05 || lexicalScore > 0) {
-        // Snippet extraction around meaningful query terms
-        let snippet = chunk.content.slice(0, 300) + "...";
-        if (queryTerms.length > 0) {
-          let bestIdx = -1;
-          for (const term of queryTerms) {
-            const idx = contentLower.indexOf(term);
-            if (idx >= 0) {
-              bestIdx = idx;
-              break;
+        // Snippet extraction around highest term match density
+        let snippet = chunk.content.slice(0, 500) + "...";
+        const substantiveTerms = queryTerms.filter((t) => !stopWords.has(t) && t.length > 2);
+        const searchTerms = substantiveTerms.length > 0 ? substantiveTerms : queryTerms;
+
+        if (searchTerms.length > 0 && chunk.content.length > 0) {
+          let bestPos = 0;
+          let maxWindowScore = -1;
+          const windowSize = Math.min(550, chunk.content.length);
+
+          for (let pos = 0; pos <= chunk.content.length - Math.min(windowSize, 200); pos += 80) {
+            const windowText = contentLower.slice(pos, pos + windowSize);
+            let windowScore = 0;
+            for (const term of searchTerms) {
+              if (windowText.includes(term)) {
+                windowScore += 5.0;
+                const cnt = windowText.split(term).length - 1;
+                windowScore += Math.min(cnt, 3) * 1.5;
+              }
+            }
+            if (windowScore > maxWindowScore) {
+              maxWindowScore = windowScore;
+              bestPos = pos;
             }
           }
-          if (bestIdx >= 0) {
-            const start = Math.max(0, bestIdx - 60);
-            const end = Math.min(chunk.content.length, bestIdx + 240);
-            snippet = (start > 0 ? "..." : "") + chunk.content.slice(start, end) + (end < chunk.content.length ? "..." : "");
+
+          if (maxWindowScore > 0) {
+            const start = bestPos;
+            const end = Math.min(chunk.content.length, bestPos + windowSize);
+            snippet = (start > 0 ? "..." : "") + chunk.content.slice(start, end).trim() + (end < chunk.content.length ? "..." : "");
           }
         }
 

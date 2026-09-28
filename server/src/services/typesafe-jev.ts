@@ -838,32 +838,60 @@ export class TypeSafeJevService {
    */
   async rerankAndVerifyRag(
     query: string,
-    chunks: { chunkId: string; content: string; sourceName: string }[],
+    chunks: { chunkId: string; content: string; sourceName: string; baseScore?: number }[],
   ): Promise<{
     topChunkIds: string[];
     confidence: number;
     isAnswerable: boolean;
     answerabilityNote?: string;
   }> {
-    const qTokens = this.tokenize(query);
-    const scored = chunks.map((c) => {
-      const cTokens = this.tokenize(c.content + " " + c.sourceName);
-      const score = this.calculateOverlap(qTokens, cTokens);
-      return { chunkId: c.chunkId, score };
+    const stopWords = new Set([
+      "dan", "di", "ke", "dari", "yang", "untuk", "pada", "dengan", "ini", "itu",
+      "ada", "apa", "siapa", "aja", "saja", "cek", "isinya", "bisa", "tolong",
+      "the", "and", "is", "of", "in", "to", "what", "who", "where", "how",
+      "menurut", "dalam", "atau", "jika", "adalah", "sebagai", "oleh", "serta",
+      "halaman", "gambar", "bab", "berdasarkan", "dokumen"
+    ]);
+
+    const qTokens = this.tokenize(query).filter(
+      (w) => !stopWords.has(w) && (w.length > 2 || /^\d+$/.test(w)),
+    );
+
+    const scored = chunks.map((c, originalIdx) => {
+      const cLower = c.content.toLowerCase();
+      let matchCount = 0;
+      let matchedUnique = 0;
+
+      for (const t of qTokens) {
+        if (cLower.includes(t)) {
+          matchedUnique++;
+          const cnt = cLower.split(t).length - 1;
+          matchCount += Math.min(cnt, 4);
+        }
+      }
+
+      // Coverage boost for multiple distinct substantive terms
+      const coverageRatio = qTokens.length > 0 ? matchedUnique / qTokens.length : 0;
+      const rerankScore =
+        (c.baseScore || (1.0 - originalIdx * 0.1)) * 0.5 +
+        coverageRatio * 0.35 +
+        Math.min(matchCount / 10, 1.0) * 0.15;
+
+      return { chunkId: c.chunkId, score: rerankScore, matchedUnique };
     });
 
     scored.sort((a, b) => b.score - a.score);
-    const topChunkIds = scored.filter((s) => s.score > 0).map((s) => s.chunkId);
-    const finalChunkIds = topChunkIds.length > 0 ? topChunkIds : chunks.map((c) => c.chunkId);
-    const confidence = topChunkIds.length > 0 ? Math.min(0.95, 0.6 + topChunkIds.length * 0.1) : 0.4;
-    const isAnswerable = topChunkIds.length > 0;
+    const topChunkIds = scored.map((s) => s.chunkId);
+    const hasGoodMatches = scored.some((s) => s.matchedUnique >= 1);
+    const confidence = hasGoodMatches ? 0.95 : 0.45;
+    const isAnswerable = hasGoodMatches;
 
     return {
-      topChunkIds: finalChunkIds,
+      topChunkIds,
       confidence,
       isAnswerable,
       answerabilityNote: isAnswerable
-        ? `Found ${finalChunkIds.length} relevant passages mapped to query context.`
+        ? `Found ${topChunkIds.length} relevant passages mapped to query context.`
         : "Low token relevance detected across available document passages.",
     };
   }

@@ -15,8 +15,13 @@ export class KnowledgeAgentService {
   /**
    * Execute RAG search and synthesize grounded evidence using TypeSafe Jev System One
    */
-  async answer(companyId: string, query: string): Promise<SpecialistExecution> {
+  async answer(
+    companyId: string,
+    query: string,
+    options?: { dataSourceId?: string },
+  ): Promise<SpecialistExecution> {
     const searchResults = await this.dataSourcesService.searchKnowledge(companyId, query, {
+      dataSourceId: options?.dataSourceId,
       limit: 6,
     });
 
@@ -38,8 +43,9 @@ export class KnowledgeAgentService {
         query,
         searchResults.map((r) => ({
           chunkId: r.chunkId,
-          content: r.snippet,
+          content: r.content || r.snippet,
           sourceName: r.dataSourceName,
+          baseScore: r.score,
         })),
       );
 
@@ -61,7 +67,7 @@ export class KnowledgeAgentService {
       // fallback to original order
     }
 
-    const citations: Citation[] = orderedResults.slice(0, 4).map((r) => ({
+    const citations: Citation[] = orderedResults.slice(0, 5).map((r) => ({
       sourceName: r.dataSourceName,
       section: r.title || undefined,
       snippet: r.snippet,

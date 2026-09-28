@@ -138,7 +138,9 @@ export class EnterpriseOrchestratorService {
     }
 
     if (route === "knowledge_agent" || route === "research_agent" || route === "hybrid") {
-      const knowledgeResult = await this.knowledgeAgent.answer(companyId, userQuery);
+      const knowledgeResult = await this.knowledgeAgent.answer(companyId, userQuery, {
+        dataSourceId: jevDecision.targetSourceId,
+      });
       specialistExecutions.push(knowledgeResult);
     }
 
