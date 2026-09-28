@@ -455,6 +455,19 @@ export class DatabaseIntegrationService {
       finalSql += ` LIMIT ${limit}`;
     }
 
+    // Query Optimization for High-Volume Databases (AHU_DB tbl_perseroan / ahu_cv):
+    // In MariaDB, B-Tree indexes on nama_perseroan / nama_cv CANNOT be used with leading wildcards (e.g. LIKE '%NAMA%').
+    // Doing a full table scan on 1.6+ million rows across remote connections causes network hangs and timeouts.
+    // If a query contains `nama_perseroan LIKE '%XYZ%'`, optimize by removing the leading '%' so B-Tree index is utilized!
+    if (config.type === "mariadb" || config.type === "mysql") {
+      finalSql = finalSql.replace(
+        /(nama_perseroan|nama_cv|nama_badan_hukum)\s+LIKE\s+['"]%([^%'"\s][^'"]*?)['"]/gi,
+        (_match, col, term) => {
+          return `${col} LIKE '${term}'`;
+        }
+      );
+    }
+
     const start = Date.now();
 
     if (config.type === "postgres") {
@@ -486,6 +499,8 @@ export class DatabaseIntegrationService {
       const conn = await this.createMysqlConnection(config, 8000);
 
       try {
+        // Set statement timeout if supported (15 seconds max to prevent remote network hangs)
+        await conn.query("SET SESSION max_statement_time = 15").catch(() => {});
         const [rows, fields] = await conn.query(finalSql);
         const executionTimeMs = Date.now() - start;
         await conn.end();
