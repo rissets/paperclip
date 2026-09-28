@@ -64,6 +64,24 @@ export interface SemanticDimension {
   sampleValues?: string[];
 }
 
+export interface OnboardingReasoningStep {
+  stage: number;
+  name: string;
+  agent: string;
+  thought: string;
+  decisionSpec?: string;
+  findings?: Record<string, any>;
+  durationMs?: number;
+}
+
+export interface SuggestedQueryTemplate {
+  title: string;
+  query: string;
+  category: "aggregation" | "filtering" | "legal_profiling" | "json_extraction" | "trend" | "general";
+  sqlSnippet?: string;
+  description?: string;
+}
+
 export interface DataSourceSemanticProfile {
   version: string;
   onboardedBy: string;
@@ -78,6 +96,9 @@ export interface DataSourceSemanticProfile {
   relationships?: TableRelation[];
   summary: string;
   onboardedAt: string;
+  reasoningSteps?: OnboardingReasoningStep[];
+  suggestedQueries?: SuggestedQueryTemplate[];
+  jsonStructures?: Record<string, JsonColumnStructure>;
 }
 
 export interface DatabaseConnectionTestResult {
@@ -156,6 +177,8 @@ export interface TableSemanticModel {
   relationships?: TableRelation[];
   synonyms: Record<string, string[]>;
   clickhouseSchema?: ClickhouseSchemaDefinition;
+  suggestedQueries?: SuggestedQueryTemplate[];
+  jsonStructures?: Record<string, JsonColumnStructure>;
 }
 
 export interface DataSource {

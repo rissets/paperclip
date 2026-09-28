@@ -19,6 +19,7 @@ import type {
   CctvConnectionConfig,
   SemanticMetric,
   SemanticDimension,
+  TableRelation,
 } from "@paperclipai/shared";
 import { StructuredIngestionService } from "./structured-ingestion.js";
 import { KnowledgeIngestionService } from "./knowledge-ingestion.js";
@@ -139,6 +140,8 @@ export class OnboardingOrchestratorService {
         const allEntities = new Set<string>();
         const allMetrics: SemanticMetric[] = [];
         const allDimensions: SemanticDimension[] = [];
+        const allSuggestedQueries: any[] = [];
+        const allReasoningSteps: any[] = [];
 
         for (const tableData of tables) {
           totalRows += tableData.rows.length;
@@ -165,7 +168,7 @@ export class OnboardingOrchestratorService {
           const metricCols = tableData.columns.filter((c) => c.role === "metric").map((c) => c.name);
           const colNames = tableData.columns.map((c) => c.name);
 
-          const { entities, primaryMetrics, syncStrategy } = await this.jevService.evaluateEntityAndMetrics(
+          const { entities, primaryMetrics, syncStrategy, suggestedQueries, reasoningSteps } = await this.jevService.evaluateEntityAndMetrics(
             tableData.tableName,
             colNames,
             metricCols,
@@ -173,6 +176,8 @@ export class OnboardingOrchestratorService {
 
           entities.forEach((e) => allEntities.add(e));
           allMetrics.push(...primaryMetrics);
+          if (suggestedQueries) allSuggestedQueries.push(...suggestedQueries);
+          if (reasoningSteps) allReasoningSteps.push(...reasoningSteps);
 
           for (const col of tableData.columns.filter((c) => c.role === "dimension")) {
             allDimensions.push({
@@ -199,6 +204,7 @@ export class OnboardingOrchestratorService {
             syncStrategy,
             mappedBy: specialistAgent,
             decisionSpecs: ["struct.column_role.v1", "struct.entity_metric_mapping.v1", "struct.sync_strategy.v1"],
+            suggestedQueries,
           };
 
           // Insert table definition
@@ -235,6 +241,39 @@ export class OnboardingOrchestratorService {
           }
         }
 
+        // Cross-table relationship discovery with existing tables
+        const existingTables = await this.db
+          .select({
+            id: dataSourceTables.id,
+            tableName: dataSourceTables.tableName,
+            schemaDefinition: dataSourceTables.schemaDefinition,
+          })
+          .from(dataSourceTables)
+          .where(eq(dataSourceTables.companyId, companyId));
+
+        const crossRelationships: TableRelation[] = [];
+        for (const tbl of tables) {
+          for (const col of tbl.columns) {
+            const colLower = col.name.toLowerCase();
+            if (colLower.endsWith("_id") || colLower.startsWith("id_") || colLower.startsWith("kode_")) {
+              for (const extTbl of existingTables) {
+                if (extTbl.tableName.toLowerCase() === tbl.tableName.toLowerCase()) continue;
+                const extCols = (extTbl.schemaDefinition as any[]) || [];
+                const matchingCol = extCols.find((ec: any) => ec.name.toLowerCase() === colLower);
+                if (matchingCol) {
+                  crossRelationships.push({
+                    sourceTable: tbl.tableName,
+                    sourceColumn: col.name,
+                    targetTable: extTbl.tableName,
+                    targetColumn: matchingCol.name,
+                    relationType: "many_to_one",
+                  });
+                }
+              }
+            }
+          }
+        }
+
         // 3c. Synthesize Top-Level DataSource Semantic Profile
         const semanticProfile: DataSourceSemanticProfile = {
           version: "1.0.0",
@@ -245,8 +284,11 @@ export class OnboardingOrchestratorService {
           entities: Array.from(allEntities),
           metrics: allMetrics,
           dimensions: allDimensions.slice(0, 10),
+          relationships: crossRelationships,
           summary: `Dataset terstruktur berisikan ${tables.length} tabel dengan total ${totalRows.toLocaleString()} baris. Dipetakan oleh ${specialistAgent} menggunakan TypeSafe JEV System One.`,
           onboardedAt: new Date().toISOString(),
+          suggestedQueries: allSuggestedQueries,
+          reasoningSteps: allReasoningSteps,
         };
 
         // Update status to 'ready' with semantic profile
@@ -261,6 +303,8 @@ export class OnboardingOrchestratorService {
               sheetNames: tables.map((t) => t.tableName),
               onboardedBy: specialistAgent,
               semanticProfile,
+              onboardingReasoning: allReasoningSteps,
+              suggestedQueries: allSuggestedQueries,
             },
             updatedAt: new Date(),
           })
@@ -320,6 +364,8 @@ export class OnboardingOrchestratorService {
           primaryTopics: domainResult.primaryTopics,
           summary: domainResult.summary,
           onboardedAt: new Date().toISOString(),
+          suggestedQueries: domainResult.suggestedQueries,
+          reasoningSteps: domainResult.reasoningSteps,
         };
 
         // Update status to 'ready' with semantic profile
@@ -333,6 +379,8 @@ export class OnboardingOrchestratorService {
               totalWords,
               onboardedBy: specialistAgent,
               semanticProfile,
+              onboardingReasoning: domainResult.reasoningSteps,
+              suggestedQueries: domainResult.suggestedQueries,
             },
             updatedAt: new Date(),
           })
@@ -460,11 +508,21 @@ export class OnboardingOrchestratorService {
         createdTables.push(tableRow);
       }
 
+      // Collect JSON structures across all tables
+      const jsonStructures: Record<string, any> = {};
+      for (const t of tables) {
+        for (const col of t.schemaDefinition) {
+          if (col.isJson && col.jsonStructure) {
+            jsonStructures[`${t.tableName}.${col.name}`] = col.jsonStructure;
+          }
+        }
+      }
+
       // 3b. Synthesize Database Semantic Profile
       const semanticProfile: DataSourceSemanticProfile = {
         version: "1.0.0",
         onboardedBy: specialistAgent,
-        decisionSpecRefs: ["db.table_role.v1", "db.join_candidates.v1"],
+        decisionSpecRefs: ["db.table_role.v1", "db.join_candidates.v1", "db.json_structure.v1"],
         domain: "relational_database",
         targetAgentAffinity: "data_agent",
         entities: dbSemanticRes.entities,
@@ -472,6 +530,9 @@ export class OnboardingOrchestratorService {
         relationships: dbSemanticRes.relationships,
         summary: `Basis data relasional (${config.type}) dengan ${tables.length} tabel terhubung dan dipetakan oleh ${specialistAgent} menggunakan TypeSafe JEV System One.`,
         onboardedAt: new Date().toISOString(),
+        suggestedQueries: dbSemanticRes.suggestedQueries,
+        reasoningSteps: dbSemanticRes.reasoningSteps,
+        jsonStructures,
       };
 
       // 4. Update data source status to 'ready'
@@ -489,6 +550,9 @@ export class OnboardingOrchestratorService {
             tables: tables.map((t) => t.tableName),
             onboardedBy: specialistAgent,
             semanticProfile,
+            onboardingReasoning: dbSemanticRes.reasoningSteps,
+            suggestedQueries: dbSemanticRes.suggestedQueries,
+            jsonStructures,
           },
           updatedAt: new Date(),
         })

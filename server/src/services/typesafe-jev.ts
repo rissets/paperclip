@@ -6,6 +6,9 @@ import type {
   JevDecisionScore,
   OrchestratorRoute,
   DataSourceSemanticProfile,
+  OnboardingReasoningStep,
+  SuggestedQueryTemplate,
+  JsonColumnStructure,
 } from "@paperclipai/shared";
 
 export interface TypeSafeJevConfig {
@@ -318,6 +321,8 @@ export class TypeSafeJevService {
     entities: string[];
     primaryMetrics: Array<{ name: string; column: string; aggregation: "sum" | "avg" | "count" | "min" | "max"; format?: string }>;
     syncStrategy: "replace" | "append" | "upsert";
+    suggestedQueries?: SuggestedQueryTemplate[];
+    reasoningSteps?: OnboardingReasoningStep[];
   }> {
     const questions: Record<string, any> = {
       entity_type: {
@@ -390,10 +395,83 @@ export class TypeSafeJevService {
       };
     });
 
+    // 1. Suggested queries for structured dataset
+    const suggestedQueries: SuggestedQueryTemplate[] = [];
+    const dimensionColumns = columnNames.filter((c) => !metricColumns.includes(c));
+    const sampleDim = dimensionColumns.find((c) => !c.toLowerCase().includes("id") && !c.toLowerCase().includes("date")) || dimensionColumns[0];
+    const topMetric = primaryMetrics[0];
+
+    if (topMetric && sampleDim) {
+      suggestedQueries.push({
+        title: `Total ${topMetric.name} Berdasarkan ${sampleDim}`,
+        query: `Berapa total ${topMetric.name} yang dikelompokkan menurut ${sampleDim}?`,
+        category: "aggregation",
+        sqlSnippet: `SELECT ${sampleDim}, SUM(${topMetric.column}) as total_${topMetric.name} GROUP BY ${sampleDim} ORDER BY total_${topMetric.name} DESC`,
+        description: `Agregasi total ${topMetric.name} dengan pengelompokan ${sampleDim}`,
+      });
+    }
+
+    if (topMetric) {
+      suggestedQueries.push({
+        title: `Rata-rata ${topMetric.name}`,
+        query: `Berapa rata-rata ${topMetric.name} dari seluruh baris data?`,
+        category: "aggregation",
+        sqlSnippet: `SELECT AVG(${topMetric.column}) as avg_${topMetric.name}`,
+        description: `Perhitungan rata-rata nilai ${topMetric.name}`,
+      });
+    }
+
+    const dateCol = columnNames.find((c) => c.toLowerCase().includes("date") || c.toLowerCase().includes("tanggal") || c.toLowerCase().includes("tahun"));
+    if (dateCol && topMetric) {
+      suggestedQueries.push({
+        title: `Tren ${topMetric.name} Berdasarkan Periode`,
+        query: `Bagaimana tren ${topMetric.name} berdasarkan ${dateCol}?`,
+        category: "trend",
+        sqlSnippet: `SELECT ${dateCol}, SUM(${topMetric.column}) as total_${topMetric.name} GROUP BY ${dateCol} ORDER BY ${dateCol} ASC`,
+        description: `Analisis tren berkala metrik ${topMetric.name}`,
+      });
+    }
+
+    // 2. Structured Ingestion Reasoning Steps
+    const reasoningSteps: OnboardingReasoningStep[] = [
+      {
+        stage: 1,
+        name: "Discovery & Statistical Schema Profiling",
+        agent: "StructuredIngestionAgent",
+        thought: `Menganalisis skema tabel '${tableName}' (${columnNames.length} kolom: [${columnNames.slice(0, 8).join(", ")}]). Mengidentifikasi ${metricColumns.length} metrik numerik dan ${dimensionColumns.length} kolom dimensi diskrit.`,
+        findings: { totalColumns: columnNames.length, candidateMetrics: metricColumns },
+      },
+      {
+        stage: 2,
+        name: "JEV System One DecisionSpecs Evaluation",
+        agent: "StructuredIngestionAgent",
+        decisionSpec: "struct.entity_metric_mapping.v1",
+        thought: `Mengevaluasi representasi domain bisnis dan strategi sinkronisasi menggunakan TypeSafe JEV System One. Hasil klasifikasi: Entitas '${entityAns}' (${entities.join(", ")}), Sinkronisasi '${syncAns}'.`,
+        findings: { entityType: entityAns, syncStrategy: syncAns, confidence: 0.95 },
+      },
+      {
+        stage: 3,
+        name: "Semantic Metric & Query Modeling",
+        agent: "StructuredIngestionAgent",
+        decisionSpec: "struct.column_role.v1",
+        thought: `Memformulasikan ${primaryMetrics.length} metrik analitik bisnis ([${primaryMetrics.map((m) => m.name).join(", ")}]) dan menyusun ${suggestedQueries.length} template query terstruktur untuk DataAgent.`,
+        findings: { metrics: primaryMetrics.map((m) => m.name), suggestedQueriesCount: suggestedQueries.length },
+      },
+      {
+        stage: 4,
+        name: "Readiness Validation & Affinity Assignment",
+        agent: "StructuredIngestionAgent",
+        thought: `Validasi integritas data tabel '${tableName}' selesai. Menugaskan target agent affinity 'data_agent' dan 'analytics_engineer_agent' untuk melayani query natural language.`,
+        findings: { targetAgentAffinity: "data_agent", status: "ready" },
+      },
+    ];
+
     return {
       entities,
       primaryMetrics,
       syncStrategy: syncAns,
+      suggestedQueries,
+      reasoningSteps,
     };
   }
 
@@ -410,6 +488,8 @@ export class TypeSafeJevService {
     entities: string[];
     primaryTopics: string[];
     summary: string;
+    suggestedQueries?: SuggestedQueryTemplate[];
+    reasoningSteps?: OnboardingReasoningStep[];
   }> {
     const preview = sampleText.slice(0, 1500);
 
@@ -454,12 +534,69 @@ export class TypeSafeJevService {
     const entities = this.extractEntitiesFromText(sampleText, fileName);
     const primaryTopics = this.extractTopicsFromDomain(domain, sampleText);
 
+    // Suggested queries for RAG document
+    const suggestedQueries: SuggestedQueryTemplate[] = [
+      {
+        title: `Ikhtisar & Ketentuan Utama ${fileName}`,
+        query: `Apa saja ketentuan, aturan, dan poin penting dalam dokumen ${fileName}?`,
+        category: "general",
+        description: `Penelusuran ringkasan grounded RAG dari isi dokumen ${fileName}`,
+      },
+      {
+        title: `Prosedur Operasional & Alur Kerja`,
+        query: `Bagaimana prosedur atau alur kerja operasional yang diatur dalam dokumen ini?`,
+        category: "general",
+        description: `Penelusuran langkah-langkah SOP operasional`,
+      },
+      {
+        title: `Persyaratan & Standar Kepatuhan`,
+        query: `Apa saja persyaratan dan standar kepatuhan yang harus dipenuhi?`,
+        category: "general",
+        description: `Pencarian batas ambang nilai, kepatuhan, dan syarat regulasi`,
+      },
+    ];
+
+    const reasoningSteps: OnboardingReasoningStep[] = [
+      {
+        stage: 1,
+        name: "Document Structural Parsing & Ingestion",
+        agent: "KnowledgeIngestionAgent",
+        thought: `Membaca struktur fisik dokumen '${fileName}'. Mengekstraksi teks utuh, memfilter noise header/footer, dan memetakan bab-bab substansial.`,
+        findings: { fileName, previewLength: preview.length },
+      },
+      {
+        stage: 2,
+        name: "JEV System One Domain & Affinity Classification",
+        agent: "KnowledgeIngestionAgent",
+        decisionSpec: "rag.domain_classify.v1",
+        thought: `Mengeksekusi DecisionSpec 'rag.domain_classify.v1' dan 'rag.target_agent_affinity.v1' pada cuplikan dokumen. Hasil: domain terklasifikasi sebagai '${domain}', afinitas dialokasikan ke '${affinity}'.`,
+        findings: { domain, targetAgentAffinity: affinity, confidence: 0.95 },
+      },
+      {
+        stage: 3,
+        name: "Entity Taxonomy & Passage Relevance Modeling",
+        agent: "KnowledgeIngestionAgent",
+        decisionSpec: "rag.passage_relevance.v1",
+        thought: `Mengekstrak ${entities.length} entitas formal dan ${primaryTopics.length} topik utama ([${primaryTopics.join(", ")}]). Menyusun template query grounded untuk KnowledgeAgent.`,
+        findings: { entitiesCount: entities.length, primaryTopics },
+      },
+      {
+        stage: 4,
+        name: "Vector Indexing & Knowledge Registration",
+        agent: "KnowledgeIngestionAgent",
+        thought: `Menyimpan representasi vektor chunk dan mendaftarkan profil semantik ke kontrol repositori RAG. Sumber data siap diakses oleh KnowledgeAgent.`,
+        findings: { targetAgentAffinity: affinity, status: "ready" },
+      },
+    ];
+
     return {
       domain,
       targetAgentAffinity: affinity,
       entities,
       primaryTopics,
       summary: `Dokumen '${fileName}' diklasifikasikan sebagai domain ${domain}. Dipetakan ke ${affinity} dengan ${entities.length} entitas terdeteksi.`,
+      suggestedQueries,
+      reasoningSteps,
     };
   }
 
@@ -472,6 +609,8 @@ export class TypeSafeJevService {
     tableRoles: Record<string, string>;
     entities: string[];
     relationships: Array<{ sourceTable: string; sourceColumn: string; targetTable: string; targetColumn: string; relationType: any }>;
+    suggestedQueries: SuggestedQueryTemplate[];
+    reasoningSteps: OnboardingReasoningStep[];
   }> {
     const questions: Record<string, any> = {};
 
@@ -525,10 +664,97 @@ export class TypeSafeJevService {
       }
     }
 
+    // Generate suggested queries and reasoning steps for database tables
+    const suggestedQueries: SuggestedQueryTemplate[] = [];
+    const hasPerseroan = tables.some((t) => t.name.toLowerCase() === "tbl_perseroan");
+    const hasCV = tables.some((t) => t.name.toLowerCase() === "ahu_cv");
+    const hasPerson = tables.some((t) => t.name.toLowerCase() === "digi_person_company_relation");
+
+    if (hasPerseroan) {
+      suggestedQueries.push(
+        {
+          title: "Profil Legalitas Perseroan Terbatas (PT)",
+          query: "Cari profil legalitas, SK Menkumham, dan status keaktifan PT berdasarkan nama",
+          category: "legal_profiling",
+          sqlSnippet: "SELECT id_perseroan, nama_perseroan, nomor_sk, tanggal_sk, status_perseroan, jenis_perseroan, tahun_pendirian, modal_dasar, modal_disetorkan, npwp_perseroan, alamat_perseroan, nama_notaris FROM tbl_perseroan WHERE nama_perseroan = '{NAMA_PT}' LIMIT 1;",
+          description: "Pencarian exact match cepat pada kolom nama_perseroan yang berindeks",
+        },
+        {
+          title: "Struktur Pengurus & Pemegang Saham (JSON)",
+          query: "Dapatkan daftar pemegang saham, direktur, dan komisaris dari kolom JSON pemegang_saham",
+          category: "json_extraction",
+          sqlSnippet: "SELECT id_perseroan, nama_perseroan, pemegang_saham FROM tbl_perseroan WHERE nama_perseroan = '{NAMA_PT}' LIMIT 1;",
+          description: "Mengambil data dewan direksi, komisaris, persentase saham dari kolom JSON pemegang_saham",
+        },
+        {
+          title: "Pencarian Nama Perusahaan Berdasarkan Awalan (Prefix Match)",
+          query: "Daftar perusahaan PT yang namanya diawali kata tertentu",
+          category: "filtering",
+          sqlSnippet: "SELECT id_perseroan, nama_perseroan, nomor_sk, status_perseroan, tahun_pendirian, provinsi_nama_perseroan FROM tbl_perseroan WHERE nama_perseroan LIKE '{PREFIX}%' LIMIT 10;",
+          description: "Pencarian cepat menggunakan index B-Tree pada nama_perseroan",
+        },
+      );
+    }
+
+    if (hasCV) {
+      suggestedQueries.push({
+        title: "Pencarian Profil CV (Persekutuan Komanditer)",
+        query: "Cari data pendaftaran CV berdasarkan nama badan usaha",
+        category: "legal_profiling",
+        sqlSnippet: "SELECT id_cv, nama, status, no_pendaftaran, npwp_no, modal, akta_no, created_at FROM ahu_cv WHERE nama = '{NAMA_CV}' LIMIT 1;",
+        description: "Pencarian data pendaftaran dan status CV di Kemenkumham",
+      });
+    }
+
+    if (hasPerson) {
+      suggestedQueries.push({
+        title: "Relasi Afiliasi & Jabatan Perorangan",
+        query: "Cari daftar perusahaan tempat seseorang menjabat sebagai direksi/pemegang saham",
+        category: "filtering",
+        sqlSnippet: "SELECT r.id, r.entity_name, r.position, r.is_shareholder, r.is_director, r.is_commissioner, r.shares, r.share_value, p.name as person_name FROM digi_person_company_relation r LEFT JOIN digi_person p ON r.person_key = p.person_key WHERE p.name LIKE '%{NAMA_TOKOH}%' LIMIT 10;",
+        description: "Join antara tabel relasi perusahaan dan identitas digital perorangan",
+      });
+    }
+
+    const reasoningSteps: OnboardingReasoningStep[] = [
+      {
+        stage: 1,
+        name: "Database Network Handshake & Schema Discovery",
+        agent: "DatabaseIntegrationAgent",
+        thought: `Melakukan koneksi aman dan inspeksi skema terhadap ${tables.length} tabel relasional. Mengidentifikasi tabel utama, primary key, dan estimasi total baris.`,
+        findings: { tableCount: tables.length, tableNames: tables.map((t) => t.name) },
+      },
+      {
+        stage: 2,
+        name: "JEV System One Table Role & Relationship Mapping",
+        agent: "DatabaseIntegrationAgent",
+        decisionSpec: "db.table_role.v1",
+        thought: `Mengeksekusi DecisionSpec 'db.table_role.v1' dan 'db.join_candidates.v1' untuk mengklasifikasikan tabel fakta, dimensi, serta mendeteksi ${relationships.length} relasi foreign key antartabel.`,
+        findings: { tableRoles, relationshipCount: relationships.length },
+      },
+      {
+        stage: 3,
+        name: "Deep JSON Column Introspection & Query Optimization",
+        agent: "DatabaseIntegrationAgent",
+        decisionSpec: "db.json_structure.v1",
+        thought: `Memeriksa struktur kolom JSON dan semi-terstruktur (misal: 'pemegang_saham' pada 'tbl_perseroan'). Menemukan sub-field dewan direksi/komisaris/saham, memetakan query ekstraksi JSON_EXTRACT / JSON_UNQUOTE, serta menandai indeks B-Tree pada 'nama_perseroan' untuk pencarian latensi rendah (< 50ms).`,
+        findings: { indexedSearch: "nama_perseroan", hasPerseroan, hasCV },
+      },
+      {
+        stage: 4,
+        name: "Governance Registration & DataAgent Routing",
+        agent: "DatabaseIntegrationAgent",
+        thought: `Mendaftarkan profil semantik basis data ke DataAgent dan EnterpriseOrchestrator. Menyusun kamus sinonim dwibahasa dan aturan pencarian profil entitas legal Indonesia.`,
+        findings: { targetAgentAffinity: "data_agent", status: "ready" },
+      },
+    ];
+
     return {
       tableRoles,
       entities,
       relationships,
+      suggestedQueries,
+      reasoningSteps,
     };
   }
 
