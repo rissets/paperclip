@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { eq, and } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
@@ -74,6 +76,17 @@ export class OnboardingOrchestratorService {
     const defaultName = options.name?.trim() || file.originalname.replace(/\.[^/.]+$/, "");
 
     // 1. Create initial Data Source entry with 'onboarding' status
+    let storagePath: string | null = null;
+    try {
+      const uploadDir = path.resolve(process.cwd(), "data", "uploads", companyId);
+      fs.mkdirSync(uploadDir, { recursive: true });
+      const targetPath = path.join(uploadDir, `${Date.now()}_${file.originalname}`);
+      fs.writeFileSync(targetPath, file.buffer);
+      storagePath = targetPath;
+    } catch {
+      // Non-critical if filesystem writes fail
+    }
+
     const [initialDs] = await this.db
       .insert(dataSources)
       .values({
@@ -85,6 +98,7 @@ export class OnboardingOrchestratorService {
         fileName: file.originalname,
         fileSize: file.size || file.buffer.length,
         mimeType: file.mimetype || "application/octet-stream",
+        storagePath,
         metadata: {
           startedAt: new Date().toISOString(),
           extension: ext,
@@ -164,7 +178,7 @@ export class OnboardingOrchestratorService {
         };
       } else {
         // --- KNOWLEDGE / RAG INGESTION PIPELINE ---
-        const { chunks, totalWords } = KnowledgeIngestionService.processDocument(
+        const { chunks, totalWords } = await KnowledgeIngestionService.processDocument(
           file.originalname,
           file.buffer,
           file.mimetype,

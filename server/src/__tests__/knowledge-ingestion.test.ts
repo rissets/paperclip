@@ -61,14 +61,14 @@ function createMockDocx(paragraphs: string[]): Buffer {
 }
 
 describe("KnowledgeIngestionService", () => {
-  it("processes docx file and extracts clean text paragraphs", () => {
+  it("processes docx file and extracts clean text paragraphs", async () => {
     const docxBuf = createMockDocx([
       "Panduan Dashboard Mahasiswa FK MILMED",
       "Universitas Pertahanan Republik Indonesia",
       "Dokumen ini berisi panduan penggunaan sistem LMS militer dan kedokteran.",
     ]);
 
-    const result = KnowledgeIngestionService.processDocument(
+    const result = await KnowledgeIngestionService.processDocument(
       "Panduan_Dashboard_Mahasiswa_FK_MILMED.docx",
       docxBuf,
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -79,5 +79,19 @@ describe("KnowledgeIngestionService", () => {
     expect(result.chunks[0].content).toContain("Panduan Dashboard Mahasiswa FK MILMED");
     expect(result.chunks[0].content).toContain("Universitas Pertahanan Republik Indonesia");
     expect(result.chunks[0].embedding).toHaveLength(128);
+  });
+
+  it("processes pdf file and extracts readable text", async () => {
+    const minimalPdf =
+      "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Count 1/Kids[3 0 R]>>endobj\n3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R/Resources<<>>/Contents 4 0 R>>endobj\n4 0 obj<</Length 44>>stream\nBT /F1 12 Tf 72 712 Td (Danang Haris Setiawan CV) Tj ET\nendstream\nendobj\nxref\n0 5\n0000000000 65535 f \n0000000009 00000 n \n0000000056 00000 n \n0000000111 00000 n \n0000000212 00000 n \ntrailer<</Size 5/Root 1 0 R>>\nstartxref\n307\n%%EOF";
+
+    const result = await KnowledgeIngestionService.processDocument(
+      "Danang Haris Setiawan CV.pdf",
+      Buffer.from(minimalPdf),
+      "application/pdf",
+    );
+
+    expect(result.chunks.length).toBeGreaterThan(0);
+    expect(result.chunks[0].content).toContain("Danang Haris Setiawan CV");
   });
 });

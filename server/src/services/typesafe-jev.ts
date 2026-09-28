@@ -385,12 +385,10 @@ export class TypeSafeJevService {
             selected = "data_agent";
           } else if (query.includes("sop") || query.includes("sla") || query.includes("kebijakan") || query.includes("manual") || query.includes("aturan")) {
             selected = "knowledge_agent";
-          } else if (query.includes("riset") || query.includes("kompetitor") || query.includes("pasar") || query.includes("tren") || query.includes("research")) {
-            selected = "research_agent";
-          } else if (query.includes("chart") || query.includes("grafik") || query.includes("visualisasi") || query.includes("statistik") || query.includes("korelasi")) {
-            selected = "analytics_engineer_agent";
           } else if (query.includes("prediksi") || query.includes("forecast") || query.includes("estimasi") || query.includes("churn")) {
             selected = "prediction_agent";
+          } else if (query.includes("riset") || query.includes("kompetitor") || query.includes("pasar") || query.includes("tren") || query.includes("research")) {
+            selected = "research_agent";
           } else if (query.includes("kirim") || query.includes("email") || query.includes("notifikasi") || query.includes("tiket") || query.includes("mutasi") || query.includes("action")) {
             selected = "action_agent";
           } else if (query.includes("onboard") || query.includes("database") || query.includes("connect") || query.includes("ingest")) {

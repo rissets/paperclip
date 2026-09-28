@@ -78,7 +78,7 @@ describe("Structured Ingestion Service", () => {
 });
 
 describe("Knowledge Ingestion Service", () => {
-  it("chunks markdown documents with structure awareness", () => {
+  it("chunks markdown documents with structure awareness", async () => {
     const markdownDoc = `# Kebijakan Pengadaan Barang dan Jasa
 
 ## Ketentuan Umum
@@ -89,7 +89,7 @@ Pengadaan operasional harian di bawah 10 juta rupiah dapat disetujui langsung ol
 Setiap pemilihan vendor harus membandingkan minimal 3 penawaran harga resmi dari supplier terdaftar.
 Evaluasi didasarkan pada kualitas, rekam jejak, garansi purna jual, dan harga penawaran.`;
 
-    const { chunks, totalWords } = KnowledgeIngestionService.processDocument(
+    const { chunks, totalWords } = await KnowledgeIngestionService.processDocument(
       "SOP_Pengadaan.md",
       Buffer.from(markdownDoc, "utf-8"),
       "text/markdown",

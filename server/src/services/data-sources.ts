@@ -1,4 +1,4 @@
-import { eq, and, desc, sql } from "drizzle-orm";
+import { eq, and, or, ilike, desc, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   dataSources,
@@ -292,15 +292,37 @@ export class DataSourcesService {
   ): Promise<KnowledgeSearchResult[]> {
     const limit = options.limit || 5;
     const queryEmbedding = KnowledgeIngestionService.generateEmbedding(query);
-    const queryTerms = query.toLowerCase().split(/\s+/).filter((t) => t.length > 2);
 
-    // Fetch chunks
+    const stopWords = new Set([
+      "dan", "di", "ke", "dari", "yang", "untuk", "pada", "dengan", "ini", "itu",
+      "ada", "apa", "siapa", "aja", "saja", "cek", "isinya", "bisa", "tolong",
+      "the", "and", "is", "of", "in", "to", "what", "who", "where", "how"
+    ]);
+    const cleanTerms = query.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((t) => t.length > 1);
+    const contentTerms = cleanTerms.filter((t) => !stopWords.has(t));
+    const queryTerms = contentTerms.length > 0 ? contentTerms : cleanTerms;
+
+    // Fetch candidate chunks
     let whereClause = eq(dataSourceChunks.companyId, companyId);
     if (options.dataSourceId) {
       whereClause = and(whereClause, eq(dataSourceChunks.dataSourceId, options.dataSourceId)) as any;
     }
 
-    const chunks = await this.db
+    // Keyword predicates for candidate filtering
+    const termPredicates = queryTerms.slice(0, 5).map((term) =>
+      or(
+        ilike(dataSourceChunks.content, `%${term}%`),
+        ilike(dataSourceChunks.title, `%${term}%`),
+        ilike(dataSources.name, `%${term}%`),
+      )
+    );
+
+    let candidateWhere = whereClause;
+    if (termPredicates.length > 0) {
+      candidateWhere = and(whereClause, or(...termPredicates)) as any;
+    }
+
+    let chunks = await this.db
       .select({
         chunkId: dataSourceChunks.id,
         dataSourceId: dataSourceChunks.dataSourceId,
@@ -312,22 +334,60 @@ export class DataSourcesService {
       })
       .from(dataSourceChunks)
       .innerJoin(dataSources, eq(dataSourceChunks.dataSourceId, dataSources.id))
-      .where(whereClause)
+      .where(candidateWhere)
       .limit(300);
+
+    // If candidate filtering returned fewer than limit, also pull general chunks
+    if (chunks.length < limit && termPredicates.length > 0) {
+      const generalChunks = await this.db
+        .select({
+          chunkId: dataSourceChunks.id,
+          dataSourceId: dataSourceChunks.dataSourceId,
+          title: dataSourceChunks.title,
+          content: dataSourceChunks.content,
+          tokenCount: dataSourceChunks.tokenCount,
+          embedding: dataSourceChunks.embedding,
+          dataSourceName: dataSources.name,
+        })
+        .from(dataSourceChunks)
+        .innerJoin(dataSources, eq(dataSourceChunks.dataSourceId, dataSources.id))
+        .where(whereClause)
+        .limit(300);
+
+      const existingIds = new Set(chunks.map((c) => c.chunkId));
+      for (const gc of generalChunks) {
+        if (!existingIds.has(gc.chunkId)) {
+          chunks.push(gc);
+        }
+      }
+    }
 
     const scoredResults: KnowledgeSearchResult[] = [];
 
     for (const chunk of chunks) {
       const contentLower = chunk.content.toLowerCase();
       const titleLower = (chunk.title || "").toLowerCase();
+      const dsNameLower = (chunk.dataSourceName || "").toLowerCase();
 
       // 1. Lexical score
       let lexicalScore = 0;
       for (const term of queryTerms) {
+        if (dsNameLower.includes(term)) lexicalScore += 5.0;
         if (titleLower.includes(term)) lexicalScore += 3.0;
         if (contentLower.includes(term)) {
           const matches = contentLower.split(term).length - 1;
-          lexicalScore += Math.min(matches, 5) * 1.0;
+          lexicalScore += Math.min(matches, 5) * 1.5;
+        }
+      }
+
+      // Exact phrase match boost if multi-word query exists
+      if (contentTerms.length >= 2) {
+        const fullPhrase = contentTerms.join(" ");
+        if (contentLower.includes(fullPhrase)) {
+          lexicalScore += 10.0;
+        }
+        if (dsNameLower.includes(fullPhrase)) {
+          lexicalScore += 15.0;
         }
       }
 
@@ -338,16 +398,23 @@ export class DataSourcesService {
       }
 
       // Combined hybrid score (reciprocal fusion weighted)
-      const combinedScore = denseScore * 0.6 + Math.min(lexicalScore / 10, 1.0) * 0.4;
+      const combinedScore = denseScore * 0.4 + Math.min(lexicalScore / 10, 1.0) * 0.6;
 
       if (combinedScore > 0.05 || lexicalScore > 0) {
-        // Snippet extraction
+        // Snippet extraction around meaningful query terms
         let snippet = chunk.content.slice(0, 300) + "...";
         if (queryTerms.length > 0) {
-          const firstIdx = contentLower.indexOf(queryTerms[0]);
-          if (firstIdx >= 0) {
-            const start = Math.max(0, firstIdx - 60);
-            const end = Math.min(chunk.content.length, firstIdx + 240);
+          let bestIdx = -1;
+          for (const term of queryTerms) {
+            const idx = contentLower.indexOf(term);
+            if (idx >= 0) {
+              bestIdx = idx;
+              break;
+            }
+          }
+          if (bestIdx >= 0) {
+            const start = Math.max(0, bestIdx - 60);
+            const end = Math.min(chunk.content.length, bestIdx + 240);
             snippet = (start > 0 ? "..." : "") + chunk.content.slice(start, end) + (end < chunk.content.length ? "..." : "");
           }
         }

@@ -1,4 +1,5 @@
 import zlib from "node:zlib";
+import { extractText } from "unpdf";
 
 export interface ParsedChunk {
   chunkIndex: number;
@@ -17,17 +18,30 @@ export class KnowledgeIngestionService {
   /**
    * Process raw document file into structure-aware chunks with embeddings
    */
-  static processDocument(
+  static async processDocument(
     fileName: string,
     buffer: Buffer,
     mimeType?: string,
-  ): { chunks: ParsedChunk[]; totalWords: number } {
+  ): Promise<{ chunks: ParsedChunk[]; totalWords: number }> {
     let rawText = "";
 
     const lowerName = fileName.toLowerCase();
 
-    // Check DOCX format (PKZip archive containing word/document.xml)
-    if (lowerName.endsWith(".docx") || mimeType?.includes("wordprocessingml")) {
+    // 1. PDF Documents: use unpdf for full stream decompression and font decoding
+    if (lowerName.endsWith(".pdf") || mimeType?.includes("pdf")) {
+      try {
+        const pdfResult = await extractText(new Uint8Array(buffer), { mergePages: true });
+        if (pdfResult.text && pdfResult.text.trim().length > 0) {
+          rawText = pdfResult.text;
+        } else {
+          rawText = this.extractPrintableText(buffer);
+        }
+      } catch (err) {
+        console.warn(`[KnowledgeIngestionService] PDF extraction fallback for ${fileName}:`, err);
+        rawText = this.extractPrintableText(buffer);
+      }
+    } else if (lowerName.endsWith(".docx") || mimeType?.includes("wordprocessingml")) {
+      // 2. DOCX Documents: unzip word/document.xml and strip XML tags
       const docxText = this.extractDocxText(buffer);
       if (docxText && docxText.trim().length > 0) {
         rawText = docxText;
@@ -43,9 +57,10 @@ export class KnowledgeIngestionService {
       mimeType?.includes("json") ||
       mimeType?.includes("markdown")
     ) {
+      // 3. Plain text / Markdown / JSON
       rawText = buffer.toString("utf-8");
     } else {
-      // For PDF / Word or binary, extract readable text streams
+      // 4. Fallback binary extraction
       rawText = this.extractPrintableText(buffer);
     }
 
