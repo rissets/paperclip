@@ -90,16 +90,40 @@ export class DataAgentService {
           const dsTables = tables.filter((t) => t.dataSourceId === dbSource.id);
           const quote = dbSource.sourceType === "postgres" ? `"` : "`";
 
-          for (const tbl of dsTables) {
+          // Sort tables: prioritize fact/dimension tables and entity-matched tables ahead of audit/sync logs
+          const sortedTables = [...dsTables].sort((a, b) => {
+            const semA: any = a.semanticModel || {};
+            const semB: any = b.semanticModel || {};
+            const roleWeight = (role?: string) => {
+              if (role === "fact_table") return 4;
+              if (role === "dimension_table") return 3;
+              if (role === "lookup_table") return 2;
+              if (role === "audit_log") return 0;
+              return 1;
+            };
+            const weightA = roleWeight(semA.tableRole);
+            const weightB = roleWeight(semB.tableRole);
+            return weightB - weightA;
+          });
+
+          const isNumericTerm = /^\d+$/.test(cleanQuery);
+
+          for (const tbl of sortedTables) {
             const cols = (tbl.schemaDefinition as any[]) || [];
             const semModel = (tbl.semanticModel as any) || {};
 
             // Dynamic searchable columns: from semanticModel or columns flagged as identifier/identity/isSearchable
-            const searchableColNames: string[] = semModel.searchableColumns && semModel.searchableColumns.length > 0
-              ? semModel.searchableColumns
-              : cols
-                  .filter((c: any) => c.isSearchable || c.role === "identifier" || c.semanticCategory === "identity" || /^(nama_|nama$|name$|_name|title|judul|kode_|code|label)/i.test(c.name))
-                  .map((c: any) => c.name);
+            const searchableCols = cols.filter((c: any) => {
+              // Type matching guard: prevent MySQL string-to-zero type coercion bug on numeric columns!
+              if (!isNumericTerm && (c.dataType === "number" || c.dataType === "integer" || c.dataType === "float")) {
+                return false;
+              }
+              if (semModel.searchableColumns && semModel.searchableColumns.includes(c.name)) {
+                return true;
+              }
+              return c.isSearchable || c.role === "identifier" || c.semanticCategory === "identity" || /^(nama_|nama$|name$|_name|title|judul|kode_|code|label)/i.test(c.name);
+            });
+            const searchableColNames: string[] = searchableCols.map((c: any) => c.name);
 
             // Dynamic candidate search terms:
             // Check if cleanQuery starts with any entity name defined for this table (e.g. "Pelanggan", "Perseroan", "Produk", "Vendor")

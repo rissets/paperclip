@@ -612,6 +612,8 @@ export class TypeSafeJevService {
     relationships: Array<{ sourceTable: string; sourceColumn: string; targetTable: string; targetColumn: string; relationType: any }>;
     suggestedQueries: SuggestedQueryTemplate[];
     reasoningSteps: OnboardingReasoningStep[];
+    primaryTopics: string[];
+    topics: string[];
   }> {
     const questions: Record<string, any> = {};
 
@@ -728,6 +730,42 @@ export class TypeSafeJevService {
       0
     );
 
+    // Extract intelligent semantic topics & clusters based on table names and schemas
+    const discoveredTopics = new Set<string>();
+    const allTableNamesJoined = tables.map((t) => t.name.toLowerCase()).join(" ");
+
+    if (/(perseroan|perusahaan|pt|cv|firma|badan_hukum|koperasi)/i.test(allTableNamesJoined)) {
+      discoveredTopics.add("Legalitas & Badan Usaha");
+      discoveredTopics.add("Entitas Perseroan & CV");
+    }
+    if (/(notaris|sabh|sk|ahu)/i.test(allTableNamesJoined)) {
+      discoveredTopics.add("Administrasi Hukum Umum (AHU)");
+      discoveredTopics.add("Pejabat Notaris & Pengesahan");
+    }
+    if (/(transaksi|payment|voucher|invoice|order|penjualan|pembayaran)/i.test(allTableNamesJoined)) {
+      discoveredTopics.add("Transaksi & Finansial");
+      discoveredTopics.add("Pembayaran & Billing");
+    }
+    if (/(user|person|pelanggan|customer|member|anggota|pegawai)/i.test(allTableNamesJoined)) {
+      discoveredTopics.add("Data Personel & Pengguna");
+    }
+    if (/(wilayah|alamat|lokasi|kabupaten|kota|provinsi)/i.test(allTableNamesJoined)) {
+      discoveredTopics.add("Wilayah & Domisili Geografis");
+    }
+    if (/(log|api|sync|queue|audit)/i.test(allTableNamesJoined)) {
+      discoveredTopics.add("Audit Trail & Log Sinkronisasi");
+    }
+
+    // Also add clean entity names as topics if available
+    for (const t of tables.slice(0, 6)) {
+      const cleanName = t.name.replace(/^(tbl_|m_|t_|ahu_)/i, "").replace(/_/g, " ");
+      if (cleanName.length > 3 && cleanName.length < 25) {
+        discoveredTopics.add(cleanName.charAt(0).toUpperCase() + cleanName.slice(1));
+      }
+    }
+
+    const primaryTopics = Array.from(discoveredTopics);
+
     const reasoningSteps: OnboardingReasoningStep[] = [
       {
         stage: 1,
@@ -767,6 +805,8 @@ export class TypeSafeJevService {
       relationships,
       suggestedQueries,
       reasoningSteps,
+      primaryTopics,
+      topics: primaryTopics,
     };
   }
 
@@ -835,13 +875,18 @@ export class TypeSafeJevService {
       }
     }
 
-    // Find best matching agent based on dynamic capabilities
+    // Find best matching agent based on dynamic capabilities (excluding ingestion-only agents for runtime queries)
     let bestAgentKey = "data_agent";
     let highestAgentScore = 0;
+    const isIntegrationQuery = query.includes("integrasi") || query.includes("hubungkan") || query.includes("connect") || query.includes("onboard") || query.includes("koneksi") || query.includes("tambah source");
 
     for (const ag of agents) {
-      let score = 0;
       const agKey = this.normalizeAgentRouteKey(ag.name);
+      // Ingestion specialists are reserved for integration/onboarding tasks
+      const isIngestionAgent = agKey.includes("integration") || agKey.includes("ingestion");
+      if (isIngestionAgent && !isIntegrationQuery) continue;
+
+      let score = 0;
       const agCaps = (ag.capabilities || "").toLowerCase();
       const agTitle = (ag.title || "").toLowerCase();
 
@@ -886,7 +931,11 @@ export class TypeSafeJevService {
 
         if (key === "route") {
           // Check explicit domain intent signals first
-          if (query.includes("riset") || query.includes("kompetitor") || (query.includes("pasar") && !query.includes("penjualan"))) {
+          if (query.includes("sop") || query.includes("kebijakan") || query.includes("panduan") || query.includes("dokumen") || query.includes("aturan") || query.includes("manual") || query.includes("sla")) {
+            selected = "knowledge_agent";
+          } else if (query.includes("profil") || query.includes("profiling") || query.includes("legalitas") || query.includes("perseroan") || query.includes("pemegang saham") || query.includes("direksi") || query.includes("notaris") || query.includes("sk kemenkumham") || query.includes("npwp") || query.includes("badan hukum")) {
+            selected = "data_agent";
+          } else if (query.includes("riset") || query.includes("kompetitor") || (query.includes("pasar") && !query.includes("penjualan"))) {
             selected = "research_agent";
           } else if (query.includes("grafik") || query.includes("chart") || query.includes("visualisasi") || query.includes("diagram")) {
             selected = "analytics_engineer_agent";

@@ -92,6 +92,7 @@ export interface DataSourceSemanticProfile {
   metrics?: SemanticMetric[];
   dimensions?: SemanticDimension[];
   primaryTopics?: string[];
+  topics?: string[];
   tableRoles?: Record<string, string>;
   relationships?: TableRelation[];
   summary: string;

@@ -103,7 +103,9 @@ export class DataSourcesService {
 
     for (const ds of list) {
       const existingProfile = (ds.metadata as any)?.semanticProfile;
-      if (existingProfile) continue;
+      const hasTopics = existingProfile?.primaryTopics?.length > 0 || existingProfile?.topics?.length > 0;
+
+      if (existingProfile && hasTopics) continue;
 
       if (ds.sourceType === "rag_document") {
         const chunks = await this.db
@@ -123,6 +125,7 @@ export class DataSourcesService {
           targetAgentAffinity: domainResult.targetAgentAffinity,
           entities: domainResult.entities,
           primaryTopics: domainResult.primaryTopics,
+          topics: domainResult.primaryTopics,
           summary: domainResult.summary,
           onboardedAt: new Date().toISOString(),
         };
@@ -146,17 +149,31 @@ export class DataSourcesService {
           .from(dataSourceTables)
           .where(eq(dataSourceTables.dataSourceId, ds.id));
 
+        const tableSummaries = tables.map((t) => ({
+          name: t.tableName,
+          columns: ((t.schemaDefinition as any[]) || []).map((c: any) => c.name),
+          rowCount: t.rowCount,
+        }));
+
+        const dbSemanticRes = await jev.evaluateDatabaseTables(tableSummaries);
         const tableNames = tables.map((t) => t.tableName);
+
         const profile = {
           version: "1.0.0",
           onboardedBy: "DatabaseIntegrationAgent",
-          decisionSpecRefs: ["db.table_role.v1", "db.join_candidates.v1"],
+          decisionSpecRefs: ["db.table_role.v1", "db.join_candidates.v1", "db.json_structure.v1"],
           domain: "relational_database",
           targetAgentAffinity: "data_agent",
-          entities: tableNames.length > 0 ? tableNames : [ds.name],
-          tableRoles: Object.fromEntries(tableNames.map((n) => [n, "dimension_table"])),
-          summary: `Database ${ds.sourceType} dengan tabel [${tableNames.join(", ")}].`,
+          entities: dbSemanticRes.entities.length > 0 ? dbSemanticRes.entities : tableNames,
+          tableRoles: dbSemanticRes.tableRoles,
+          relationships: dbSemanticRes.relationships,
+          primaryTopics: dbSemanticRes.primaryTopics,
+          topics: dbSemanticRes.topics,
+          summary: existingProfile?.summary || `Database ${ds.sourceType} dengan ${tableNames.length} tabel relasional terhubung.`,
           onboardedAt: new Date().toISOString(),
+          suggestedQueries: dbSemanticRes.suggestedQueries,
+          reasoningSteps: dbSemanticRes.reasoningSteps,
+          jsonStructures: existingProfile?.jsonStructures || {},
         };
 
         await this.db

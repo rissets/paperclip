@@ -1076,8 +1076,8 @@ function JevSemanticProfileView({ ds }: { ds: any }) {
             Semantic clusters and thematic keywords indexed for intelligent agent retrieval.
           </p>
           <div className="flex flex-wrap gap-2 pt-1">
-            {profile.topics && profile.topics.length > 0 ? (
-              profile.topics.map((top: string) => (
+            {((profile.topics && profile.topics.length > 0) || (profile.primaryTopics && profile.primaryTopics.length > 0)) ? (
+              (profile.topics || profile.primaryTopics).map((top: string) => (
                 <span
                   key={top}
                   className="rounded-lg bg-muted border border-border px-2.5 py-1 text-xs font-medium text-foreground"

@@ -528,6 +528,8 @@ export class OnboardingOrchestratorService {
         entities: dbSemanticRes.entities,
         tableRoles: dbSemanticRes.tableRoles,
         relationships: dbSemanticRes.relationships,
+        primaryTopics: dbSemanticRes.primaryTopics,
+        topics: dbSemanticRes.topics,
         summary: `Basis data relasional (${config.type}) dengan ${tables.length} tabel terhubung dan dipetakan oleh ${specialistAgent} menggunakan TypeSafe JEV System One.`,
         onboardedAt: new Date().toISOString(),
         suggestedQueries: dbSemanticRes.suggestedQueries,
