@@ -158,7 +158,8 @@ export function dataSourceRoutes(db: Db) {
       const companyId = req.params.companyId as string;
       await assertCompanyAccess(req, companyId);
 
-      const count = await dsService.backfillSemanticProfiles(companyId);
+      const force = req.query?.force === "true" || req.body?.force === true;
+      const count = await dsService.backfillSemanticProfiles(companyId, force);
       res.json({ success: true, updatedCount: count });
     },
   );

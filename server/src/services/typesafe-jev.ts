@@ -185,11 +185,11 @@ export class TypeSafeJevService {
       },
       is_profiling_query: {
         type: "noul",
-        instructions: "Apakah pengguna sedang meminta profil, legalitas, kepemilikan, atau data entitas/perusahaan/PT/CV/perorangan?",
+        instructions: "Apakah pengguna sedang meminta profil, detail atribut, kepemilikan, atau data entitas spesifik?",
       },
       requires_internal_data: {
         type: "noul",
-        instructions: "Apakah query ini harus dijawab menggunakan sumber data internal perusahaan tanpa mencari ke internet eksternal?",
+        instructions: "Apakah query ini harus dijawab menggunakan sumber data internal tanpa mencari ke internet eksternal?",
       },
     };
 
@@ -730,41 +730,8 @@ export class TypeSafeJevService {
       0
     );
 
-    // Extract intelligent semantic topics & clusters based on table names and schemas
-    const discoveredTopics = new Set<string>();
-    const allTableNamesJoined = tables.map((t) => t.name.toLowerCase()).join(" ");
-
-    if (/(perseroan|perusahaan|pt|cv|firma|badan_hukum|koperasi)/i.test(allTableNamesJoined)) {
-      discoveredTopics.add("Legalitas & Badan Usaha");
-      discoveredTopics.add("Entitas Perseroan & CV");
-    }
-    if (/(notaris|sabh|sk|ahu)/i.test(allTableNamesJoined)) {
-      discoveredTopics.add("Administrasi Hukum Umum (AHU)");
-      discoveredTopics.add("Pejabat Notaris & Pengesahan");
-    }
-    if (/(transaksi|payment|voucher|invoice|order|penjualan|pembayaran)/i.test(allTableNamesJoined)) {
-      discoveredTopics.add("Transaksi & Finansial");
-      discoveredTopics.add("Pembayaran & Billing");
-    }
-    if (/(user|person|pelanggan|customer|member|anggota|pegawai)/i.test(allTableNamesJoined)) {
-      discoveredTopics.add("Data Personel & Pengguna");
-    }
-    if (/(wilayah|alamat|lokasi|kabupaten|kota|provinsi)/i.test(allTableNamesJoined)) {
-      discoveredTopics.add("Wilayah & Domisili Geografis");
-    }
-    if (/(log|api|sync|queue|audit)/i.test(allTableNamesJoined)) {
-      discoveredTopics.add("Audit Trail & Log Sinkronisasi");
-    }
-
-    // Also add clean entity names as topics if available
-    for (const t of tables.slice(0, 6)) {
-      const cleanName = t.name.replace(/^(tbl_|m_|t_|ahu_)/i, "").replace(/_/g, " ");
-      if (cleanName.length > 3 && cleanName.length < 25) {
-        discoveredTopics.add(cleanName.charAt(0).toUpperCase() + cleanName.slice(1));
-      }
-    }
-
-    const primaryTopics = Array.from(discoveredTopics);
+    // Dynamically derive semantic topics and clusters based on table roles, entities, and structural column profiles
+    const primaryTopics = this.deriveDynamicDatabaseTopics(tables, tableRoles);
 
     const reasoningSteps: OnboardingReasoningStep[] = [
       {
@@ -808,6 +775,162 @@ export class TypeSafeJevService {
       primaryTopics,
       topics: primaryTopics,
     };
+  }
+
+  /**
+   * Derives semantic topics and conceptual clusters purely from structural table roles,
+   * entity humanization, and column profiles without any hardcoded dictionary strings.
+   */
+  private deriveDynamicDatabaseTopics(
+    tables: Array<{ name: string; columns: any[]; rowCount?: number }>,
+    tableRoles: Record<string, string>,
+  ): string[] {
+    const topicsSet = new Set<string>();
+
+    const cleanEntityName = (name: string): string => {
+      // Strip common technical database prefixes/suffixes: tbl_, t_, m_, mst_, tr_, trx_, d_, dim_, f_, fact_, sys_, v_
+      const stripped = name
+        .replace(/^(tbl_|mst_|dim_|fact_|trx_|sys_|ref_|t_|m_|f_|v_)/i, "")
+        .replace(/(_tbl|_table|_mst|_dim|_fact|_trx|_view)$/i, "");
+      // Split by underscore, dash or camelCase
+      const parts = stripped
+        .replace(/([a-z])([A-Z])/g, "$1 $2")
+        .replace(/[_\-]+/g, " ")
+        .trim()
+        .split(/\s+/);
+      return parts
+        .filter(Boolean)
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+        .join(" ");
+    };
+
+    const factEntities: string[] = [];
+    const dimEntities: string[] = [];
+    const lookupEntities: string[] = [];
+    let hasAuditLog = false;
+    let hasJsonMetadata = false;
+    let hasTemporal = false;
+    let hasMetrics = false;
+    let hasLocation = false;
+    let hasIdentifiers = false;
+
+    for (const t of tables) {
+      const role = tableRoles[t.name] || "dimension_table";
+      const cleanName = cleanEntityName(t.name);
+
+      if (role === "fact_table") {
+        if (cleanName) factEntities.push(cleanName);
+      } else if (role === "dimension_table") {
+        if (cleanName) dimEntities.push(cleanName);
+      } else if (role === "lookup_table") {
+        if (cleanName) lookupEntities.push(cleanName);
+      } else if (role === "audit_log") {
+        hasAuditLog = true;
+      }
+
+      // Check column structural characteristics without domain-specific hardcoding
+      const cols = (t.columns || []).map((c: any) => {
+        if (typeof c === "string") return { name: c, type: "" };
+        return { name: c?.name || "", type: c?.type || "" };
+      });
+
+      for (const col of cols) {
+        const cName = col.name.toLowerCase();
+        const cType = col.type.toLowerCase();
+
+        // JSON or structured document payload
+        if (cType.includes("json") || /(payload|metadata|details|config|attributes|properties|extra|items)/i.test(cName)) {
+          hasJsonMetadata = true;
+        }
+
+        // Temporal / timestamps
+        if (
+          cType.includes("date") ||
+          cType.includes("time") ||
+          /(created|updated|deleted|timestamp|_at|_date|periode|period|tanggal|waktu|year|month)/i.test(cName)
+        ) {
+          hasTemporal = true;
+        }
+
+        // Numeric metrics / aggregation
+        if (
+          cType.includes("int") ||
+          cType.includes("decimal") ||
+          cType.includes("float") ||
+          cType.includes("double") ||
+          cType.includes("numeric")
+        ) {
+          if (/(total|amount|qty|quantity|count|price|nominal|subtotal|balance|rate|score|persen|percent)/i.test(cName)) {
+            hasMetrics = true;
+          }
+        }
+
+        // Geographic / location attributes
+        if (/(address|city|province|state|district|country|location|lat|latitude|lng|longitude|postal|zip|wilayah|daerah|desa|kelurahan|kecamatan|kabupaten|kota)/i.test(cName)) {
+          hasLocation = true;
+        }
+
+        // Identifier / status codes
+        if (/(code|kode|status|type|tipe|uuid|reg_no|nomor|identifier|ref_no)/i.test(cName)) {
+          hasIdentifiers = true;
+        }
+      }
+    }
+
+    // Add structural topic groups derived from tables
+    if (dimEntities.length > 0) {
+      const topDims = dimEntities.slice(0, 3).join(", ");
+      topicsSet.add(`Master Entitas (${topDims}${dimEntities.length > 3 ? `, +${dimEntities.length - 3} lainnya` : ""})`);
+      for (const ent of dimEntities.slice(0, 4)) {
+        topicsSet.add(`Profil & Manajemen ${ent}`);
+      }
+    }
+
+    if (factEntities.length > 0) {
+      const topFacts = factEntities.slice(0, 3).join(", ");
+      topicsSet.add(`Transaksi & Aktivitas Bisnis (${topFacts})`);
+      for (const ent of factEntities.slice(0, 3)) {
+        topicsSet.add(`Histori & Kejadian ${ent}`);
+      }
+    }
+
+    if (lookupEntities.length > 0) {
+      const topLookups = lookupEntities.slice(0, 3).join(", ");
+      topicsSet.add(`Klasifikasi & Standarisasi Referensi (${topLookups})`);
+    }
+
+    if (hasAuditLog) {
+      topicsSet.add("Audit Trail & Log Aktivitas Sistem");
+    }
+
+    if (hasMetrics) {
+      topicsSet.add("Metrik Finansial & Agregasi Kuantitatif");
+    }
+
+    if (hasTemporal) {
+      topicsSet.add("Analisis Tren Waktu & Linimasa Kejadian");
+    }
+
+    if (hasLocation) {
+      topicsSet.add("Distribusi Geografis & Lokasi Wilayah");
+    }
+
+    if (hasJsonMetadata) {
+      topicsSet.add("Atribut Fleksibel & Metadata Dokumen JSON");
+    }
+
+    if (hasIdentifiers) {
+      topicsSet.add("Pencarian Entitas Berdasarkan Nomor Registrasi & Kode Unik");
+    }
+
+    // Fallback if empty
+    if (topicsSet.size === 0) {
+      for (const t of tables.slice(0, 4)) {
+        topicsSet.add(`Entitas ${cleanEntityName(t.name)}`);
+      }
+    }
+
+    return Array.from(topicsSet);
   }
 
   /**
@@ -904,7 +1027,7 @@ export class TypeSafeJevService {
     for (const [key, q] of Object.entries(questions)) {
       if (q.type === "noul") {
         if (key === "is_profiling_query") {
-          const hasEntityMatch = highestSourceScore >= 5.0 || query.includes("siapa") || query.includes("profil") || query.includes("perusahaan");
+          const hasEntityMatch = highestSourceScore >= 5.0 || /(siapa|profil|profiling|detail|cek|info|data|status)/i.test(query);
           answers[key] = {
             type: "noul",
             noul: hasEntityMatch ? 0.95 : 0.2,

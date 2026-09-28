@@ -38,35 +38,41 @@ export class DataAgentService {
 
     const queryLower = query.toLowerCase();
 
-    // 1. Check if this is an Entity / Company Profiling Query (e.g., "profiling PT Bagus Harapan Tritunggal")
-    const isProfilingKeyword =
+    // 1. Dynamic Entity Lookup & Profiling Detection
+    // Collect all known entity names from onboarded tables' semantic models and table names
+    const knownEntities = new Set<string>();
+    for (const t of tables) {
+      const sModel: any = t.semanticModel || {};
+      for (const ent of sModel.entities || []) {
+        if (typeof ent === "string" && ent.length >= 2) knownEntities.add(ent.toLowerCase());
+      }
+      const cleaned = t.tableName.replace(/^(tbl_|mst_|dim_|fact_|trx_|sys_|ref_|t_|m_|f_|v_)/i, "").toLowerCase();
+      for (const part of cleaned.split(/[\s_\-]+/)) {
+        if (part.length >= 2) knownEntities.add(part);
+      }
+    }
+
+    const matchesKnownEntity = Array.from(knownEntities).some((ent) => queryLower.includes(ent));
+    const hasLookupVerb =
+      /^(profiling|profil|cari|carikan|info|data|detail|cek|siapa|tampilkan|lookup|find|show|status)\b/i.test(query.trim()) ||
       queryLower.includes("profil") ||
       queryLower.includes("profiling") ||
-      queryLower.includes("pt ") ||
-      queryLower.includes("cv ") ||
-      queryLower.includes("perseroan") ||
-      queryLower.includes("legalitas") ||
-      queryLower.includes("direksi") ||
-      queryLower.includes("pemegang saham") ||
-      queryLower.includes("notaris") ||
-      queryLower.includes("sk kemenkumham") ||
-      queryLower.includes("npwp") ||
-      queryLower.includes("badan hukum");
+      queryLower.includes("detail");
 
-    // Also check with TypeSafe Jev System One
-    let isProfiling = isProfilingKeyword;
+    // Also check with TypeSafe Jev System One if ambiguous
+    let isProfiling = matchesKnownEntity || hasLookupVerb;
     if (!isProfiling) {
       try {
         const jevCheck = await this.jevService.systemOne(
           { user_query: query },
           {
-            is_company_profiling: {
+            is_entity_lookup: {
               type: "noul",
-              instructions: "Apakah query ini menanyakan profil, pengurus, legalitas, atau data perseroan/perusahaan?",
+              instructions: "Apakah query ini menanyakan informasi spesifik, profil, atribut, atau status dari suatu entitas/objek dalam basis data?",
             },
           },
         );
-        const ans = jevCheck.answers["is_company_profiling"] as any;
+        const ans = jevCheck.answers["is_entity_lookup"] as any;
         if (ans && ans.noul >= 0.5) isProfiling = true;
       } catch {
         // use heuristic
@@ -196,7 +202,7 @@ export class DataAgentService {
       return {
         agent: "data_agent",
         task: "Query structured database",
-        resultsSummary: "Data perusahaan tidak ditemukan dalam data source internal yang aktif.",
+        resultsSummary: "Data tidak ditemukan dalam tabel internal yang aktif.",
       };
     }
 

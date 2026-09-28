@@ -87,7 +87,7 @@ export class DataSourcesService {
    * Automatically backfill missing semantic profiles for existing data sources
    * and ensure the full 17-agent enterprise roster is registered.
    */
-  async backfillSemanticProfiles(companyId: string): Promise<number> {
+  async backfillSemanticProfiles(companyId: string, force: boolean = false): Promise<number> {
     const { EnterpriseAgentRosterService } = await import("./enterprise-agent-roster.js");
     const rosterService = new EnterpriseAgentRosterService(this.db);
     await rosterService.ensureEnterpriseRoster(companyId);
@@ -105,7 +105,7 @@ export class DataSourcesService {
       const existingProfile = (ds.metadata as any)?.semanticProfile;
       const hasTopics = existingProfile?.primaryTopics?.length > 0 || existingProfile?.topics?.length > 0;
 
-      if (existingProfile && hasTopics) continue;
+      if (!force && existingProfile && hasTopics) continue;
 
       if (ds.sourceType === "rag_document") {
         const chunks = await this.db
