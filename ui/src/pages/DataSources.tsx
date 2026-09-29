@@ -43,6 +43,7 @@ export function DataSources() {
   // File Upload modal state
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [customName, setCustomName] = useState("");
   const [customDescription, setCustomDescription] = useState("");
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -103,22 +104,29 @@ export function DataSources() {
   });
 
   const uploadMutation = useMutation({
-    mutationFn: (file: File) =>
-      dataSourcesApi.upload(selectedCompanyId!, file, {
-        name: customName || undefined,
+    mutationFn: (files: File[]) =>
+      dataSourcesApi.upload(selectedCompanyId!, files, {
+        name: files.length === 1 ? customName || undefined : undefined,
         description: customDescription || undefined,
       }),
-    onSuccess: (newDs) => {
+    onSuccess: (res) => {
       queryClient.invalidateQueries({ queryKey: ["data-sources", selectedCompanyId] });
       setIsUploadOpen(false);
       setSelectedFile(null);
+      setSelectedFiles([]);
       setCustomName("");
       setCustomDescription("");
       setUploadError(null);
-      navigate(`/data-sources/${newDs.id}`);
+      if (res.count && res.count > 1) {
+        setBackfillStatus(`${res.count} data sources queued for autonomous onboarding. Track progress below.`);
+        setTimeout(() => setBackfillStatus(null), 8000);
+      } else if (res.id) {
+        navigate(`/data-sources/${res.id}`);
+      }
     },
     onError: (err: any) => {
       setUploadError(err?.message || "Failed to onboard data source.");
+      setIsUploadOpen(true);
     },
   });
 
@@ -210,21 +218,51 @@ export function DataSources() {
     },
   });
 
+  const { data: chStatus, refetch: refetchChStatus } = useQuery({
+    queryKey: ["clickhouse-status", selectedCompanyId],
+    queryFn: () => dataSourcesApi.getClickhouseStatus(selectedCompanyId!),
+    enabled: !!selectedCompanyId,
+  });
+
+  const syncClickhouseMutation = useMutation({
+    mutationFn: () => dataSourcesApi.syncAllClickhouse(selectedCompanyId!),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["data-sources", selectedCompanyId] });
+      refetchChStatus();
+      setBackfillStatus(
+        `ClickHouse OLAP synced successfully: ${data.syncedTables.length} tables (${data.totalRows.toLocaleString()} rows) into ${data.companyDatabase}.`,
+      );
+      setTimeout(() => setBackfillStatus(null), 8000);
+    },
+    onError: (err: any) => {
+      setBackfillStatus(`ClickHouse sync error: ${err?.message || "Unknown error"}`);
+    },
+  });
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      setSelectedFile(file);
-      if (!customName) {
-        setCustomName(file.name.replace(/\.[^/.]+$/, ""));
+    if (e.target.files && e.target.files.length > 0) {
+      const files = Array.from(e.target.files);
+      setSelectedFiles(files);
+      setSelectedFile(files[0]);
+      if (files.length === 1) {
+        if (!customName) {
+          setCustomName(files[0].name.replace(/\.[^/.]+$/, ""));
+        }
+      } else {
+        setCustomName("");
       }
+    } else {
+      setSelectedFiles([]);
+      setSelectedFile(null);
     }
   };
 
   const handleUploadSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedFile) return;
+    if (selectedFiles.length === 0) return;
     setUploadError(null);
-    uploadMutation.mutate(selectedFile);
+    setIsUploadOpen(false);
+    uploadMutation.mutate(selectedFiles);
   };
 
   const handleEngineChange = (type: "postgres" | "mariadb" | "mysql") => {
@@ -325,6 +363,15 @@ export function DataSources() {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <button
+            onClick={() => syncClickhouseMutation.mutate()}
+            disabled={syncClickhouseMutation.isPending}
+            title="Synchronize all tabular schemas and datasets into ClickHouse OLAP engine"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-xs font-medium text-foreground shadow-sm transition-colors hover:bg-muted disabled:opacity-50"
+          >
+            <Zap className="h-3.5 w-3.5 text-amber-500" />
+            {syncClickhouseMutation.isPending ? "Syncing OLAP..." : "Sync ClickHouse"}
+          </button>
+          <button
             onClick={() => backfillMutation.mutate()}
             disabled={backfillMutation.isPending}
             title="Re-run TypeSafe JEV System One DecisionSpecs across all existing data sources"
@@ -383,6 +430,27 @@ export function DataSources() {
           </div>
           <button onClick={() => setBackfillStatus(null)} className="text-xs hover:underline">
             Dismiss
+          </button>
+        </div>
+      )}
+
+      {chStatus?.ok && (
+        <div className="flex items-center justify-between rounded-lg border border-border bg-card p-3 text-xs text-foreground shadow-sm">
+          <div className="flex items-center gap-2.5">
+            <span className="flex h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+            <span className="font-semibold text-foreground">ClickHouse OLAP Active</span>
+            <span className="text-muted-foreground">
+              v{chStatus.version} • {chStatus.tables.length} tables synced • Database:{" "}
+              <code className="rounded bg-muted px-1.5 py-0.5 text-xs font-mono text-foreground">{chStatus.companyDatabase}</code>
+            </span>
+          </div>
+          <button
+            onClick={() => syncClickhouseMutation.mutate()}
+            disabled={syncClickhouseMutation.isPending}
+            className="inline-flex items-center gap-1 font-medium text-primary hover:underline disabled:opacity-50"
+          >
+            <RefreshCw className={`h-3 w-3 ${syncClickhouseMutation.isPending ? "animate-spin" : ""}`} />
+            Refresh OLAP
           </button>
         </div>
       )}
@@ -932,27 +1000,47 @@ export function DataSources() {
             <form onSubmit={handleUploadSubmit} className="mt-4 space-y-4">
               <div>
                 <label className="block text-xs font-medium text-foreground mb-1">
-                  Source File (.csv, .xlsx, .xls, .pdf, .docx, .md, .txt)
+                  Source File(s) (.csv, .xlsx, .xls, .pdf, .docx, .md, .txt)
                 </label>
                 <input
                   type="file"
+                  multiple
                   accept=".csv,.tsv,.xlsx,.xls,.pdf,.docx,.txt,.md"
                   onChange={handleFileChange}
                   className="block w-full text-xs text-muted-foreground file:mr-3 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:text-xs file:font-medium file:bg-muted file:text-foreground hover:file:bg-muted/80 cursor-pointer border border-border rounded-md p-1"
                   required
                 />
+                {selectedFiles.length > 0 && (
+                  <div className="mt-2 space-y-1.5">
+                    <div className="flex items-center justify-between text-xs text-muted-foreground">
+                      <span>{selectedFiles.length} file(s) selected</span>
+                      <span>
+                        {(selectedFiles.reduce((acc, f) => acc + f.size, 0) / (1024 * 1024)).toFixed(2)} MB total
+                      </span>
+                    </div>
+                    <div className="max-h-28 overflow-y-auto rounded-md border border-border bg-muted/40 p-2 space-y-1">
+                      {selectedFiles.map((f, i) => (
+                        <div key={i} className="flex items-center justify-between text-xs">
+                          <span className="truncate max-w-xs font-mono text-foreground">{f.name}</span>
+                          <span className="text-muted-foreground shrink-0">{(f.size / 1024).toFixed(0)} KB</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div>
                 <label className="block text-xs font-medium text-foreground mb-1">
-                  Data Source Name
+                  Data Source Name {selectedFiles.length > 1 && <span className="text-muted-foreground font-normal">(Auto-named in batch)</span>}
                 </label>
                 <input
                   type="text"
                   value={customName}
                   onChange={(e) => setCustomName(e.target.value)}
-                  placeholder="e.g. Sales Q3 Transaksi"
-                  className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                  placeholder={selectedFiles.length > 1 ? "Auto-named per file in batch" : "e.g. Sales Q3 Transaksi"}
+                  disabled={selectedFiles.length > 1}
+                  className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60 disabled:cursor-not-allowed"
                 />
               </div>
 
@@ -975,6 +1063,7 @@ export function DataSources() {
                   onClick={() => {
                     setIsUploadOpen(false);
                     setSelectedFile(null);
+                    setSelectedFiles([]);
                     setUploadError(null);
                   }}
                   disabled={uploadMutation.isPending}
@@ -984,11 +1073,15 @@ export function DataSources() {
                 </button>
                 <button
                   type="submit"
-                  disabled={!selectedFile || uploadMutation.isPending}
+                  disabled={selectedFiles.length === 0 || uploadMutation.isPending}
                   className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors shadow-sm"
                 >
                   {uploadMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
-                  {uploadMutation.isPending ? "Onboarding..." : "Start Onboarding"}
+                  {uploadMutation.isPending
+                    ? "Onboarding..."
+                    : selectedFiles.length > 1
+                    ? `Onboard ${selectedFiles.length} Files`
+                    : "Start Onboarding"}
                 </button>
               </div>
             </form>

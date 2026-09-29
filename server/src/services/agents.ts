@@ -1021,9 +1021,20 @@ export function agentService(db: Db) {
       return getById(updated.id);
     },
 
-    terminate: async (id: string) => {
+    terminate: async (id: string, options?: { allowBuiltInTermination?: boolean }) => {
       const existing = await getById(id);
       if (!existing) return null;
+
+      if (!options?.allowBuiltInTermination) {
+        const builtInMarker = readBuiltInAgentMarker(existing.metadata);
+        if (builtInMarker) {
+          throw conflict("Built-in agents cannot be terminated; pause them instead", {
+            code: "built_in_agent_unterminatable",
+            key: builtInMarker.key,
+            featureKeys: builtInMarker.featureKeys,
+          });
+        }
+      }
 
       await db
         .update(agents)

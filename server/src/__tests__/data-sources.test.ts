@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import * as XLSX from "xlsx";
 import { StructuredIngestionService } from "../services/structured-ingestion.js";
 import { KnowledgeIngestionService } from "../services/knowledge-ingestion.js";
+import { TypeSafeJevService } from "../services/typesafe-jev.js";
 
 describe("Structured Ingestion Service", () => {
   it("parses and profiles CSV data accurately with roles and semantic model", () => {
@@ -222,8 +223,8 @@ describe("Database Integration Service", () => {
 
     // ClickHouse type should be an Array(Tuple(...))
     expect(inspection.clickhouseType).toContain("Array(Tuple(");
-    expect(inspection.clickhouseType).toContain("nama_badan_hukum String");
-    expect(inspection.clickhouseType).toContain("jumlah_lembar Float64");
+    expect(inspection.clickhouseType).toContain("`nama_badan_hukum` String");
+    expect(inspection.clickhouseType).toContain("`jumlah_lembar` Float64");
 
     // Test semantic model generation with nested dimensions and ClickHouse DDL
     const mockColumns: any[] = [
@@ -438,6 +439,101 @@ describe("TypeSafe Jev System One Decision Plane", () => {
 
     const buildRes = await jev.routeUserQuery("buat agen baru untuk divisi logistik", sources);
     expect(buildRes.route).toBe("agent_builder");
+  });
+
+  it("dynamically discovers cross-table relationships without hardcoded dictionaries", async () => {
+    const jev = new TypeSafeJevService();
+
+    const sourceTables = [
+      {
+        tableName: "data_retail",
+        columns: [
+          { name: "id", role: "identifier" },
+          { name: "customer_id", role: "identifier" },
+          { name: "product_id", role: "identifier" },
+          { name: "total_omset", role: "metric" },
+        ],
+      },
+    ];
+
+    const candidateTables = [
+      {
+        tableName: "tbl_customers",
+        columns: [
+          { name: "id", role: "identifier" },
+          { name: "nama_pelanggan", role: "dimension" },
+        ],
+      },
+      {
+        tableName: "tbl_products",
+        columns: [
+          { name: "id", role: "identifier" },
+          { name: "nama_produk", role: "dimension" },
+        ],
+      },
+    ];
+
+    const { relationships, reasoningSteps } = await jev.evaluateCrossTableRelations(
+      sourceTables,
+      candidateTables,
+    );
+
+    expect(relationships.length).toBeGreaterThanOrEqual(2);
+    expect(
+      relationships.some(
+        (r) =>
+          r.sourceTable === "data_retail" &&
+          r.sourceColumn === "customer_id" &&
+          r.targetTable === "tbl_customers" &&
+          r.targetColumn === "id",
+      ),
+    ).toBe(true);
+    expect(
+      relationships.some(
+        (r) =>
+          r.sourceTable === "data_retail" &&
+          r.sourceColumn === "product_id" &&
+          r.targetTable === "tbl_products" &&
+          r.targetColumn === "id",
+      ),
+    ).toBe(true);
+
+    expect(reasoningSteps.length).toBeGreaterThanOrEqual(1);
+    expect(reasoningSteps[0].decisionSpec).toBe("struct.relation_discovery.v1");
+    expect(reasoningSteps[0].agent).toBe("StructuredIngestionAgent");
+  });
+
+  it("synthesizes semantic topics dynamically via struct.topic_synthesis.v1", async () => {
+    const jev = new TypeSafeJevService();
+
+    const tables = [
+      {
+        tableName: "data_retail",
+        columns: [
+          { name: "customer_id", role: "identifier" },
+          { name: "omzet", role: "metric" },
+          { name: "kota_cabang", role: "dimension" },
+          { name: "tanggal_transaksi", role: "timestamp" },
+        ],
+      },
+    ];
+
+    const { topics, reasoningSteps } = await jev.evaluateDatasetTopics(
+      tables,
+      ["Pelanggan", "Retail"],
+      [{ name: "omzet", aggregation: "sum" }],
+      [{ name: "kota_cabang", sampleValues: ["Jakarta", "Surabaya"] }],
+    );
+
+    expect(topics.length).toBeGreaterThan(0);
+    expect(topics.some((t) => t.includes("Pelanggan"))).toBe(true);
+    expect(topics.some((t) => t.includes("Omzet"))).toBe(true);
+    expect(topics.some((t) => t.includes("Geografis") || t.includes("Wilayah"))).toBe(true);
+    expect(topics.some((t) => t.includes("Waktu") || t.includes("Periode"))).toBe(true);
+
+    expect(reasoningSteps.length).toBeGreaterThanOrEqual(1);
+    expect(reasoningSteps[0].decisionSpec).toBe("struct.topic_synthesis.v1");
+    expect(reasoningSteps[0].agent).toBe("StructuredIngestionAgent");
   });
 });
 

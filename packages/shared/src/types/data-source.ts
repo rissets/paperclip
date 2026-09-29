@@ -5,13 +5,14 @@ export type DataSourceType =
   | "postgres"
   | "mariadb"
   | "mysql"
+  | "clickhouse"
   | "api_rest"
   | "mqtt_iot"
   | "cctv_feed";
 export type DataSourceStatus = "onboarding" | "processing" | "ready" | "error";
 
 export interface DatabaseConnectionConfig {
-  type: "postgres" | "mariadb" | "mysql";
+  type: "postgres" | "mariadb" | "mysql" | "clickhouse";
   host: string;
   port: number;
   database: string;
@@ -82,6 +83,39 @@ export interface SuggestedQueryTemplate {
   description?: string;
 }
 
+export interface TableSemanticProfile {
+  tableName: string;
+  tableRole?: "fact_table" | "dimension_table" | "lookup_table" | "bridge_table";
+  context?: string;
+  topics?: string[];
+  entities?: string[];
+  decisionSpecRefs?: string[];
+  relationships?: TableRelation[];
+  metrics?: SemanticMetric[];
+  dimensions?: SemanticDimension[];
+  suggestedQueries?: SuggestedQueryTemplate[];
+  sampleRowCount?: number;
+}
+
+export interface CrossTableCluster {
+  clusterName: string;
+  description: string;
+  tables: string[];
+  topics: string[];
+}
+
+export interface DocumentSemanticProfile {
+  id?: string;
+  title: string;
+  domain?: string;
+  context?: string;
+  topics?: string[];
+  entities?: string[];
+  chunkCount?: number;
+  wordCount?: number;
+  decisionSpecRefs?: string[];
+}
+
 export interface DataSourceSemanticProfile {
   version: string;
   onboardedBy: string;
@@ -100,6 +134,9 @@ export interface DataSourceSemanticProfile {
   reasoningSteps?: OnboardingReasoningStep[];
   suggestedQueries?: SuggestedQueryTemplate[];
   jsonStructures?: Record<string, JsonColumnStructure>;
+  tableProfiles?: Record<string, TableSemanticProfile>;
+  crossTableClusters?: CrossTableCluster[];
+  documentProfiles?: DocumentSemanticProfile[];
 }
 
 export interface DatabaseConnectionTestResult {
@@ -173,6 +210,10 @@ export interface ClickhouseSchemaDefinition {
 export interface TableSemanticModel {
   tableName: string;
   description: string;
+  context?: string;
+  topics?: string[];
+  tableRole?: "fact_table" | "dimension_table" | "lookup_table" | "bridge_table";
+  decisionSpecs?: string[];
   entities?: string[];
   searchableColumns?: string[];
   dimensions: { name: string; description: string; sampleValues?: string[] }[];

@@ -34,6 +34,7 @@ const ACTION_DOMAINS: { value: string; label: string }[] = [
   { value: ALL, label: "All actions" },
   { value: "issue.", label: "Tasks" },
   { value: "agent.", label: "Agents" },
+  { value: "data_source.", label: "Data sources" },
   { value: "heartbeat.", label: "Runs" },
   { value: "approval.", label: "Approvals" },
   { value: "project.", label: "Projects" },
@@ -48,6 +49,7 @@ const ENTITY_TYPES: { value: string; label: string }[] = [
   { value: ALL, label: "All entities" },
   { value: "issue", label: "Task" },
   { value: "agent", label: "Agent" },
+  { value: "data_source", label: "Data source" },
   { value: "heartbeat_run", label: "Run" },
   { value: "routine", label: "Routine" },
   { value: "project", label: "Project" },
@@ -182,6 +184,14 @@ function AuditEntityNode({ record }: { record: AuditActionRecord }) {
     return (
       <Link to={`/apps/${connectionId}/permissions`} className="font-medium text-primary hover:underline">
         the connection
+      </Link>
+    );
+  }
+  if (record.entityType === "data_source") {
+    const dsName = (record.details as any)?.dataSourceName || (record.details as any)?.name;
+    return (
+      <Link to={`/data-sources/${record.entityId}`} className="font-medium text-primary hover:underline">
+        {dsName ? `${dsName}` : "the data source"}
       </Link>
     );
   }

@@ -1,11 +1,11 @@
 # Enterprise AI Agent Platform — Tech Stack, Architecture & Deployment Topology
 
-> **Status:** Recommended technical baseline  
-> **Backend preference:** Django  
-> **Architecture style:** Modular monolith first, scale-out only when justified  
-> **Primary language:** Python 3.13  
-> **Document date:** 2026-09-18  
-> **Scope:** Full technical stack for the enterprise AI agent platform previously designed: multi-source onboarding, agent orchestration, custom department agents, Agent/Skill/Tool/Data Source Registry, A2A, MCP, RAG, structured analytics, IoT, CCTV, Tool Executor, runtime state, artifacts, observability, evaluation, security, secret references, and deployment topology.
+> **Status:** Production implementation baseline  
+> **Control Plane:** Paperclip (`@paperclipai/server`, `@paperclipai/db`, `@paperclipai/ui`, `@paperclipai/shared`)  
+> **Architecture style:** TypeScript/Express Control Plane + Dual Storage (PostgreSQL RAG + ClickHouse OLAP)  
+> **Primary language:** TypeScript / Node.js 24 + Python ML/Data integrations  
+> **Document date:** 2026-09-29  
+> **Scope:** Full technical stack for the enterprise AI agent platform: multi-source onboarding, agent orchestration, custom department agents, Agent/Skill/Tool/Data Source Registry, A2A, MCP, RAG, structured analytics, IoT, CCTV, Tool Executor, runtime state, artifacts, observability, evaluation, security, secret references, and deployment topology.
 
 ---
 
@@ -15,8 +15,8 @@ Platform ini dibangun sebagai **Enterprise AI Agent Platform** yang memungkinkan
 
 - menghubungkan banyak jenis data source;
 - melakukan onboarding data secara otomatis;
-- menyediakan Main Enterprise Agent;
-- menyediakan specialist agents;
+- menyediakan Main Enterprise Agent (Homseo - Chief of Staff);
+- menyediakan 17 specialist agents enterprise;
 - membuat custom department agent seperti Sales Agent, Finance Agent, HR Agent, Warehouse Agent, Legal Agent, Procurement Agent, dan lain-lain;
 - membuat dan memasang skill baru ke custom agent;
 - menggunakan tools internal dan MCP secara governed;
@@ -28,9 +28,9 @@ Stack yang direkomendasikan sengaja mengikuti prinsip:
 ```text
 SIMPLE FIRST
     ↓
-MODULAR MONOLITH
+MODULAR MONOLITH CONTROL PLANE (PAPERCLIP)
     ↓
-MEASURE BOTTLENECK
+DUAL-STORAGE SPECIALIZATION (POSTGRES RAG + CLICKHOUSE OLAP)
     ↓
 SCALE INDIVIDUAL COMPONENT
 ```
@@ -47,46 +47,35 @@ Kafka + Kubernetes + service mesh
 complexity before product
 ```
 
-Django menjadi **control plane dan application backend utama**. Python ecosystem digunakan untuk agent, AI, RAG, data engineering, ML, dan integrations.
+**Paperclip** menjadi **control plane, runtime orchestrator, dan API backend utama**. PostgreSQL (`pgvector`) digunakan untuk transactional state dan RAG knowledge embeddings, sementara **ClickHouse** digunakan secara aktif sebagai mesin OLAP analitik berkecepatan tinggi.
 
 Rekomendasi stack inti:
 
 ```text
-Backend                  Django 6.1.x + Django REST Framework
-Admin UI                 django-unfold (Tailwind CSS modern admin theme)
-Runtime API              ASGI + Uvicorn
-Language                 Python 3.13
-Schema validation        Pydantic v2
+Control Plane Backend    Paperclip Express API (@paperclipai/server, Node.js 24)
+Control Plane UI         Paperclip Board UI (@paperclipai/ui, React 19 + Vite + Tailwind)
+Database & ORM           PostgreSQL 17/18 (PGlite in dev) + Drizzle ORM (@paperclipai/db)
+Knowledge Base (RAG)     PostgreSQL + pgvector (384-dim BGE-M3 dense embeddings + HNSW)
+OLAP Analytics Database  ClickHouse 24.3 (MergeTree engine, HTTP native API, company-isolated DB)
+Shared Types & Contracts @paperclipai/shared
 Decision Plane (Sys 1)   TypeSafe AI (Jev 1.13.0, https://api.typesafe.ai/v1/systemone)
-Dev LLM Gateway (Sys 2)  router.rissets.com (https://router.rissets.com/v1, default cmd/gpt-5.6-luna)
-Prod / Local LLM         Ollama / vLLM when scaled
-Agent workflow           LangGraph
-Agent-to-Agent           A2A Python SDK
-Agent-to-Tool            MCP Python SDK v2
-Async jobs               Celery 5.6 + RabbitMQ
-Cache/ephemeral          Redis
-Control database         PostgreSQL 18 + pgvector
-Analytics database       ClickHouse
-Object/artifact store    MinIO / S3-compatible
-RAG parser               Docling
-Embedding                BAAI/bge-m3
-Reranker                 BAAI/bge-reranker-v2-m3
-Dataframe                Polars
-File SQL/profiling       DuckDB
-Columnar interchange     PyArrow / Parquet
-External DB              SQLAlchemy + native drivers
-SQL parsing              SQLGlot
-HTTP integrations        httpx
-IoT                      MQTT / Paho MQTT
-CCTV                     Frigate + FFmpeg + MediaMTX
-Secrets                  HashiCorp Vault / Credential Refs
-General observability    OpenTelemetry (span: model.decision.typesafe)
-Agent observability      Langfuse
-Policy                   Django RBAC first, OPA later
-Sandbox                  Docker + gVisor
-Frontend                 Next.js + TypeScript + Tailwind + shadcn/ui
-Local deployment         Docker Compose
-Scale deployment         Kubernetes only when necessary
+LLM Gateway (Sys 2)      router.rissets.com (default cmd/gpt-5.6-luna) / Claude / OpenAI
+Agent Workflow           Paperclip Agent Adapter Engine + LangGraph
+Agent-to-Tool            Paperclip Governed Tool Execution + MCP SDK
+Plugin Architecture      Paperclip Plugin System (@paperclipai/plugin-sdk)
+Async Execution          Paperclip Heartbeat Orchestrator & Task Scheduler
+Cache / Ephemeral        Redis
+Object / Artifact Store  Paperclip Local Storage & S3-compatible Store
+RAG Parser               Docling / Native Markdown Chunker
+Embedding                BAAI/bge-m3 (384/1024-dim dense vectors)
+Data Ingestion & SQL     StructuredIngestionService + DatabaseIntegrationService
+External DB Drivers      mysql2 (MariaDB/MySQL) + postgres (pg)
+IoT Telemetry            MQTT / ClickHouse Time-Series Ingestion
+CCTV Vision              RTSP Stream + Frigate NVR + MediaMTX
+General Observability    OpenTelemetry (duplex traces + span: model.decision.typesafe)
+First-Party Telemetry    Paperclip Telemetry System
+Sandbox & Isolation      Docker + gVisor + Daytona
+Deployment               Docker Compose / Embedded PGlite Dev
 ```
 
 ---

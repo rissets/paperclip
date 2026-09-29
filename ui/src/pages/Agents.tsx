@@ -100,7 +100,9 @@ function filterAgents(agents: Agent[], tab: FilterTab, builtInAgentIds: Set<stri
     .filter((a) => {
       if (HIDDEN_AGENT_STATUSES.has(a.status)) return false;
       // The `builtin` filter keys on the built-in marker, not agent status.
-      if (tab === "builtin") return builtInAgentIds.has(a.id);
+      if (tab === "builtin") {
+        return builtInAgentIds.has(a.id) || Boolean((a.metadata as any)?.paperclipBuiltInAgent);
+      }
       return matchesFilter(a.status, tab);
     })
     .sort((a, b) => a.name.localeCompare(b.name));

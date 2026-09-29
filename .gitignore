@@ -83,3 +83,4 @@ test-results/
 # Retained local lifecycle behavior measurements
 .lifecycle-baseline/
 .commandcode/
+graphify-out/

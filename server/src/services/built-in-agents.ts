@@ -300,6 +300,71 @@ const SUMMARIZER_SKILL = readBuiltInTextWithFallback(
   FALLBACK_SUMMARIZER_SKILL,
 );
 
+const FALLBACK_STRUCTURED_INGESTION_INSTRUCTIONS = [
+  "# Structured Ingestion Agent",
+  "",
+  "You are Paperclip's built-in Structured Ingestion Agent.",
+  "Your dedicated mission is to handle structured data ingestion during the onboarding of new data sources, perform data analysis on demand, and maintain dynamic semantic data, topics, context, and ClickHouse synchronization.",
+  "",
+  "## Primary Capabilities & Responsibilities",
+  "1. **Onboarding Data Ingestion**: Parse and ingest structured tabular files (CSV, Excel multi-sheet workbooks, TSV, Parquet, JSONL) when new data sources are onboarded.",
+  "2. **Dynamic Schema Profiling**: Automatically infer column data types, roles (dimensions, metrics, timestamps, identifiers), nullability, uniqueness, and statistical distributions.",
+  "3. **Dynamic JEV Semantic Discovery**: Discover semantic relationships, foreign-key candidates, and entity links using autonomous decision intelligence without static dictionary hardcoding.",
+  "4. **Semantic Topics & Context Synthesis**: Group ingested tables into cohesive business topics and context mappings.",
+  "5. **ClickHouse Synchronization**: Mirror structured tables, schemas, and semantic views into ClickHouse for high-performance analytical queries.",
+  "6. **On-Demand Data Analysis & Refresh**: Re-evaluate schemas, update semantic models, refresh topics and context, and reconcile data whenever requested.",
+  "",
+  "## Invariants",
+  "- Never hardcode static synonym lists or relation dictionaries; use dynamic inference and JEV decision specs.",
+  "- Keep all data operations scoped strictly to the company boundary.",
+  "- Preserve data integrity and report ingestion statistics and profiling anomalies clearly.",
+  "",
+].join("\n");
+
+const FALLBACK_KNOWLEDGE_INGESTION_INSTRUCTIONS = [
+  "# Knowledge Ingestion Agent",
+  "",
+  "You are Paperclip's built-in Knowledge Ingestion Agent.",
+  "Your dedicated mission is to handle unstructured document and knowledge base ingestion during the onboarding of new data sources, generate semantic embeddings, and maintain hybrid vector search indexing and ClickHouse synchronization.",
+  "",
+  "## Primary Capabilities & Responsibilities",
+  "1. **Unstructured Document Ingestion**: Ingest and parse enterprise documents (PDF, DOCX, Markdown, Text, HTML) when new knowledge sources are onboarded.",
+  "2. **Semantic Text Chunking**: Chunk document text with structure preservation, heading hierarchy, and optimal token overlap for retrieval.",
+  "3. **Embedding Generation**: Produce dense vector representations alongside lexical BM25 tokens for hybrid semantic retrieval.",
+  "4. **Vector & Hybrid Search Indexing**: Store and index document chunks into ClickHouse vector indexes and Paperclip's hybrid retrieval system.",
+  "5. **On-Demand Knowledge Updates**: Re-index modified documents, prune obsolete chunks, update semantic context, and synchronize knowledge bases on demand.",
+  "",
+  "## Invariants",
+  "- Keep all document processing and embeddings strictly company-scoped.",
+  "- Preserve document provenance, page numbers, and section headers in chunk metadata.",
+  "- Ensure high retrieval fidelity and accurate semantic context extraction.",
+  "",
+].join("\n");
+
+const FALLBACK_DATABASE_INGESTION_INSTRUCTIONS = [
+  "# Database Ingestion Agent",
+  "",
+  "You are Paperclip's built-in Database Ingestion Agent.",
+  "Your dedicated mission is to handle live relational database connections and CDC (Change Data Capture) ingestion during data source onboarding, introspect remote catalogs, and maintain continuous synchronization to ClickHouse analytics tables.",
+  "",
+  "## Primary Capabilities & Responsibilities",
+  "1. **Live Connection Onboarding**: Safely validate connectivity, credentials, and network latency to external database engines (PostgreSQL, MySQL, MariaDB, SQL Server).",
+  "2. **Catalog & Relation Introspection**: Inspect information_schema and system catalogs to discover tables, columns, primary keys, foreign keys, and indexes.",
+  "3. **Sample Inspection & Schema Mapping**: Safely sample rows, detect JSON/semi-structured fields, and map source relational types to ClickHouse analytical schemas.",
+  "4. **CDC & Streaming Sync**: Manage Change Data Capture and scheduled batch synchronization pipelines to stream data updates into ClickHouse.",
+  "5. **On-Demand Schema Evolution & Context Update**: Detect upstream schema changes (new columns, altered types), refresh semantic models, and update business topics and context upon request.",
+  "",
+  "## Invariants",
+  "- Enforce strictly read-only access on upstream databases; never perform DDL or DML mutations on source databases.",
+  "- Maintain transactional consistency and track replication lag accurately.",
+  "- Keep all connection secrets, credentials, and synchronized tables strictly company-scoped.",
+  "",
+].join("\n");
+
+const STRUCTURED_INGESTION_INSTRUCTIONS = readBuiltInText("structured-ingestion/AGENTS.md", FALLBACK_STRUCTURED_INGESTION_INSTRUCTIONS);
+const KNOWLEDGE_INGESTION_INSTRUCTIONS = readBuiltInText("knowledge-ingestion/AGENTS.md", FALLBACK_KNOWLEDGE_INGESTION_INSTRUCTIONS);
+const DATABASE_INGESTION_INSTRUCTIONS = readBuiltInText("database-ingestion/AGENTS.md", FALLBACK_DATABASE_INGESTION_INSTRUCTIONS);
+
 const DEFINITIONS = validateBuiltInAgentDefinitions([
   {
     key: "briefs",
@@ -467,6 +532,75 @@ const DEFINITIONS = validateBuiltInAgentDefinitions([
       },
     },
   },
+  {
+    key: "structured-ingestion",
+    displayName: "Structured Ingestion Agent",
+    featureKeys: ["structured-ingestion", "onboarding", "data-source"],
+    shortPurpose:
+      "Performs structured data ingestion, dynamic schema profiling, semantic topic and relation discovery, and ClickHouse synchronization during datasource onboarding and on-demand updates.",
+    defaultInstructions: STRUCTURED_INGESTION_INSTRUCTIONS,
+    defaultRole: "engineer",
+    defaultTitle: "Structured Data Ingestion Specialist",
+    defaultIcon: "database",
+    defaultPermissions: {
+      canCreateAgents: false,
+      canCreateSkills: false,
+    },
+    defaultStatus: "idle",
+    defaultManager: "single_root_agent",
+    allowedAdapterTypes: ["pi_local", "codex_local", "claude_local", "gemini_local", "opencode_local", "cursor_local", "process"],
+    defaultAdapterType: "pi_local",
+    defaultAdapterConfig: {
+      model: "rissets/neural/deepseek-v4.1-flash",
+    },
+    defaultBudgetMonthlyCents: 0,
+  },
+  {
+    key: "knowledge-ingestion",
+    displayName: "Knowledge Ingestion Agent",
+    featureKeys: ["knowledge-ingestion", "onboarding", "rag", "unstructured"],
+    shortPurpose:
+      "Performs unstructured document ingestion, semantic chunking, vector embedding generation, and hybrid search indexing into ClickHouse during datasource onboarding and on-demand updates.",
+    defaultInstructions: KNOWLEDGE_INGESTION_INSTRUCTIONS,
+    defaultRole: "researcher",
+    defaultTitle: "Knowledge & Unstructured Ingestion Specialist",
+    defaultIcon: "file-text",
+    defaultPermissions: {
+      canCreateAgents: false,
+      canCreateSkills: false,
+    },
+    defaultStatus: "idle",
+    defaultManager: "single_root_agent",
+    allowedAdapterTypes: ["pi_local", "codex_local", "claude_local", "gemini_local", "opencode_local", "cursor_local", "process"],
+    defaultAdapterType: "pi_local",
+    defaultAdapterConfig: {
+      model: "rissets/bedrock-aws/zai.glm-5",
+    },
+    defaultBudgetMonthlyCents: 0,
+  },
+  {
+    key: "database-ingestion",
+    displayName: "Database Ingestion Agent",
+    featureKeys: ["database-ingestion", "onboarding", "database", "cdc"],
+    shortPurpose:
+      "Performs live relational database connection onboarding, catalog introspection, CDC/batch data replication, and continuous ClickHouse synchronization during datasource onboarding and on-demand updates.",
+    defaultInstructions: DATABASE_INGESTION_INSTRUCTIONS,
+    defaultRole: "engineer",
+    defaultTitle: "Database & Live Connection Ingestion Specialist",
+    defaultIcon: "server",
+    defaultPermissions: {
+      canCreateAgents: false,
+      canCreateSkills: false,
+    },
+    defaultStatus: "idle",
+    defaultManager: "single_root_agent",
+    allowedAdapterTypes: ["pi_local", "codex_local", "claude_local", "gemini_local", "opencode_local", "cursor_local", "process"],
+    defaultAdapterType: "pi_local",
+    defaultAdapterConfig: {
+      model: "rissets/bedrock-aws/zai.glm-5",
+    },
+    defaultBudgetMonthlyCents: 0,
+  },
 ]);
 
 const DEFINITIONS_BY_KEY = new Map(DEFINITIONS.map((definition) => [definition.key, definition]));
@@ -475,7 +609,11 @@ const DEFINITIONS_BY_KEY = new Map(DEFINITIONS.map((definition) => [definition.k
 // company is created (and re-ensured on startup reconcile). Empty by default so
 // a new user starts clean — the Reflection Coach and Summarizer are opt-in, not
 // seeded. Add a definition key here to restore automatic provisioning.
-const AUTO_PROVISION_ON_COMPANY_CREATE_KEYS = new Set<string>([]);
+const AUTO_PROVISION_ON_COMPANY_CREATE_KEYS = new Set<string>([
+  "structured-ingestion",
+  "knowledge-ingestion",
+  "database-ingestion",
+]);
 
 const ROOT_AGENT_DEFAULT_CHANGE_GRANTS: PermissionKey[] = ["agents:configure", "skills:create"];
 const BUILT_IN_AGENT_DEFAULT_GRANTS: Record<string, PermissionKey[]> = {
@@ -1536,7 +1674,7 @@ export function builtInAgentService(db: Db) {
     const [keep, ...duplicates] = markedRows;
     for (const duplicate of duplicates) {
       const openApproval = await approvalSvc.findOpenHireApprovalForAgent(companyId, duplicate.id);
-      await agentSvc.terminate(duplicate.id);
+      await agentSvc.terminate(duplicate.id, { allowBuiltInTermination: true });
       if (openApproval) {
         await approvalSvc.cancel(
           openApproval.id,
@@ -1561,14 +1699,51 @@ export function builtInAgentService(db: Db) {
     return keep!;
   }
 
+  function matchesExistingAgentForDefinition(agentName: string, definition: BuiltInAgentDefinition) {
+    const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const targetNorm = norm(definition.displayName);
+    const keyNorm = norm(definition.key);
+    const candNorm = norm(agentName);
+    if (candNorm === targetNorm || candNorm === keyNorm) return true;
+    if (definition.key === "database-ingestion" && (candNorm === "databaseintegrationagent" || candNorm === "databaseintegration" || candNorm === "databaseingestionagent")) return true;
+    if (definition.key === "structured-ingestion" && (candNorm === "structuredingestionagent" || candNorm === "structuredingestion")) return true;
+    if (definition.key === "knowledge-ingestion" && (candNorm === "knowledgeingestionagent" || candNorm === "knowledgeingestion")) return true;
+    return false;
+  }
+
   async function findSingleAgent(companyId: string, definition: BuiltInAgentDefinition) {
     const markedRows = await findMarkedRows(companyId, definition.key);
-    if (markedRows.length === 0) return null;
-    const survivor = markedRows.length > 1
-      ? await resolveDuplicateMarkedRows(companyId, definition, markedRows)
-      : markedRows[0]!;
-    const agent = await agentSvc.getById(survivor.id);
-    return agent as Agent | null;
+    if (markedRows.length > 0) {
+      const survivor = markedRows.length > 1
+        ? await resolveDuplicateMarkedRows(companyId, definition, markedRows)
+        : markedRows[0]!;
+      const agent = await agentSvc.getById(survivor.id);
+      return agent as Agent | null;
+    }
+
+    // Check for an existing un-marked agent matching this definition to adopt it
+    const unmarkedCandidates = await db
+      .select()
+      .from(agents)
+      .where(and(eq(agents.companyId, companyId), ne(agents.status, "terminated")));
+    const candidate = unmarkedCandidates.find((a) => !readBuiltInAgentMarker(a.metadata) && matchesExistingAgentForDefinition(a.name, definition));
+    if (candidate) {
+      await db
+        .update(agents)
+        .set({
+          metadata: builtInMetadata(definition, candidate.metadata as Record<string, unknown> | null),
+          name: definition.displayName,
+          role: definition.defaultRole,
+          title: candidate.title ?? definition.defaultTitle ?? null,
+          capabilities: definition.shortPurpose,
+          updatedAt: new Date(),
+        })
+        .where(eq(agents.id, candidate.id));
+      const adopted = await agentSvc.getById(candidate.id);
+      return adopted as Agent | null;
+    }
+
+    return null;
   }
 
   async function state(
@@ -1696,6 +1871,25 @@ export function builtInAgentService(db: Db) {
     });
 
     await ensureBuiltInAgentDefaultGrants(created, definition);
+    if (definition.defaultInstructions && !definition.bundle) {
+      try {
+        const materialized = await instructionsSvc.materializeManagedBundle(created, {
+          "AGENTS.md": definition.defaultInstructions,
+        }, {
+          entryFile: "AGENTS.md",
+          replaceExisting: true,
+          clearLegacyPromptTemplate: true,
+        });
+        await agentSvc.update(created.id, {
+          adapterConfig: materialized.adapterConfig,
+        }, {
+          allowBuiltInAgentMetadata: true,
+          recordRevision: { source: "built-in-agent:init-instructions" },
+        });
+      } catch (err) {
+        console.warn(`[paperclip] Failed to initialize instructions for ${definition.key}:`, err);
+      }
+    }
     const resources = await reconcileBundleResources(created, definition, "reconcile");
     return state(definition, await agentSvc.getById(created.id) as Agent, resources);
   }
@@ -1853,7 +2047,31 @@ export function builtInAgentService(db: Db) {
     const current = resetAgentDefaults
       ? await reconcileDefinitionDefaults(companyId, key)
       : await get(companyId, key);
-    if (!current.agent || !definition.bundle) return current;
+    if (!current.agent) return current;
+
+    if (!definition.bundle) {
+      if (resetAgentDefaults || input.resources?.includes("instructions")) {
+        try {
+          const materialized = await instructionsSvc.materializeManagedBundle(current.agent, {
+            "AGENTS.md": definition.defaultInstructions,
+          }, {
+            entryFile: "AGENTS.md",
+            replaceExisting: true,
+            clearLegacyPromptTemplate: true,
+          });
+          await agentSvc.update(current.agent.id, {
+            adapterConfig: materialized.adapterConfig,
+          }, {
+            allowBuiltInAgentMetadata: true,
+            recordRevision: { source: "built-in-agent:reset-instructions" },
+          });
+        } catch (err) {
+          console.warn(`[paperclip] Failed to reset instructions for ${definition.key}:`, err);
+        }
+      }
+      return state(definition, await agentSvc.getById(current.agent.id) as Agent);
+    }
+
     const selectedBundleResources = input.resources?.filter(
       (resource): resource is "instructions" | "skill" | "routine" => resource !== "agent",
     );
@@ -1923,18 +2141,15 @@ export function builtInAgentService(db: Db) {
     const company = await ensureCompany(companyId);
     let autoEnsured = 0;
     let pendingApprovals = 0;
-    // A fresh company starts with only its own lead agent — the Reflection
-    // Coach and Summarizer are no longer auto-created for new users. They stay
-    // available to enable on demand (via ensure / provision / the built-in
-    // bundle panel). We still reconcile any bundled agent that already exists
-    // (e.g. one an operator enabled) so its instructions/skill/routine keep
-    // tracking stock. Add a key to AUTO_PROVISION_ON_COMPANY_CREATE_KEYS to
-    // restore automatic creation for that definition.
-    for (const definition of DEFINITIONS.filter((entry) => entry.bundle)) {
+    // Bundle agents and core built-in onboarding agents specified in
+    // AUTO_PROVISION_ON_COMPANY_CREATE_KEYS are provisioned automatically.
+    for (const definition of DEFINITIONS) {
       const existing = await findSingleAgent(companyId, definition);
-      const shouldProvision = existing !== null || AUTO_PROVISION_ON_COMPANY_CREATE_KEYS.has(definition.key);
+      const shouldProvision =
+        (existing !== null && Boolean(definition.bundle))
+        || AUTO_PROVISION_ON_COMPANY_CREATE_KEYS.has(definition.key);
       if (!shouldProvision) continue;
-      if (company.requireBoardApprovalForNewAgents) {
+      if (company.requireBoardApprovalForNewAgents && !AUTO_PROVISION_ON_COMPANY_CREATE_KEYS.has(definition.key)) {
         const result = await provision(companyId, definition.key);
         if (result.approval) pendingApprovals += 1;
       } else {

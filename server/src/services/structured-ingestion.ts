@@ -1,5 +1,5 @@
 import * as XLSX from "xlsx";
-import type { ColumnDefinition, TableSemanticModel } from "@paperclipai/shared";
+import type { ColumnDefinition, TableSemanticModel, ClickhouseSchemaDefinition } from "@paperclipai/shared";
 
 export interface ParsedTableData {
   tableName: string;
@@ -8,34 +8,212 @@ export interface ParsedTableData {
   rows: Record<string, unknown>[];
 }
 
+export interface ParseStructuredOptions {
+  knownColumns?: string[];
+  catalogMap?: Map<string, string[]>;
+}
+
 export class StructuredIngestionService {
   /**
-   * Parse CSV content from string or buffer
+   * Parse CSV content from string or buffer with smart header detection and enterprise catalog resolution
    */
-  static parseCsv(content: string, tableName = "Sheet1"): ParsedTableData {
-    const workbook = XLSX.read(content, { type: "string" });
+  static parseCsv(content: string, tableName = "Sheet1", options?: ParseStructuredOptions): ParsedTableData {
+    // Strip UTF-8 BOM if present
+    const cleanContent = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+    const workbook = XLSX.read(cleanContent, { type: "string" });
     const sheetName = tableName && tableName !== "Sheet1" ? tableName : (workbook.SheetNames[0] || tableName);
     const worksheet = workbook.Sheets[workbook.SheetNames[0] || "Sheet1"];
-    const rawRows = XLSX.utils.sheet_to_json<Record<string, any>>(worksheet, { defval: null });
-    return this.profileAndBuildTable(tableName || sheetName, rawRows);
+    return this.parseWorksheet(worksheet, tableName || sheetName, options);
   }
 
   /**
-   * Parse Excel buffer (supports multi-sheet XLS / XLSX)
+   * Parse Excel buffer (supports multi-sheet XLS / XLSX) with smart header detection and enterprise catalog resolution
    */
-  static parseExcel(buffer: Buffer): ParsedTableData[] {
+  static parseExcel(buffer: Buffer, options?: ParseStructuredOptions): ParsedTableData[] {
     const workbook = XLSX.read(buffer, { type: "buffer" });
     const results: ParsedTableData[] = [];
 
     for (const sheetName of workbook.SheetNames) {
       const worksheet = workbook.Sheets[sheetName];
-      const rawRows = XLSX.utils.sheet_to_json<Record<string, any>>(worksheet, { defval: null });
-      if (rawRows.length > 0) {
-        results.push(this.profileAndBuildTable(sheetName, rawRows));
+      const parsed = this.parseWorksheet(worksheet, sheetName, options);
+      if (parsed.rows.length > 0) {
+        results.push(parsed);
       }
     }
 
     return results;
+  }
+
+  /**
+   * Checks whether the first row represents actual record data rather than column headers.
+   * A row is considered data ONLY when the vast majority of cells are pure numbers,
+   * dates, or email/phone data values rather than header labels.
+   */
+  static isRowDataRatherThanHeader(row: any[]): boolean {
+    if (!row || row.length === 0) return true;
+    let dataSignals = 0;
+    let labelSignals = 0;
+    let totalNonEmpty = 0;
+
+    for (const cell of row) {
+      if (cell === null || cell === undefined || cell === "") continue;
+      totalNonEmpty++;
+      const s = String(cell).replace(/^\ufeff/, "").trim();
+
+      // 1. Pure number (integer or float)
+      if (typeof cell === "number" || (!isNaN(Number(s)) && !isNaN(parseFloat(s)))) {
+        dataSignals++;
+        continue;
+      }
+      // 2. Email address
+      if (s.includes("@") && s.includes(".")) {
+        dataSignals++;
+        continue;
+      }
+      // 3. Full Date pattern (e.g. 2023-01-01 or 01/01/2023)
+      if (!isNaN(Date.parse(s)) && (s.includes("-") || s.includes("/")) && /\d{4}/.test(s)) {
+        dataSignals++;
+        continue;
+      }
+      // 4. Pure phone number
+      if (/^\+?\d{9,15}$/.test(s.replace(/[\s-]/g, ""))) {
+        dataSignals++;
+        continue;
+      }
+
+      // If it looks like a text label or column title (alphabetic identifier)
+      if (/^[a-zA-Z_][a-zA-Z0-9_\s\.\-]*$/.test(s) && s.length <= 40) {
+        labelSignals++;
+      }
+    }
+
+    if (totalNonEmpty === 0) return false;
+    // Row is data only if majority of columns are numeric/date data AND almost no label signals
+    return dataSignals > labelSignals && (dataSignals / totalNonEmpty) >= 0.6;
+  }
+
+  /**
+   * Synthesizes clean semantic column names when dataset is truly headerless
+   */
+  private static inferColumnNamesFromGrid(grid: any[][], colCount: number): string[] {
+    const names: string[] = [];
+    const sampleRows = grid.slice(0, 20);
+
+    for (let c = 0; c < colCount; c++) {
+      const samples = sampleRows.map((r) => r[c]).filter((v) => v !== null && v !== undefined && v !== "");
+      names.push(this.inferSingleColumnName(c, samples));
+    }
+    return names;
+  }
+
+  private static inferSingleColumnName(colIdx: number, samples: any[]): string {
+    if (samples.length === 0) return `col_${colIdx + 1}`;
+
+    if (samples.some((v) => typeof v === "string" && v.includes("@") && v.includes("."))) {
+      return `email_${colIdx + 1}`;
+    }
+    if (samples.every((v) => /^\d{5}$/.test(String(v).trim()))) {
+      return `postal_code_${colIdx + 1}`;
+    }
+    if (samples.some((v) => typeof v === "string" && /^\d{4}-\d{2}-\d{2}/.test(v))) {
+      return `date_${colIdx + 1}`;
+    }
+    if (colIdx === 0 && samples.every((v) => !isNaN(Number(v)))) {
+      return "id";
+    }
+    return `col_${colIdx + 1}`;
+  }
+
+  /**
+   * Smart worksheet parser supporting header detection, catalog resolution, and anomaly recovery
+   */
+  private static parseWorksheet(
+    worksheet: XLSX.WorkSheet,
+    tableName: string,
+    options?: ParseStructuredOptions,
+  ): ParsedTableData {
+    const rawGrid = XLSX.utils.sheet_to_json<any[]>(worksheet, { header: 1, defval: null });
+    const grid = rawGrid.filter((row) => row && row.some((cell) => cell !== null && cell !== undefined && cell !== ""));
+
+    if (grid.length === 0) {
+      return this.profileAndBuildTable(tableName, []);
+    }
+
+    const row0 = grid[0];
+    const isData = this.isRowDataRatherThanHeader(row0);
+
+    let columnNames: string[] = [];
+    let dataRows: Record<string, any>[] = [];
+
+    const normName = tableName.toLowerCase().replace(/[^a-z0-9_]/g, "_");
+
+    // Check known columns from options or dynamic catalogMap
+    let knownCols = options?.knownColumns;
+    if (!knownCols && options?.catalogMap) {
+      knownCols = options.catalogMap.get(normName) || options.catalogMap.get(tableName.toLowerCase());
+      if (!knownCols) {
+        // Dynamic search in catalogMap by name similarity or matching column count with name overlap
+        const normTokens = normName.split(/[_\-\s]+/).filter((w) => w.length >= 3);
+        for (const [catName, cols] of options.catalogMap.entries()) {
+          if (cols.length === row0.length) {
+            const catTokens = catName.split(/[_\-\s]+/).filter((w) => w.length >= 3);
+            const hasCommonToken = normTokens.some((nt) => catTokens.includes(nt));
+            if (hasCommonToken || catName.includes(normName) || normName.includes(catName)) {
+              knownCols = cols;
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    if (isData) {
+      // Row 0 is data! No header in file!
+      const colCount = Math.max(...grid.slice(0, 10).map((r) => r.length));
+
+      if (knownCols && knownCols.length === colCount) {
+        columnNames = [...knownCols];
+      } else {
+        columnNames = this.inferColumnNamesFromGrid(grid, colCount);
+      }
+
+      // Convert all rows (including row 0!) into Record<string, any>
+      dataRows = grid.map((row) => {
+        const obj: Record<string, any> = {};
+        for (let c = 0; c < columnNames.length; c++) {
+          obj[columnNames[c]] = row[c] ?? null;
+        }
+        return obj;
+      });
+    } else {
+      // Row 0 is header!
+      const rawHeaders = row0.map((cell, idx) => {
+        const str = String(cell || "").replace(/^\ufeff/, "").trim();
+        return str || `col_${idx + 1}`;
+      });
+
+      const seen = new Set<string>();
+      columnNames = rawHeaders.map((h) => {
+        let name = h;
+        let count = 1;
+        while (seen.has(name.toLowerCase())) {
+          name = `${h}_${count++}`;
+        }
+        seen.add(name.toLowerCase());
+        return name;
+      });
+
+      // Data rows start from row 1
+      dataRows = grid.slice(1).map((row) => {
+        const obj: Record<string, any> = {};
+        for (let c = 0; c < columnNames.length; c++) {
+          obj[columnNames[c]] = row[c] ?? null;
+        }
+        return obj;
+      });
+    }
+
+    return this.profileAndBuildTable(tableName, dataRows);
   }
 
   /**
@@ -140,15 +318,41 @@ export class StructuredIngestionService {
       let role: "dimension" | "metric" | "identifier" | "timestamp" | "attribute" = "dimension";
 
       if (
-        (lowerName === "id" || lowerName.endsWith("_id") || lowerName.endsWith("id") || lowerName.includes("code") || lowerName.includes("sku")) &&
-        distinctCount / (nonNullTotal || 1) > 0.7
+        (lowerName === "id" || lowerName.endsWith("_id") || lowerName.startsWith("id_") || lowerName.startsWith("kd_") || lowerName.includes("kode") || lowerName.includes("code") || lowerName.includes("sku") || lowerName === "uid") &&
+        (distinctCount / (nonNullTotal || 1) > 0.6 || lowerName === "id" || lowerName.startsWith("kd_"))
       ) {
         role = "identifier";
-        if (!primaryKey && distinctCount === rowCount) {
+        if (!primaryKey && (distinctCount === rowCount || lowerName === "id")) {
           primaryKey = colName;
         }
-      } else if (dataType === "date" || lowerName.includes("date") || lowerName.includes("tanggal") || lowerName.includes("created_at") || lowerName.includes("time")) {
+      } else if (
+        dataType === "date" ||
+        lowerName.includes("date") ||
+        lowerName.includes("tanggal") ||
+        lowerName.includes("created_at") ||
+        lowerName.includes("time") ||
+        lowerName.includes("tahun") ||
+        lowerName.endsWith("_thn") ||
+        lowerName.includes("thn") ||
+        lowerName.includes("year")
+      ) {
         role = "timestamp";
+      } else if (
+        lowerName.includes("pos") ||
+        lowerName.includes("kodepos") ||
+        lowerName.includes("telp") ||
+        lowerName.includes("phone") ||
+        lowerName.includes("fax") ||
+        lowerName.includes("hp") ||
+        lowerName.includes("area") ||
+        lowerName.includes("kota") ||
+        lowerName.includes("wilayah") ||
+        lowerName.includes("kanwil") ||
+        lowerName.includes("organisasi") ||
+        lowerName.includes("npwp") ||
+        lowerName.includes("nik")
+      ) {
+        role = "dimension";
       } else if (
         dataType === "number" &&
         distinctCount > 3 &&
@@ -170,11 +374,22 @@ export class StructuredIngestionService {
           lowerName.includes("discount") ||
           lowerName.includes("diskon") ||
           lowerName.includes("score") ||
-          lowerName.includes("nilai"))
+          lowerName.includes("nilai") ||
+          lowerName.includes("nominal"))
       ) {
         role = "metric";
-      } else if (dataType === "number" && distinctCount > 10) {
-        role = "metric";
+      } else if (
+        lowerName.includes("alamat") ||
+        lowerName.includes("email") ||
+        lowerName.includes("gedung") ||
+        lowerName.includes("sk_") ||
+        lowerName.includes("keterangan") ||
+        lowerName.includes("description") ||
+        lowerName.includes("catatan") ||
+        lowerName.includes("hint") ||
+        lowerName.includes("password")
+      ) {
+        role = "attribute";
       } else {
         role = "dimension";
       }
@@ -214,8 +429,16 @@ export class StructuredIngestionService {
         });
       }
 
-      // Generate bilingual synonyms
+      // Generate dynamic synonyms from column name tokens and humanized labels
       const synList: string[] = [colName.toLowerCase()];
+      const human = this.humanizeLabel(colName).toLowerCase();
+      if (human !== colName.toLowerCase()) {
+        synList.push(human);
+      }
+      const parts = colName.split(/[_\-\s]+/).filter((w) => w.length >= 2);
+      for (const p of parts) {
+        synList.push(p.toLowerCase());
+      }
       if (lowerName.includes("sales") || lowerName.includes("revenue")) {
         synList.push("penjualan", "omzet", "pendapatan", "revenue");
       }
@@ -240,6 +463,15 @@ export class StructuredIngestionService {
       synonyms[colName] = Array.from(new Set(synList));
     }
 
+    if (metrics.length === 0) {
+      metrics.push({
+        name: "total_records",
+        expression: "COUNT(*)",
+        description: `Total count of records in ${tableName}`,
+        aggregation: "count",
+      });
+    }
+
     const cleanTableName = tableName.replace(/^(tbl_|table_|tb_|m_|t_)/i, "").toLowerCase();
     const tableWords = cleanTableName.split(/[\s_\-]+/).filter((w) => w.length > 2);
     const entities = Array.from(
@@ -253,15 +485,79 @@ export class StructuredIngestionService {
       .filter((c) => c.isSearchable || c.role === "identifier" || c.semanticCategory === "identity")
       .map((c) => c.name);
 
+    // Generate ClickHouse Schema Definition for OLAP storage
+    const chTypes: Record<string, string> = {
+      number: "Float64",
+      date: "String",
+      boolean: "UInt8",
+      string: "String",
+      json: "String",
+      unknown: "String",
+    };
+
+    const columnTypes: Record<string, string> = {};
+    for (const c of columns) {
+      const chType = chTypes[c.dataType] || "String";
+      c.clickhouseType = chType;
+      columnTypes[c.name] = chType;
+    }
+
+    const sanitizedTableName = tableName.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
+    const ddlColumns = columns
+      .map((c) => `  \`${c.name}\` ${columnTypes[c.name]}`)
+      .join(",\n");
+
+    const orderBy = primaryKey ? [primaryKey] : (columns.length > 0 ? [columns[0].name] : []);
+    const orderByClause = orderBy.length > 0 ? `\`${orderBy.join("`, `")}\`` : "tuple()";
+    const createTableDdl = `CREATE TABLE IF NOT EXISTS \`${sanitizedTableName}\` (\n${ddlColumns}\n) ENGINE = MergeTree()\nORDER BY (${orderByClause});`;
+
+    const clickhouseSchema: ClickhouseSchemaDefinition = {
+      createTableDdl,
+      engine: "MergeTree",
+      orderBy,
+      columnTypes,
+    };
+
+    const humanEntity = tableName.replace(/[^a-zA-Z0-9]/g, " ").replace(/\b\w/g, (l) => l.toUpperCase()).trim();
+    const colNames = columns.map((c) => c.name.toLowerCase());
+    const tableTopics: string[] = [];
+    tableTopics.push(`${humanEntity} Tabular Profile & Data Records`);
+
+    if (colNames.some((c) => /(total|harga|price|modal|nominal|jumlah|amount|omset|revenue|biaya|tarif|billing|saldo|pembayaran|payment|paid)/i.test(c))) {
+      tableTopics.push(`${humanEntity} Financial Accounting & Monetary Aggregation`);
+    }
+    if (colNames.some((c) => /(status|state|kondisi|is_active|aktif|valid|flag|verified|is_)/i.test(c))) {
+      tableTopics.push(`${humanEntity} Status & Verification Auditing`);
+    }
+    if (colNames.some((c) => /(provinsi|kabupaten|kota|kecamatan|kelurahan|wilayah|region|alamat|address|latitude|longitude|geo|postal)/i.test(c))) {
+      tableTopics.push(`${humanEntity} Geographic Distribution & Regional Routing`);
+    }
+    if (colNames.some((c) => /(tanggal|date|created_at|updated_at|waktu|time|period|periode|tahun|bulan|sk_date)/i.test(c))) {
+      tableTopics.push(`${humanEntity} Temporal Trends & Historical Timeline`);
+    }
+    if (colNames.some((c) => /(nama|name|title|judul|kode|code|sku|item|product|produk|customer|pelanggan)/i.test(c))) {
+      tableTopics.push(`${humanEntity} Entity Identification & SKU Metadata`);
+    }
+
+    const uniqueTopics = Array.from(new Set(tableTopics));
+    const tableRole = (metrics.length > 0 && rowCount > 100) ? "fact_table" : "dimension_table";
+    const roleDesc = tableRole === "fact_table" ? "Tabel Fakta Kuantitatif" : "Tabel Master Dimensi";
+    const context = `${roleDesc} untuk '${humanEntity}'. Memuat ${columns.length} kolom terstruktur dengan ${rowCount.toLocaleString()} baris data untuk pelaporan dan agregasi analitik.`;
+
     const semanticModel: TableSemanticModel = {
       tableName,
       description: `Structured analytical table '${tableName}' with ${rowCount} records and ${columns.length} columns.`,
+      context,
+      topics: uniqueTopics,
+      tableRole,
+      decisionSpecs: ["struct.column_role.v1", "struct.entity_metric_mapping.v1"],
       entities,
       searchableColumns,
       dimensions,
       metrics,
       primaryKey,
       synonyms,
+      clickhouseSchema,
     };
 
     return {

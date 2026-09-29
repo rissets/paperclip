@@ -95,20 +95,28 @@ describeEmbeddedPostgres("companyService", () => {
     expect(rows.map((row) => row.issuePrefix).sort()).toEqual(["ARO", "AROA"]);
   });
 
-  it("does not auto-provision bundled built-in agents for a freshly created company", async () => {
+  it("auto-provisions onboarding built-in agents while bundled agents remain opt-in for a freshly created company", async () => {
     const created = await companyService(db).create({
       name: "Fresh Company",
     });
 
-    // A new company starts clean: the Reflection Coach and Summarizer are
-    // opt-in, not seeded by default for a new user.
+    // A new company auto-provisions onboarding built-in agents, while
+    // the Reflection Coach and Summarizer remain opt-in.
     const agentRows = await db.select().from(agents).where(eq(agents.companyId, created.id));
-    expect(agentRows.filter((row) => readBuiltInAgentMarker(row.metadata))).toHaveLength(0);
+    const builtInRows = agentRows.filter((row) => readBuiltInAgentMarker(row.metadata));
+    expect(builtInRows).toHaveLength(3);
+    expect(builtInRows.map((r) => readBuiltInAgentMarker(r.metadata)?.key).sort()).toEqual([
+      "database-ingestion",
+      "knowledge-ingestion",
+      "structured-ingestion",
+    ]);
+    expect(agentRows.some((row) => readBuiltInAgentMarker(row.metadata)?.key === "reflection-coach")).toBe(false);
+    expect(agentRows.some((row) => readBuiltInAgentMarker(row.metadata)?.key === "summarizer")).toBe(false);
 
-    // Startup reconcile leaves a fresh company untouched — nothing is created.
+    // Startup reconcile keeps the provisioned built-ins intact.
     await reconcileBuiltInAgentsOnStartup(db);
     const afterReconcileRows = await db.select().from(agents).where(eq(agents.companyId, created.id));
-    expect(afterReconcileRows.filter((row) => readBuiltInAgentMarker(row.metadata))).toHaveLength(0);
+    expect(afterReconcileRows.filter((row) => readBuiltInAgentMarker(row.metadata))).toHaveLength(3);
 
     // The Reflection Coach remains available to enable on demand, and enabling
     // it materializes its bundled skill + paused routine.

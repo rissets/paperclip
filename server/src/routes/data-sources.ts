@@ -6,6 +6,7 @@ import { DataSourcesService } from "../services/data-sources.js";
 import { OnboardingOrchestratorService } from "../services/onboarding-orchestrator.js";
 import { EnterpriseOrchestratorService } from "../services/enterprise-orchestrator.js";
 import { DatabaseIntegrationService } from "../services/database-integration.js";
+import { ClickhouseService } from "../services/clickhouse.js";
 import { badRequest, notFound } from "../errors.js";
 
 const upload = multer({
@@ -20,6 +21,7 @@ export function dataSourceRoutes(db: Db) {
   const dsService = new DataSourcesService(db);
   const onboardingOrchestrator = new OnboardingOrchestratorService(db);
   const dbIntegration = new DatabaseIntegrationService();
+  const clickhouse = new ClickhouseService();
   const orchestrator = new EnterpriseOrchestratorService(db);
 
   // 1. List data sources for company
@@ -30,34 +32,66 @@ export function dataSourceRoutes(db: Db) {
     res.json(list);
   });
 
-  // 2. Upload file & trigger Onboarding Orchestrator
+  // 2. Upload file(s) & trigger Onboarding Orchestrator (supports single and batch uploads)
   router.post(
     "/companies/:companyId/data-sources/upload",
-    upload.single("file"),
+    upload.any(),
     async (req: Request, res: Response) => {
       const companyId = req.params.companyId as string;
       await assertCompanyAccess(req, companyId);
 
-      const file = req.file;
-      if (!file) {
+      const files: Express.Multer.File[] = [];
+      if (req.file) {
+        files.push(req.file);
+      }
+      if (Array.isArray(req.files)) {
+        files.push(...req.files);
+      } else if (req.files && typeof req.files === "object") {
+        for (const list of Object.values(req.files)) {
+          if (Array.isArray(list)) files.push(...list);
+        }
+      }
+
+      if (files.length === 0) {
         throw badRequest("No file provided in request");
       }
 
       const name = req.body?.name as string | undefined;
       const description = req.body?.description as string | undefined;
 
-      const result = await onboardingOrchestrator.onboardSource(
-        companyId,
-        {
-          buffer: file.buffer,
-          originalname: file.originalname,
-          mimetype: file.mimetype,
-          size: file.size,
-        },
-        { name, description },
-      );
+      const results = [];
+      for (const file of files) {
+        const result = await onboardingOrchestrator.onboardSource(
+          companyId,
+          {
+            buffer: file.buffer,
+            originalname: file.originalname,
+            mimetype: file.mimetype,
+            size: file.size,
+          },
+          {
+            name: files.length === 1 ? name : undefined,
+            description,
+            async: true,
+          },
+        );
+        results.push(result);
+      }
 
-      res.status(201).json(result);
+      if (results.length === 1) {
+        res.status(202).json({
+          ...results[0],
+          dataSources: results,
+          count: 1,
+        });
+      } else {
+        res.status(202).json({
+          id: results[0]?.id,
+          dataSources: results,
+          count: results.length,
+          message: `${results.length} data sources queued for autonomous onboarding`,
+        });
+      }
     },
   );
 
@@ -96,7 +130,7 @@ export function dataSourceRoutes(db: Db) {
         { name, description },
       );
 
-      res.status(201).json(result);
+      res.status(202).json(result);
     },
   );
 
@@ -227,6 +261,89 @@ export function dataSourceRoutes(db: Db) {
         res.json(result);
       } catch (err: any) {
         throw badRequest(err.message || "SQL query execution failed");
+      }
+    },
+  );
+
+  // 5c. ClickHouse: Health status & tables in isolated company database
+  router.get(
+    "/companies/:companyId/data-sources/clickhouse/status",
+    async (req: Request, res: Response) => {
+      const companyId = req.params.companyId as string;
+      await assertCompanyAccess(req, companyId);
+
+      const health = await clickhouse.isHealthy();
+      const companyDatabase = clickhouse.getCompanyDatabase(companyId);
+      let tables: string[] = [];
+      if (health.ok) {
+        try {
+          tables = await clickhouse.listTables(companyId);
+        } catch {
+          tables = [];
+        }
+      }
+
+      res.json({
+        ok: health.ok,
+        version: health.version,
+        error: health.error,
+        companyDatabase,
+        tables,
+      });
+    },
+  );
+
+  // 5d. ClickHouse: Execute read-only analytical SQL query
+  router.post(
+    "/companies/:companyId/data-sources/clickhouse/query",
+    async (req: Request, res: Response) => {
+      const companyId = req.params.companyId as string;
+      await assertCompanyAccess(req, companyId);
+
+      const sqlQuery = req.body?.sql as string;
+      if (!sqlQuery || !sqlQuery.trim()) {
+        throw badRequest("SQL query is required");
+      }
+
+      const limit = req.body?.limit ? Number(req.body.limit) : undefined;
+      try {
+        const result = await dsService.queryClickhouse(companyId, sqlQuery, limit);
+        res.json(result);
+      } catch (err: any) {
+        throw badRequest(err.message || "ClickHouse query execution failed");
+      }
+    },
+  );
+
+  // 5e. ClickHouse: Sync single data source
+  router.post(
+    "/companies/:companyId/data-sources/:id/clickhouse-sync",
+    async (req: Request, res: Response) => {
+      const companyId = req.params.companyId as string;
+      const id = req.params.id as string;
+      await assertCompanyAccess(req, companyId);
+
+      try {
+        const result = await dsService.syncToClickhouse(companyId, id);
+        res.json({ success: true, ...result });
+      } catch (err: any) {
+        throw badRequest(err.message || "ClickHouse sync failed");
+      }
+    },
+  );
+
+  // 5f. ClickHouse: Sync all company data sources
+  router.post(
+    "/companies/:companyId/data-sources/clickhouse/sync-all",
+    async (req: Request, res: Response) => {
+      const companyId = req.params.companyId as string;
+      await assertCompanyAccess(req, companyId);
+
+      try {
+        const result = await dsService.syncToClickhouse(companyId);
+        res.json({ success: true, ...result });
+      } catch (err: any) {
+        throw badRequest(err.message || "ClickHouse sync-all failed");
       }
     },
   );

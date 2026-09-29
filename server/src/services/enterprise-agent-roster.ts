@@ -1,6 +1,7 @@
 import { eq, and } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents } from "@paperclipai/db";
+import { builtInAgentService } from "./built-in-agents.js";
 
 export interface EnterpriseAgentSpec {
   name: string;
@@ -182,13 +183,23 @@ export class EnterpriseAgentRosterService {
    * Creates missing agents automatically.
    */
   async ensureEnterpriseRoster(companyId: string) {
+    // 0. Ensure built-in onboarding agents are provisioned and properly marked first
+    await builtInAgentService(this.db).autoProvisionBundledAgents(companyId);
+
     // 1. Fetch existing agents
     const existing = await this.db
-      .select({ id: agents.id, name: agents.name })
+      .select({ id: agents.id, name: agents.name, metadata: agents.metadata })
       .from(agents)
       .where(eq(agents.companyId, companyId));
 
-    const existingMap = new Map(existing.map((a) => [a.name.toLowerCase(), a.id]));
+    const existingMap = new Map<string, string>();
+    for (const a of existing) {
+      existingMap.set(a.name.toLowerCase(), a.id);
+      const marker = (a.metadata as any)?.paperclipBuiltInAgent;
+      if (marker?.key) {
+        existingMap.set(`builtin:${marker.key}`, a.id);
+      }
+    }
 
     // Find Homseo id for reportsTo
     let homseoId = existingMap.get("homseo");
@@ -219,8 +230,17 @@ export class EnterpriseAgentRosterService {
       existingMap.set("homseo", homseoId);
     }
 
-    // Create any missing agents
+    // Create any missing agents (skip if built-in equivalent already exists)
     for (const spec of ENTERPRISE_AGENT_ROSTER) {
+      if (spec.name === "StructuredIngestionAgent" && (existingMap.has("builtin:structured-ingestion") || existingMap.has("structured ingestion agent"))) {
+        continue;
+      }
+      if (spec.name === "KnowledgeIngestionAgent" && (existingMap.has("builtin:knowledge-ingestion") || existingMap.has("knowledge ingestion agent"))) {
+        continue;
+      }
+      if (spec.name === "DatabaseIntegrationAgent" && (existingMap.has("builtin:database-ingestion") || existingMap.has("database ingestion agent"))) {
+        continue;
+      }
       if (existingMap.has(spec.name.toLowerCase())) {
         continue;
       }

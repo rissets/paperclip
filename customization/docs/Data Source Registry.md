@@ -58,6 +58,25 @@ Data Source Registry hanya mengetahui **bagaimana source tersebut bisa digunakan
 
 ---
 
+# 3. Klasifikasi Arsitektur Paperclip Resmi: Data Source vs Plugins vs Tool Connections
+
+Dalam arsitektur resmi Paperclip (`packages/db`, `packages/shared`, `server/`, `ui/`, dan `doc/`), posisi komponen data dan ekstensi terbagi menjadi 3 tingkatan yang sangat jelas dan tidak boleh tertukar:
+
+| Kategori | Definisi & Peran Resmi di Paperclip | Lokasi Kode & Schema | Trust & Scope Boundary |
+|---|---|---|---|
+| **Data Sources** | **First-Class Core Domain Entity** untuk Enterprise Data Intelligence. Mewakili substrat data internal perusahaan (CSV/Excel, RAG Knowledge, External DB, API, IoT, CCTV) dengan profil semantik, kamus sinonim bilingual, inferensi skema ClickHouse, dan embedding vektor. | `packages/db/src/schema/data_sources.ts`<br>`server/src/services/data-sources.ts`<br>`server/src/services/clickhouse.ts`<br>`ui/src/pages/DataSources.tsx` | **Company-Scoped Mutlak (Rule 1)**.<br>Tiap data source, tabel, dan record terikat ke `companyId`. ClickHouse diisolasi ke database `paperclip_<companyId>`. |
+| **Plugins** | **Extension Packages Modular (npm)** berbasis `@paperclipai/plugin-sdk` untuk memperluas fungsionalitas sistem tanpa memodifikasi core Paperclip. Menyediakan 4 extension points: Custom Agent Tools (`tools`), UI slots (`uiContribution`), background jobs (`jobs`), dan webhook handlers (`webhooks`). | `packages/plugins/`<br>`packages/plugins/sdk/`<br>`doc/plugins/PLUGIN_SPEC.md` | **Instance-Wide Installation** dengan aktivasi per-company. Dijalankan di worker sandbox host RPC. |
+| **Apps & Tool Connections** | **External SaaS & MCP Integrations** untuk memberikan agen kredensial dan akses ke layanan pihak ketiga (GitHub, Slack, Discord, Jira, ClickHouse Cloud MCP). | `packages/shared/src/app-definitions/`<br>`doc/connections/CONNECTOR-PLAYBOOK.md`<br>`tool_connections` table | **Company & Actor Scoped** via OAuth, DCR, atau API Key dengan hashing at rest. |
+
+### Mengapa Data Source Bukan Sekadar Plugin?
+1. **Invarian Kontrol Inti:** Data Source memegang peran kritis dalam grounding operasional dan reasoning agen enterprise (`DataAgent`, `KnowledgeAgent`, dan `EnterpriseOrchestrator`). Menjadikannya first-class domain entity memastikan integritas skema, foreign key cascade, dan kepatuhan terhadap Company Boundary Rule 1.
+2. **Dual-Engine Storage Architecture:**
+   - **PostgreSQL + pgvector (`dataSourceChunks`):** Menyimpan dokumen tidak terstruktur, passage tokens, dan 384-dimensional dense embeddings untuk pencarian semantik hybrid RAG (cosine similarity + lexical BM25).
+   - **ClickHouse OLAP Storage (`MergeTree`):** Menyimpan fakta tabular, data transaksi CSV/Excel, time-series IoT, dan replika CDC basis data eksternal. Menyediakan agregasi kuantitatif berkecepatan sub-milidetik (`SELECT sum(...), avg(...) GROUP BY ...`) yang diakses langsung oleh `DataAgent` dan ClickHouse API endpoints.
+3. **Hubungan Simbiotik:** Plugin tetap dapat memanggil Data Source melalui Tool Definitions yang mengeksekusi service internal Paperclip, namun katalog dan siklus hidup data source dikelola langsung oleh Paperclip Control Plane.
+
+---
+
 # 4. Arsitektur Data Source Registry
 
 ```mermaid

@@ -51,6 +51,9 @@ import { AgentActionButtons } from "../components/AgentActionButtons";
 import { InlineBanner } from "../components/InlineBanner";
 import { BuiltInBundlePanel } from "../components/BuiltInBundlePanel";
 import { ConfigureBuiltInAgentModal } from "../components/ConfigureBuiltInAgentModal";
+import { StructuredIngestionConfigCard } from "../components/StructuredIngestionConfigCard";
+import { KnowledgeIngestionConfigCard } from "../components/KnowledgeIngestionConfigCard";
+import { DatabaseIngestionConfigCard } from "../components/DatabaseIngestionConfigCard";
 import { TrustPresetSection } from "../components/TrustPresetSection";
 import { FileTree, buildFileTree } from "../components/FileTree";
 import { ScrollToBottom } from "../components/ScrollToBottom";
@@ -1288,7 +1291,7 @@ export function AgentDetail() {
             onBeforeNavigate={prepareAgentNavigation}
             onActionError={setActionError}
             onTerminateSuccess={() => navigate("/agents/all", { replace: true })}
-            hideTerminate={Boolean(builtInState)}
+            hideTerminate={Boolean(builtInState) || Boolean((agent?.metadata as any)?.paperclipBuiltInAgent)}
             pauseConfirm={
               builtInState
                 ? {
@@ -1795,6 +1798,29 @@ export function AgentOverview({
           )}
         </section>
       </div>
+
+      {/* Structured Ingestion Configuration for Structured Ingestion Specialists */}
+      {(agent.name?.toLowerCase().includes("structured") ||
+        (agent.metadata as any)?.paperclipBuiltInAgent?.key === "structured-ingestion" ||
+        agent.capabilities?.toLowerCase().includes("structured file ingestion")) && (
+        <StructuredIngestionConfigCard agent={agent} companyId={agent.companyId} />
+      )}
+
+      {/* Knowledge Ingestion & RAG Configuration for Knowledge Ingestion Specialists */}
+      {(agent.name?.toLowerCase().includes("knowledge") ||
+        (agent.metadata as any)?.paperclipBuiltInAgent?.key === "knowledge-ingestion" ||
+        agent.capabilities?.toLowerCase().includes("unstructured document ingestion") ||
+        agent.capabilities?.toLowerCase().includes("rag semantic search")) && (
+        <KnowledgeIngestionConfigCard agent={agent} companyId={agent.companyId} />
+      )}
+
+      {/* Database Ingestion & Relational Topology Configuration for Database Ingestion Specialists */}
+      {(agent.name?.toLowerCase().includes("database") ||
+        (agent.metadata as any)?.paperclipBuiltInAgent?.key === "database-ingestion" ||
+        agent.capabilities?.toLowerCase().includes("relational database") ||
+        agent.capabilities?.toLowerCase().includes("database connectivity")) && (
+        <DatabaseIngestionConfigCard agent={agent} companyId={agent.companyId} />
+      )}
 
       <section className="space-y-3" aria-labelledby="agent-recent-tasks-heading">
         <div className="flex items-center justify-between">

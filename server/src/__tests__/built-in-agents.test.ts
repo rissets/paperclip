@@ -169,7 +169,15 @@ describeEmbeddedPostgres("built-in agents", () => {
 
   it("validates the static registry and rejects invalid definitions", () => {
     const definitions = listBuiltInAgentDefinitions();
-    expect(definitions.map((definition) => definition.key).sort()).toEqual(["briefs", "learning", "reflection-coach", "summarizer"]);
+    expect(definitions.map((definition) => definition.key).sort()).toEqual([
+      "briefs",
+      "database-ingestion",
+      "knowledge-ingestion",
+      "learning",
+      "reflection-coach",
+      "structured-ingestion",
+      "summarizer",
+    ]);
     const summarizer = definitions.find((definition) => definition.key === "summarizer");
     expect(summarizer).toMatchObject({
       defaultAdapterType: "claude_local",
@@ -834,6 +842,19 @@ describeEmbeddedPostgres("built-in agents", () => {
       details: {
         code: "built_in_agent_undeletable",
         key: "briefs",
+      },
+    });
+  });
+
+  it("blocks terminating a built-in agent", async () => {
+    const companyId = await seedCompany();
+    const state = await builtInAgentService(db).ensure(companyId, "structured-ingestion");
+
+    await expect(agentService(db).terminate(state.agentId!)).rejects.toMatchObject({
+      status: 409,
+      details: {
+        code: "built_in_agent_unterminatable",
+        key: "structured-ingestion",
       },
     });
   });

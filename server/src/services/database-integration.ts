@@ -262,9 +262,9 @@ export class DatabaseIntegrationService {
     const conn = await this.createMysqlConnection(config, 8000);
 
     try {
-      // 1. Get Tables
+      // 1. Get Tables with metadata row counts
       const [tableRows] = await conn.query(`
-        SELECT table_name
+        SELECT table_name, table_rows
         FROM information_schema.tables
         WHERE table_schema = ?
           AND table_type = 'BASE TABLE'
@@ -319,21 +319,23 @@ export class DatabaseIntegrationService {
           ORDER BY ordinal_position
         `, [config.database, tableName]);
 
-        // Row count & samples with error resilience
-        let totalRows = 0;
+        // Row count from information_schema metadata & samples with error resilience
+        let totalRows = Number(t.table_rows ?? t.TABLE_ROWS ?? 0);
         let sampleRows: any[] = [];
         try {
-          const [countRows] = await conn.query(
-            `SELECT COUNT(1) as total FROM \`${config.database}\`.\`${tableName}\``,
-          );
-          totalRows = Number((countRows as any[])[0]?.total ?? (countRows as any[])[0]?.TOTAL ?? 0);
-
-          const [samples] = await conn.query(
+          const samplePromise = conn.query(
             `SELECT * FROM \`${config.database}\`.\`${tableName}\` LIMIT 10`,
           );
+          const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("Sample query timeout")), 3000),
+          );
+          const [samples] = (await Promise.race([samplePromise, timeoutPromise])) as any;
           sampleRows = Array.isArray(samples) ? (samples as any[]) : [];
+          if (totalRows === 0 && sampleRows.length > 0) {
+            totalRows = sampleRows.length;
+          }
         } catch (err: any) {
-          console.warn(`[database-integration] Could not query rows for table ${tableName}:`, err.message);
+          console.warn(`[database-integration] Could not query sample rows for table ${tableName}:`, err.message);
         }
 
         const tableRelations = allRelations.filter(
@@ -670,13 +672,13 @@ export class DatabaseIntegrationService {
       } else if (kind === "array_of_objects" && subFields.length > 0) {
         const tupleElements = subFields
           .slice(0, 15)
-          .map((sf) => `${this.sanitizeChIdentifier(sf.name)} ${this.mapSubFieldToChType(sf.dataType)}`)
+          .map((sf) => `\`${this.sanitizeChIdentifier(sf.name)}\` ${this.mapSubFieldToChType(sf.dataType)}`)
           .join(", ");
         clickhouseType = `Array(Tuple(${tupleElements}))`;
       } else if (kind === "object" && subFields.length > 0) {
         const tupleElements = subFields
           .slice(0, 15)
-          .map((sf) => `${this.sanitizeChIdentifier(sf.name)} ${this.mapSubFieldToChType(sf.dataType)}`)
+          .map((sf) => `\`${this.sanitizeChIdentifier(sf.name)}\` ${this.mapSubFieldToChType(sf.dataType)}`)
           .join(", ");
         clickhouseType = `Tuple(${tupleElements})`;
       }
@@ -1138,9 +1140,10 @@ export class DatabaseIntegrationService {
 
     const cleanTableName = tableName.replace(/^(tbl_|table_|tb_|m_|t_)/i, "").toLowerCase();
     const tableWords = cleanTableName.split(/[\s_\-]+/).filter((w) => w.length > 2);
+    const humanEntity = this.humanizeLabel(cleanTableName);
     const entities = Array.from(
       new Set([
-        this.humanizeLabel(cleanTableName),
+        humanEntity,
         ...tableWords.map((w) => this.humanizeLabel(w)),
       ]),
     );
@@ -1149,9 +1152,42 @@ export class DatabaseIntegrationService {
       .filter((c) => c.isSearchable || c.role === "identifier" || c.semanticCategory === "identity")
       .map((c) => c.name);
 
+    const colNames = columns.map((c) => c.name.toLowerCase());
+    const tableTopics: string[] = [];
+
+    // Derive topics from table identity & column semantics
+    tableTopics.push(`${humanEntity} Master Record & Core Attributes`);
+    if (colNames.some((c) => /(total|harga|price|modal|nominal|jumlah|amount|omset|revenue|biaya|tarif|billing|saldo|pembayaran|payment|paid)/i.test(c))) {
+      tableTopics.push(`${humanEntity} Financial Accounting & Monetary Aggregation`);
+    }
+    if (colNames.some((c) => /(status|state|kondisi|is_active|aktif|valid|flag|verified|is_)/i.test(c))) {
+      tableTopics.push(`${humanEntity} Verification State & Status Auditing`);
+    }
+    if (colNames.some((c) => /(provinsi|kabupaten|kota|kecamatan|kelurahan|wilayah|region|alamat|address|latitude|longitude|geo|postal)/i.test(c))) {
+      tableTopics.push(`${humanEntity} Geographic Distribution & Regional Routing`);
+    }
+    if (colNames.some((c) => /(tanggal|date|created_at|updated_at|waktu|time|period|periode|tahun|bulan|sk_date)/i.test(c))) {
+      tableTopics.push(`${humanEntity} Timeline Tracking & Historical Trends`);
+    }
+    if (colNames.some((c) => /(json|meta|payload|config|items|detail|extra|attributes|properties)/i.test(c))) {
+      tableTopics.push(`${humanEntity} Semi-Structured & JSON Payload Extraction`);
+    }
+    if (colNames.some((c) => /(notaris|pejabat|petugas|officer|author|creator|user|pengguna|actor|admin)/i.test(c))) {
+      tableTopics.push(`${humanEntity} Operational Authority & Actor Attribution`);
+    }
+
+    const uniqueTopics = Array.from(new Set(tableTopics));
+    const tableRole = foreignKeys.length >= 2 ? "bridge_table" : (metrics.length > 0 ? "fact_table" : "dimension_table");
+    const roleDesc = tableRole === "fact_table" ? "Tabel Fakta Transaksional" : (tableRole === "bridge_table" ? "Tabel Penjembatan Asosiatif" : "Tabel Master Dimensi");
+    const context = `${roleDesc} untuk entitas '${humanEntity}' dalam skema basis data relasional. Merekam ${columns.length} atribut dengan ${relations.length} relasi foreign key antartabel.`;
+
     return {
       tableName,
       description: `External database table '${tableName}' with ${columns.length} columns, ${relations.length} relationships, and ${nestedDimensions.length} nested JSON attributes.`,
+      context,
+      topics: uniqueTopics,
+      tableRole,
+      decisionSpecs: ["db.table_role.v1", "db.join_candidates.v1"],
       entities,
       searchableColumns,
       dimensions,
@@ -1168,26 +1204,7 @@ export class DatabaseIntegrationService {
   }
 
   private async createMysqlConnection(config: DatabaseConnectionConfig, timeout = 8000): Promise<mysql.Connection> {
-    try {
-      return await mysql.createConnection(this.getMysqlConfig(config, timeout));
-    } catch (err: any) {
-      if (
-        (config.username === "dba" || config.database === "AHU_DB") &&
-        (err.message?.includes("Access denied") || err.code === "ER_ACCESS_DENIED_ERROR")
-      ) {
-        const fallbackPassword = config.password === "Kapakmerah#212" ? "Majapahit2019" : "Kapakmerah#212";
-        try {
-          const fallbackConn = await mysql.createConnection(
-            this.getMysqlConfig({ ...config, password: fallbackPassword }, timeout),
-          );
-          config.password = fallbackPassword;
-          return fallbackConn;
-        } catch {
-          throw err;
-        }
-      }
-      throw err;
-    }
+    return mysql.createConnection(this.getMysqlConfig(config, timeout));
   }
 
   private getPostgresSql(config: DatabaseConnectionConfig, max = 1, timeout = 5) {

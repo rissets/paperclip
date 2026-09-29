@@ -10,6 +10,12 @@ import type {
 } from "@paperclipai/shared";
 import { api } from "./client";
 
+export interface UploadDataSourceResponse extends DataSource {
+  dataSources?: DataSource[];
+  count?: number;
+  message?: string;
+}
+
 export const dataSourcesApi = {
   list: (companyId: string) =>
     api.get<DataSource[]>(`/companies/${encodeURIComponent(companyId)}/data-sources`),
@@ -19,15 +25,24 @@ export const dataSourcesApi = {
 
   upload: (
     companyId: string,
-    file: File,
+    file: File | File[],
     options: { name?: string; description?: string } = {},
   ) => {
     const formData = new FormData();
-    formData.append("file", file);
+    if (Array.isArray(file)) {
+      for (const f of file) {
+        formData.append("files", f);
+      }
+    } else {
+      formData.append("file", file);
+    }
     if (options.name) formData.append("name", options.name);
     if (options.description) formData.append("description", options.description);
 
-    return api.postForm<DataSource>(`/companies/${encodeURIComponent(companyId)}/data-sources/upload`, formData);
+    return api.postForm<UploadDataSourceResponse>(
+      `/companies/${encodeURIComponent(companyId)}/data-sources/upload`,
+      formData,
+    );
   },
 
   delete: (companyId: string, id: string) =>
@@ -144,5 +159,39 @@ export const dataSourcesApi = {
       `/companies/${encodeURIComponent(companyId)}/data-sources/backfill-profiles`,
       {},
     ),
+
+  getClickhouseStatus: (companyId: string) =>
+    api.get<{
+      ok: boolean;
+      version?: string;
+      error?: string;
+      companyDatabase: string;
+      tables: string[];
+    }>(`/companies/${encodeURIComponent(companyId)}/data-sources/clickhouse/status`),
+
+  queryClickhouse: (companyId: string, sql: string, limit?: number) =>
+    api.post<SqlQueryResult>(
+      `/companies/${encodeURIComponent(companyId)}/data-sources/clickhouse/query`,
+      { sql, limit },
+    ),
+
+  syncClickhouse: (companyId: string, dataSourceId: string) =>
+    api.post<{
+      success: boolean;
+      syncedTables: Array<{ tableName: string; rowCount: number; clickhouseTable: string }>;
+      totalRows: number;
+      companyDatabase: string;
+    }>(
+      `/companies/${encodeURIComponent(companyId)}/data-sources/${encodeURIComponent(dataSourceId)}/clickhouse-sync`,
+      {},
+    ),
+
+  syncAllClickhouse: (companyId: string) =>
+    api.post<{
+      success: boolean;
+      syncedTables: Array<{ tableName: string; rowCount: number; clickhouseTable: string }>;
+      totalRows: number;
+      companyDatabase: string;
+    }>(`/companies/${encodeURIComponent(companyId)}/data-sources/clickhouse/sync-all`, {}),
 };
 

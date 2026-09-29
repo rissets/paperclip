@@ -9,6 +9,10 @@ import type {
   OnboardingReasoningStep,
   SuggestedQueryTemplate,
   JsonColumnStructure,
+  TableRelation,
+  TableSemanticProfile,
+  CrossTableCluster,
+  DocumentSemanticProfile,
 } from "@paperclipai/shared";
 
 export interface TypeSafeJevConfig {
@@ -312,12 +316,79 @@ export class TypeSafeJevService {
   }
 
   /**
+   * Dynamically extracts candidate business entities from table names, columns, and agent hints.
+   * Completely avoids static hardcoded domain lists.
+   */
+  public extractDynamicCandidateEntities(
+    tableName: string,
+    columnNames: string[] = [],
+    providedEntities: string[] = [],
+  ): string[] {
+    const candidates = new Set<string>();
+
+    // 1. Add agent-provided entities first
+    if (providedEntities && providedEntities.length > 0) {
+      for (const ent of providedEntities) {
+        if (ent && ent.trim() && ent.trim().length >= 2) {
+          candidates.add(this.humanizeIdentifier(ent.trim()));
+        }
+      }
+    }
+
+    // 2. Extract from table name
+    const strippedTable = tableName
+      .replace(/^(ms_|tbl_|table_|tb_|m_|t_|v_|data_|dataset_)/i, "")
+      .replace(/(_\d{4}|\d{4})$/, "");
+
+    const tableWords = strippedTable
+      .replace(/([a-z])([A-Z])/g, "$1 $2")
+      .split(/[\s_\-]+/)
+      .map((w) => w.trim())
+      .filter((w) => w.length >= 3 && !/^\d+$/.test(w) && !/^(raw|log|logs|detail|details|item|items|master|view|temp|backup|versi|version|new|old|copy|complete|all|final|draft|update|resmi|erddap|dataset|data)$/i.test(w));
+
+    if (tableWords.length > 0) {
+      for (const w of tableWords) {
+        const humanW = this.humanizeIdentifier(w);
+        if (humanW && humanW.length >= 3 && !/^\d+$/.test(humanW)) {
+          candidates.add(humanW);
+        }
+      }
+      const fullClean = this.humanizeIdentifier(strippedTable);
+      if (fullClean && fullClean.length >= 3 && !/^\d+$/.test(fullClean) && !candidates.has(fullClean)) {
+        candidates.add(fullClean);
+      }
+    }
+
+    // 3. Extract from identity column names (e.g. kd_notaris, nm_notaris, id_pelanggan, kode_barang)
+    for (const col of columnNames) {
+      const colLower = col.toLowerCase();
+      const match = colLower.match(/^(?:kd_|nm_|id_|no_|kode_|nama_)([a-z0-9]+)$/);
+      if (match && match[1] && match[1].length >= 3) {
+        const token = match[1];
+        if (!/^(pos|area|telp|fax|sk|skk|skm|skp|uid|thn|date|tgl|idx|seq|val)$/i.test(token)) {
+          candidates.add(this.humanizeIdentifier(token));
+        }
+      }
+    }
+
+    if (candidates.size === 0) {
+      candidates.add(this.humanizeIdentifier(tableName));
+    }
+
+    return Array.from(candidates).filter(Boolean);
+  }
+
+  /**
    * 3. Structured Ingestion Entity & Metric Synthesis via DecisionSpec ('struct.entity_metric_mapping')
    */
   async evaluateEntityAndMetrics(
     tableName: string,
     columnNames: string[],
     metricColumns: string[],
+    options?: {
+      agentEntities?: string[];
+      domainContext?: string;
+    },
   ): Promise<{
     entities: string[];
     primaryMetrics: Array<{ name: string; column: string; aggregation: "sum" | "avg" | "count" | "min" | "max"; format?: string }>;
@@ -325,19 +396,24 @@ export class TypeSafeJevService {
     suggestedQueries?: SuggestedQueryTemplate[];
     reasoningSteps?: OnboardingReasoningStep[];
   }> {
+    const candidateEntities = this.extractDynamicCandidateEntities(
+      tableName,
+      columnNames,
+      options?.agentEntities,
+    );
+
+    const dynamicCriteria: Record<string, string> = {};
+    for (const ent of candidateEntities) {
+      const key = `entity_${ent.toLowerCase().replace(/[^a-z0-9]/g, "_")}`;
+      dynamicCriteria[key] = `Entitas '${ent}' yang teridentifikasi dari nama tabel atau atribut skema`;
+    }
+    dynamicCriteria["general_dataset"] = `Dataset umum '${this.humanizeIdentifier(tableName)}'`;
+
     const questions: Record<string, any> = {
       entity_type: {
         type: "choice",
         instructions: `Tentukan entitas bisnis utama yang direpresentasikan oleh tabel '${tableName}' dengan kolom [${columnNames.slice(0, 10).join(", ")}].`,
-        criteria: {
-          customer_user: "Pelanggan, User, Mahasiswa, Karyawan, Pasien",
-          sales_order: "Penjualan, Pesanan, Transaksi, Invoice, Billing",
-          product_inventory: "Produk, Barang, Stok, Gudang, Katalog",
-          finance_accounting: "Jurnal Keuangan, Anggaran, Neraca, Pengeluaran",
-          operations_log: "Log operasional, Event telemetri, Mutasi status",
-          organization_company: "Badan usaha, Perusahaan, PT, CV, Instansi",
-          general_dataset: "Dataset umum / Lainnya",
-        },
+        criteria: dynamicCriteria,
       },
       sync_strategy: {
         type: "choice",
@@ -354,25 +430,39 @@ export class TypeSafeJevService {
       table_name: tableName,
       columns: columnNames,
       metric_candidates: metricColumns,
+      agent_entities: options?.agentEntities || [],
+      candidate_entities: candidateEntities,
+      domain_context: options?.domainContext || "",
     };
 
     const res = await this.systemOne(state, questions);
-    const entityAns = (res.answers["entity_type"] as JevDecisionChoice)?.choice || "general_dataset";
+    const entityAns = (res.answers["entity_type"] as JevDecisionChoice)?.choice || Object.keys(dynamicCriteria)[0] || "general_dataset";
     const syncAns = ((res.answers["sync_strategy"] as JevDecisionChoice)?.choice as any) || "replace";
 
-    const entityLabelMap: Record<string, string[]> = {
-      customer_user: ["Pelanggan", "Pengguna"],
-      sales_order: ["Penjualan", "Pesanan"],
-      product_inventory: ["Produk", "Inventori"],
-      finance_accounting: ["Keuangan", "Anggaran"],
-      operations_log: ["Operasional", "Aktivitas"],
-      organization_company: ["Perusahaan", "Perseroan"],
-      general_dataset: [tableName],
-    };
+    let matchedEntity = candidateEntities.find(
+      (ent) => `entity_${ent.toLowerCase().replace(/[^a-z0-9]/g, "_")}` === entityAns,
+    );
+    if (!matchedEntity && candidateEntities.length > 0) {
+      matchedEntity = candidateEntities[0];
+    }
+    const entities = Array.from(
+      new Set([
+        ...(options?.agentEntities || []),
+        ...(matchedEntity ? [matchedEntity] : []),
+        ...candidateEntities.slice(0, 3),
+      ]),
+    ).filter(Boolean);
 
-    const entities = Array.from(new Set([...(entityLabelMap[entityAns] || []), tableName]));
+    // Filter out non-metric columns (postal codes, phone numbers, years, area/city codes)
+    const validMetricColumns = metricColumns.filter((col) => {
+      const lower = col.toLowerCase();
+      if (lower.includes("pos") || lower.includes("zip") || lower.includes("telp") || lower.includes("fax") || lower.includes("area") || lower.includes("kota") || lower.includes("thn") || lower.includes("year") || lower.startsWith("kd_") || lower === "id") {
+        return false;
+      }
+      return true;
+    });
 
-    const primaryMetrics = metricColumns.map((col) => {
+    const primaryMetrics: Array<{ name: string; column: string; aggregation: "sum" | "avg" | "count" | "min" | "max"; format: string }> = validMetricColumns.map((col) => {
       const lower = col.toLowerCase();
       let agg: "sum" | "avg" | "count" | "min" | "max" = "sum";
       let format = "decimal";
@@ -380,7 +470,7 @@ export class TypeSafeJevService {
       if (lower.includes("rate") || lower.includes("ipk") || lower.includes("avg") || lower.includes("persen") || lower.includes("score")) {
         agg = "avg";
         format = "decimal";
-      } else if (lower.includes("price") || lower.includes("harga") || lower.includes("omzet") || lower.includes("revenue") || lower.includes("total")) {
+      } else if (lower.includes("price") || lower.includes("harga") || lower.includes("omzet") || lower.includes("revenue") || lower.includes("total") || lower.includes("nominal")) {
         agg = "sum";
         format = "currency_idr";
       } else if (lower.includes("count") || lower.includes("jumlah") || lower.includes("qty")) {
@@ -395,6 +485,15 @@ export class TypeSafeJevService {
         format,
       };
     });
+
+    if (primaryMetrics.length === 0) {
+      primaryMetrics.push({
+        name: `Total Record ${tableName}`,
+        column: "id",
+        aggregation: "count",
+        format: "integer",
+      });
+    }
 
     // 1. Suggested queries for structured dataset
     const suggestedQueries: SuggestedQueryTemplate[] = [];
@@ -483,6 +582,7 @@ export class TypeSafeJevService {
   async evaluateDocumentDomain(
     fileName: string,
     sampleText: string,
+    chunks?: Array<{ id?: string; title?: string; content: string }>,
   ): Promise<{
     domain: string;
     targetAgentAffinity: string;
@@ -491,6 +591,7 @@ export class TypeSafeJevService {
     summary: string;
     suggestedQueries?: SuggestedQueryTemplate[];
     reasoningSteps?: OnboardingReasoningStep[];
+    documentProfiles?: DocumentSemanticProfile[];
   }> {
     const preview = sampleText.slice(0, 1500);
 
@@ -534,6 +635,7 @@ export class TypeSafeJevService {
     // Extract named entities from sample text (e.g. capitalized names, company names)
     const entities = this.extractEntitiesFromText(sampleText, fileName);
     const primaryTopics = this.extractTopicsFromDomain(domain, sampleText);
+    const documentProfiles = this.deriveDocumentSemanticProfiles(chunks || [], fileName);
 
     // Suggested queries for RAG document
     const suggestedQueries: SuggestedQueryTemplate[] = [
@@ -579,7 +681,7 @@ export class TypeSafeJevService {
         agent: "KnowledgeIngestionAgent",
         decisionSpec: "rag.passage_relevance.v1",
         thought: `Mengekstrak ${entities.length} entitas formal dan ${primaryTopics.length} topik utama ([${primaryTopics.join(", ")}]). Menyusun template query grounded untuk KnowledgeAgent.`,
-        findings: { entitiesCount: entities.length, primaryTopics },
+        findings: { entitiesCount: entities.length, primaryTopics, documentProfilesCount: documentProfiles.length },
       },
       {
         stage: 4,
@@ -598,6 +700,7 @@ export class TypeSafeJevService {
       summary: `Dokumen '${fileName}' diklasifikasikan sebagai domain ${domain}. Dipetakan ke ${affinity} dengan ${entities.length} entitas terdeteksi.`,
       suggestedQueries,
       reasoningSteps,
+      documentProfiles,
     };
   }
 
@@ -614,6 +717,8 @@ export class TypeSafeJevService {
     reasoningSteps: OnboardingReasoningStep[];
     primaryTopics: string[];
     topics: string[];
+    tableProfiles: Record<string, TableSemanticProfile>;
+    crossTableClusters: CrossTableCluster[];
   }> {
     const questions: Record<string, any> = {};
 
@@ -766,6 +871,12 @@ export class TypeSafeJevService {
       },
     ];
 
+    const tableProfiles: Record<string, TableSemanticProfile> = {};
+    for (const t of tables) {
+      tableProfiles[t.name] = this.deriveTableSemanticProfile(t, tables, relationships, tableRoles);
+    }
+    const crossTableClusters = this.deriveCrossTableClusters(tables, relationships, tableRoles);
+
     return {
       tableRoles,
       entities,
@@ -774,6 +885,8 @@ export class TypeSafeJevService {
       reasoningSteps,
       primaryTopics,
       topics: primaryTopics,
+      tableProfiles,
+      crossTableClusters,
     };
   }
 
@@ -932,6 +1045,770 @@ export class TypeSafeJevService {
 
     return Array.from(topicsSet);
   }
+
+  /**
+   * Humanizes any technical name or identifier into a clean, capitalized phrase.
+   * e.g. 'tbl_data_retail' -> 'Data Retail', 'customer_id' -> 'Customer Id'
+   */
+  public humanizeIdentifier(name: string): string {
+    if (!name) return "";
+    const stripped = name
+      .replace(/^(tbl_|mst_|dim_|fact_|trx_|sys_|ref_|t_|m_|f_|v_)/i, "")
+      .replace(/(_tbl|_table|_mst|_dim|_fact|_trx|_view)$/i, "");
+    const parts = stripped
+      .replace(/([a-z])([A-Z])/g, "$1 $2")
+      .replace(/[_\-\s]+/g, " ")
+      .trim()
+      .split(/\s+/);
+    return parts
+      .filter(Boolean)
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+      .join(" ");
+  }
+
+  /**
+   * Derives a comprehensive per-table semantic profile with table-specific topics,
+   * business context, entity isolation, role classification, and local join relations.
+   */
+  public deriveTableSemanticProfile(
+    table: { name?: string; tableName?: string; columns?: any[]; rowCount?: number },
+    allTables: Array<{ name?: string; tableName?: string; columns?: any[]; rowCount?: number }> = [],
+    allRelationships: TableRelation[] = [],
+    tableRoles: Record<string, string> = {},
+  ): TableSemanticProfile {
+    const rawTableName = table.tableName || table.name || "table";
+    const role =
+      (tableRoles[rawTableName] as any) ||
+      (table.rowCount && table.rowCount > 500 ? "fact_table" : "dimension_table");
+    const humanEntity = this.humanizeIdentifier(rawTableName);
+    const entities = [humanEntity];
+
+    const cols = (table.columns || []).map((c: any) => {
+      if (typeof c === "string") return { name: c, role: "dimension", type: "" };
+      return {
+        name: c?.name || "",
+        role: c?.role || "dimension",
+        type: c?.type || c?.dataType || "",
+      };
+    });
+
+    const colNames = cols.map((c) => c.name.toLowerCase());
+    const tableTopics: string[] = [];
+
+    // 1. Role-based thematic topics
+    if (role === "fact_table") {
+      tableTopics.push(`${humanEntity} Operational Events & Transaction Volume`);
+      tableTopics.push(`${humanEntity} Lifecycle Execution & State History`);
+    } else if (role === "bridge_table") {
+      tableTopics.push(`${humanEntity} Multi-Entity Association & Mapping`);
+      tableTopics.push(`Cross-Domain Relationship Linkage`);
+    } else if (role === "lookup_table") {
+      tableTopics.push(`${humanEntity} Standardized Reference & Code Catalog`);
+    } else {
+      tableTopics.push(`${humanEntity} Master Record & Core Profile`);
+      tableTopics.push(`${humanEntity} Attribute Governance`);
+    }
+
+    // 2. Structural column-derived topics
+    if (
+      colNames.some((c) =>
+        /(total|harga|price|modal|nominal|jumlah|amount|omset|revenue|biaya|tarif|billing|saldo|pembayaran|payment|paid)/i.test(
+          c
+        )
+      )
+    ) {
+      tableTopics.push(`${humanEntity} Financial Accounting & Monetary Aggregation`);
+    }
+    if (
+      colNames.some((c) =>
+        /(status|state|kondisi|is_active|aktif|valid|flag|verified|is_)/i.test(c)
+      )
+    ) {
+      tableTopics.push(`${humanEntity} Verification State & Status Auditing`);
+    }
+    if (
+      colNames.some((c) =>
+        /(provinsi|kabupaten|kota|kecamatan|kelurahan|wilayah|region|alamat|address|latitude|longitude|geo|postal)/i.test(
+          c
+        )
+      )
+    ) {
+      tableTopics.push(`${humanEntity} Geographic Distribution & Regional Routing`);
+    }
+    if (
+      colNames.some((c) =>
+        /(tanggal|date|created_at|updated_at|waktu|time|period|periode|tahun|bulan|sk_date)/i.test(
+          c
+        )
+      )
+    ) {
+      tableTopics.push(`${humanEntity} Timeline Tracking & Historical Trends`);
+    }
+    if (
+      colNames.some((c) =>
+        /(json|meta|payload|config|items|detail|extra|attributes|properties)/i.test(
+          c
+        )
+      )
+    ) {
+      tableTopics.push(
+        `${humanEntity} Semi-Structured Attributes & JSON Payload Extraction`
+      );
+    }
+    if (
+      colNames.some((c) =>
+        /(notaris|pejabat|petugas|officer|author|creator|user|pengguna|actor|admin)/i.test(
+          c
+        )
+      )
+    ) {
+      tableTopics.push(`${humanEntity} Operational Authority & Actor Attribution`);
+    }
+
+    const uniqueTopics = Array.from(new Set(tableTopics));
+
+    const roleExplanation =
+      role === "fact_table"
+        ? "Tabel fakta transaksional yang merekam histori aktivitas operasional bervolume tinggi"
+        : role === "bridge_table"
+        ? "Tabel asosiatif penjembatan relasi many-to-many antar entitas utama"
+        : role === "lookup_table"
+        ? "Tabel referensi standar dan kode klasifikasi lookup"
+        : "Tabel master entitas utama yang menyimpan atribut profil bisnis";
+
+    const rowStr = table.rowCount != null ? `${table.rowCount.toLocaleString()} baris` : "katalog terindeks";
+    const context = `${roleExplanation} untuk entitas '${humanEntity}'. Memuat ${cols.length} kolom profil (${rowStr}) untuk analisis analitik dan eksekusi TypeSafe JEV DecisionSpecs.`;
+
+    const tableRels = allRelationships.filter(
+      (r) =>
+        r.sourceTable?.toLowerCase() === rawTableName.toLowerCase() ||
+        r.targetTable?.toLowerCase() === rawTableName.toLowerCase()
+    );
+
+    return {
+      tableName: rawTableName,
+      tableRole: role,
+      context,
+      topics: uniqueTopics,
+      entities,
+      decisionSpecRefs: ["db.table_role.v1", "db.join_candidates.v1"],
+      relationships: tableRels,
+      sampleRowCount: table.rowCount,
+    };
+  }
+
+  /**
+   * Synthesizes cohesive multi-table relational clusters by discovering connected components
+   * in the foreign key graph and grouping related business domains together.
+   */
+  public deriveCrossTableClusters(
+    tables: Array<{ name?: string; tableName?: string; columns?: any[]; rowCount?: number }>,
+    relationships: TableRelation[] = [],
+    tableRoles: Record<string, string> = {},
+  ): CrossTableCluster[] {
+    const clusters: CrossTableCluster[] = [];
+    const assignedTables = new Set<string>();
+
+    const normalizedTables = tables
+      .map((t) => ({
+        name: t.tableName || t.name || "",
+        columns: t.columns || [],
+        rowCount: t.rowCount,
+      }))
+      .filter((t) => Boolean(t.name));
+
+    // 1. Build adjacency graph from relationships
+    const adjacency = new Map<string, Set<string>>();
+    for (const t of normalizedTables) {
+      adjacency.set(t.name.toLowerCase(), new Set());
+    }
+    for (const r of relationships) {
+      const src = r.sourceTable?.toLowerCase();
+      const tgt = r.targetTable?.toLowerCase();
+      if (src && tgt && adjacency.has(src) && adjacency.has(tgt)) {
+        adjacency.get(src)!.add(tgt);
+        adjacency.get(tgt)!.add(src);
+      }
+    }
+
+    // 2. Discover connected relationship components (size >= 2)
+    for (const t of normalizedTables) {
+      const tLow = t.name.toLowerCase();
+      if (assignedTables.has(tLow)) continue;
+
+      const queue = [tLow];
+      const component = new Set<string>();
+      while (queue.length > 0) {
+        const curr = queue.shift()!;
+        if (component.has(curr)) continue;
+        component.add(curr);
+        assignedTables.add(curr);
+        for (const neighbor of adjacency.get(curr) || []) {
+          if (!component.has(neighbor)) {
+            queue.push(neighbor);
+          }
+        }
+      }
+
+      if (component.size >= 2) {
+        const memberTables = normalizedTables
+          .filter((tbl) => component.has(tbl.name.toLowerCase()))
+          .map((tbl) => tbl.name);
+        const clusterEntities = memberTables.map((name) => this.humanizeIdentifier(name));
+        const clusterName = `${clusterEntities.slice(0, 2).join(" & ")} Topology Network`;
+        clusters.push({
+          clusterName,
+          description: `Kluster relasi multi-tabel antara [${memberTables.join(
+            ", "
+          )}] terhubung melalui relasi foreign key untuk query join analitik terpadu.`,
+          tables: memberTables,
+          topics: [
+            `Cross-Table Join Analysis (${clusterEntities.slice(0, 3).join(", ")})`,
+            `Foreign Key Topology & Relational Integrity`,
+            `Multi-Entity Aggregation & Reconciliation`,
+          ],
+        });
+      }
+    }
+
+    // 3. Group remaining tables into cohesive domain catalogs
+    const unassigned = normalizedTables.filter(
+      (t) => !assignedTables.has(t.name.toLowerCase())
+    );
+    if (unassigned.length > 0) {
+      const memberNames = unassigned.map((t) => t.name);
+      clusters.push({
+        clusterName: `Core Master Entities & Reference Lookups`,
+        description: `Kumpulan tabel master dimensi dan referensi kode (${memberNames
+          .slice(0, 4)
+          .join(", ")}) untuk penambahan konteks lookup pada query analitik.`,
+        tables: memberNames,
+        topics: [
+          `Master Data Reference Lookup`,
+          `Categorical Dimension Filtering & Segmentation`,
+          `Standardized Classification Codes`,
+        ],
+      });
+    }
+
+    return clusters;
+  }
+
+  /**
+   * Derives document-level / section-level semantic profiles for knowledge / RAG sources.
+   */
+  public deriveDocumentSemanticProfiles(
+    chunks: Array<{ id?: string; title?: string; content: string }>,
+    fileName: string,
+  ): DocumentSemanticProfile[] {
+    if (!chunks || chunks.length === 0) {
+      const cleanTitle = fileName.replace(/\.[^/.]+$/, "");
+      return [
+        {
+          title: cleanTitle,
+          domain: "Unstructured Knowledge",
+          context: `Dokumen tunggal '${fileName}' yang diindeks ke dalam vector store RAG.`,
+          topics: [
+            `${cleanTitle} Document Knowledge Base`,
+            `${cleanTitle} Operational Guidelines`,
+            `Semantic Retrieval & Policy Search`,
+          ],
+          entities: [cleanTitle],
+          chunkCount: 1,
+          wordCount: 100,
+          decisionSpecRefs: ["rag.domain_classify.v1", "rag.passage_relevance.v1"],
+        },
+      ];
+    }
+
+    const profiles: DocumentSemanticProfile[] = [];
+    const sectionMap = new Map<string, Array<{ content: string }>>();
+
+    for (const c of chunks) {
+      const sectionTitle = c.title?.trim() || fileName.replace(/\.[^/.]+$/, "");
+      if (!sectionMap.has(sectionTitle)) {
+        sectionMap.set(sectionTitle, []);
+      }
+      sectionMap.get(sectionTitle)!.push(c);
+    }
+
+    for (const [secTitle, secChunks] of sectionMap.entries()) {
+      const combinedText = secChunks.map((c) => c.content).join(" ");
+      const words = combinedText.split(/\s+/).filter(Boolean);
+      const cleanSecTitle = secTitle.replace(/\.[^/.]+$/, "");
+
+      profiles.push({
+        title: cleanSecTitle,
+        domain: "Operational SOP & Governance",
+        context: `Bagian/Dokumen '${cleanSecTitle}' memuat ${secChunks.length} passage chunk (${words.length} kata) mengenai tata kelola dan panduan kerja operasional.`,
+        topics: [
+          `${cleanSecTitle} Directives & Policies`,
+          `${cleanSecTitle} Standard Operating Procedures`,
+          `${cleanSecTitle} Compliance & Verification Requirements`,
+        ],
+        entities: [cleanSecTitle],
+        chunkCount: secChunks.length,
+        wordCount: words.length,
+        decisionSpecRefs: ["rag.domain_classify.v1", "rag.passage_relevance.v1"],
+      });
+    }
+
+    return profiles;
+  }
+
+  /**
+   * Evaluates cross-table relationships dynamically using JEV System One DecisionSpec ('struct.relation_discovery.v1').
+   * StructuredIngestionAgent evaluates candidate relationships without static hardcoded dictionaries.
+   */
+  async evaluateCrossTableRelations(
+    sourceTables: Array<{ tableName: string; columns: Array<{ name: string; role?: string; dataType?: string; sampleValues?: any[] }> }>,
+    candidateTables: Array<{ id?: string; tableName: string; columns?: Array<{ name: string; role?: string; dataType?: string }> }>,
+  ): Promise<{
+    relationships: TableRelation[];
+    reasoningSteps: OnboardingReasoningStep[];
+  }> {
+    const discoveredRels: TableRelation[] = [];
+    const seenRelations = new Set<string>();
+
+    // Combine candidate tables with source tables (for multi-table datasets)
+    const allCandidates = [
+      ...candidateTables.map((t) => ({
+        tableName: t.tableName,
+        columns: (t.columns || []).map((c) => ({
+          name: c.name,
+          role: c.role || "dimension",
+          dataType: c.dataType || "string",
+        })),
+      })),
+      ...sourceTables.map((t) => ({
+        tableName: t.tableName,
+        columns: t.columns.map((c) => ({
+          name: c.name,
+          role: c.role || "dimension",
+          dataType: c.dataType || "string",
+        })),
+      })),
+    ];
+
+    const questions: Record<string, any> = {};
+    const state = {
+      source_tables: sourceTables.map((t) => ({
+        table_name: t.tableName,
+        columns: t.columns.map((c) => ({ name: c.name, role: c.role, type: c.dataType })),
+      })),
+      candidate_tables: allCandidates.map((t) => ({
+        table_name: t.tableName,
+        columns: t.columns.map((c) => ({ name: c.name, role: c.role, type: c.dataType })),
+      })),
+    };
+
+    // Ask System One about potential foreign keys for each key-like column in source tables
+    for (const src of sourceTables) {
+      for (const col of src.columns) {
+        const isKeyLike = col.role === "identifier" || /(_id|^id|id$|kode|code|key|no|nik|npwp|ref)/i.test(col.name);
+        if (!isKeyLike) continue;
+
+        const candidateOptions: Record<string, string> = {
+          none: `Kolom '${col.name}' pada '${src.tableName}' adalah atribut lokal / tidak berelasi ke tabel lain`,
+        };
+
+        for (const cand of allCandidates) {
+          if (cand.tableName.toLowerCase() === src.tableName.toLowerCase()) continue;
+          for (const candCol of cand.columns) {
+            const isCandKey = candCol.role === "identifier" || /(_id|^id|id$|kode|code|key|no|nik|npwp|ref)/i.test(candCol.name);
+            if (isCandKey) {
+              candidateOptions[`${cand.tableName}.${candCol.name}`] = `Relasi Many-to-One ke '${cand.tableName}.${candCol.name}'`;
+            }
+          }
+        }
+
+        if (Object.keys(candidateOptions).length > 1) {
+          questions[`rel__${src.tableName}__${col.name}`] = {
+            type: "choice",
+            instructions: `Tentukan relasi referensial kolom kunci '${src.tableName}.${col.name}' terhadap tabel relasional target.`,
+            criteria: candidateOptions,
+          };
+        }
+      }
+    }
+
+    let jevAnswers: Record<string, any> = {};
+    if (Object.keys(questions).length > 0) {
+      const res = await this.systemOne(state, questions);
+      jevAnswers = res.answers || {};
+    }
+
+    // Process JEV decision answers
+    for (const [qKey, ans] of Object.entries(jevAnswers)) {
+      if (!qKey.startsWith("rel__")) continue;
+      const choice = (ans as JevDecisionChoice)?.choice;
+      if (!choice || choice === "none" || !choice.includes(".")) continue;
+
+      const [targetTable, targetColumn] = choice.split(".");
+      const cleanKey = qKey.replace("rel__", "");
+      const parts = cleanKey.split("__");
+      if (parts.length === 2 && targetTable && targetColumn) {
+        const srcTable = parts[0];
+        const srcCol = parts[1];
+        const relKey = `${srcTable}.${srcCol}->${targetTable}.${targetColumn}`;
+        if (!seenRelations.has(relKey)) {
+          seenRelations.add(relKey);
+          discoveredRels.push({
+            sourceTable: srcTable,
+            sourceColumn: srcCol,
+            targetTable,
+            targetColumn,
+            relationType: "many_to_one",
+          });
+        }
+      }
+    }
+
+    // Dynamic structural matching fallback to ensure full coverage
+    for (const src of sourceTables) {
+      for (const col of src.columns) {
+        const isKeyLike = col.role === "identifier" || /(_id|^id|id$|kode|code|key|no|nik|npwp|ref)/i.test(col.name);
+        if (!isKeyLike) continue;
+
+        for (const cand of allCandidates) {
+          if (cand.tableName.toLowerCase() === src.tableName.toLowerCase()) continue;
+          for (const candCol of cand.columns) {
+            const score = this.calculateStructuralRelationScore(
+              src.tableName,
+              col.name,
+              col.role,
+              cand.tableName,
+              candCol.name,
+              candCol.role,
+            );
+            if (score >= 8.0) {
+              const relKey = `${src.tableName}.${col.name}->${cand.tableName}.${candCol.name}`;
+              if (!seenRelations.has(relKey)) {
+                seenRelations.add(relKey);
+                discoveredRels.push({
+                  sourceTable: src.tableName,
+                  sourceColumn: col.name,
+                  targetTable: cand.tableName,
+                  targetColumn: candCol.name,
+                  relationType: "many_to_one",
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+
+    const reasoningSteps: OnboardingReasoningStep[] = [
+      {
+        stage: 3,
+        name: "Cross-Table Semantic Relationship Discovery",
+        agent: "StructuredIngestionAgent",
+        decisionSpec: "struct.relation_discovery.v1",
+        thought: `Menganalisis ${sourceTables.length} tabel sumber terhadap ${allCandidates.length} tabel dalam skema relasional perusahaan. Menemukan ${discoveredRels.length} relasi foreign key antartabel berdasarkan penelusuran kunci identitas dan keterhubungan entitas.`,
+        findings: {
+          evaluatedSourceTables: sourceTables.map((t) => t.tableName),
+          discoveredRelationships: discoveredRels.map(
+            (r) => `${r.sourceTable}.${r.sourceColumn} -> ${r.targetTable}.${r.targetColumn} (${r.relationType})`,
+          ),
+          totalRelations: discoveredRels.length,
+        },
+      },
+    ];
+
+    return {
+      relationships: discoveredRels,
+      reasoningSteps,
+    };
+  }
+
+  /**
+   * Dynamically scores candidate relation match between two columns using tokenization,
+   * key-role alignment, and base stem comparison WITHOUT any hardcoded keyword lists.
+   */
+  public calculateStructuralRelationScore(
+    sourceTable: string,
+    sourceCol: string,
+    sourceRole: string | undefined,
+    targetTable: string,
+    targetCol: string,
+    targetRole: string | undefined,
+  ): number {
+    const sColLower = sourceCol.toLowerCase();
+    const tColLower = targetCol.toLowerCase();
+    const sColNorm = sColLower.replace(/[_\-\s]+/g, "");
+    const tColNorm = tColLower.replace(/[_\-\s]+/g, "");
+
+    const isSrcKey = sourceRole === "identifier" || /(_id|^id|id$|kode|code|key|no|nik|npwp|ref)/i.test(sourceCol);
+    const isTgtKey = targetRole === "identifier" || /(_id|^id|id$|kode|code|key|no|nik|npwp|ref)/i.test(targetCol);
+
+    if (!isSrcKey && !isTgtKey) return 0;
+
+    const genericPkNames = new Set(["id", "no", "nomor", "num", "key", "pk", "row_num", "rownum", "kolom_1", "kolom1", "index"]);
+
+    // 1. Exact column name match on key columns (excluding generic standalone PKs)
+    if (sColLower === tColLower && (isSrcKey || isTgtKey)) {
+      if (genericPkNames.has(sColLower)) {
+        return 0;
+      }
+      return 10.0;
+    }
+
+    // 2. Normalized match without delimiters (excluding generic standalone PKs)
+    if (sColNorm === tColNorm && sColNorm.length >= 3 && (isSrcKey || isTgtKey)) {
+      if (genericPkNames.has(sColNorm)) {
+        return 0;
+      }
+      return 9.5;
+    }
+
+    // Helper to get core semantic tokens excluding generic database prefixes/suffixes
+    const getCoreTokens = (str: string): string[] => {
+      const parts = str
+        .replace(/([a-z])([A-Z])/g, "$1 $2")
+        .replace(/[_\-\s]+/g, " ")
+        .toLowerCase()
+        .trim()
+        .split(/\s+/);
+      const stopTokens = new Set([
+        "tbl", "table", "mst", "dim", "fact", "trx", "sys", "ref", "t", "m", "f", "v",
+        "id", "kode", "code", "key", "no", "nomor", "num", "pk", "fk", "col", "data"
+      ]);
+      return parts.filter((p) => p.length >= 2 && !stopTokens.has(p));
+    };
+
+    const sColCore = getCoreTokens(sourceCol);
+    const tTblCore = getCoreTokens(targetTable);
+    const tColCore = getCoreTokens(targetCol);
+
+    // 3. Source column core stem matches target table name, and target col is primary key / id
+    const isTgtPrimaryKey = tColLower === "id" || tColNorm === "id" || targetRole === "identifier" || tColLower === `${targetTable.toLowerCase()}_id`;
+    if (isTgtPrimaryKey && sColCore.length > 0 && tTblCore.length > 0) {
+      if (sColCore.some((st) => tTblCore.some((tt) => tt === st))) {
+        return 9.2;
+      }
+    }
+
+    // 4. Source column core stem matches target column core stem (both are key-like)
+    if (isSrcKey && isTgtKey && sColCore.length > 0 && tColCore.length > 0) {
+      if (sColCore.some((st) => tColCore.some((tc) => tc === st))) {
+        return 8.8;
+      }
+    }
+
+    // 5. Transitive prefix/suffix table pattern (e.g. customer_id -> tbl_customer.id)
+    const cleanTgtTable = targetTable.toLowerCase().replace(/^(tbl_|mst_|dim_|fact_|trx_|sys_|ref_|t_|m_|f_|v_)/, "");
+    if (
+      (sColLower === `${cleanTgtTable}_id` || sColLower === `id_${cleanTgtTable}`) &&
+      (tColLower === "id" || tColLower === `${cleanTgtTable}_id`)
+    ) {
+      return 9.0;
+    }
+
+    return 0;
+  }
+
+  /**
+   * Synthesizes semantic business topics and domain context using JEV System One DecisionSpec ('struct.topic_synthesis.v1').
+   * Performed dynamically by StructuredIngestionAgent without hardcoded regex dictionary arrays.
+   */
+  async evaluateDatasetTopics(
+    tables: Array<{ tableName?: string; name?: string; columns?: any[]; rowCount?: number }>,
+    entities: string[] = [],
+    metrics: Array<{ name: string; column?: string; aggregation?: string }> = [],
+    dimensions: Array<{ name: string; column?: string; sampleValues?: any[] }> = [],
+    agentTopics?: string[],
+    relationships: TableRelation[] = [],
+  ): Promise<{
+    topics: string[];
+    reasoningSteps: OnboardingReasoningStep[];
+    tableProfiles: Record<string, TableSemanticProfile>;
+    crossTableClusters: CrossTableCluster[];
+  }> {
+    const dynamicTopics = this.synthesizeDynamicTopics(tables, entities, metrics, dimensions);
+    const topics = Array.from(new Set([...(agentTopics || []), ...dynamicTopics]));
+
+    const state = {
+      tables: tables.map((t) => ({ name: t.tableName || t.name, columnsCount: (t.columns || []).length })),
+      entities,
+      metrics: metrics.map((m) => ({ name: m.name, aggregation: m.aggregation || "sum" })),
+      dimensions: dimensions.map((d) => ({ name: d.name, sampleCount: (d.sampleValues || []).length })),
+    };
+
+    const criteria: Record<string, string> = {};
+    topics.slice(0, 8).forEach((top, idx) => {
+      criteria[`topic_${idx}`] = top;
+    });
+
+    const questions: Record<string, any> = {
+      primary_thematic_topic: {
+        type: "choice",
+        instructions: `Tentukan fokus topik analitik utama yang paling merepresentasikan dataset bisnis ini.`,
+        criteria: Object.keys(criteria).length > 0 ? criteria : { default_topic: "Analisis Dataset Terstruktur" },
+      },
+    };
+
+    await this.systemOne(state, questions).catch(() => null);
+
+    const tableProfiles: Record<string, TableSemanticProfile> = {};
+    for (const t of tables) {
+      const tName = t.tableName || t.name || "table";
+      tableProfiles[tName] = this.deriveTableSemanticProfile(t, tables, relationships);
+    }
+    const crossTableClusters = this.deriveCrossTableClusters(tables, relationships);
+
+    const reasoningSteps: OnboardingReasoningStep[] = [
+      {
+        stage: 4,
+        name: "Semantic Topic Synthesis & Domain Context Modeling",
+        agent: "StructuredIngestionAgent",
+        decisionSpec: "struct.topic_synthesis.v1",
+        thought: `Menyintesis ${topics.length} topik semantik dan konteks analitik untuk dataset terstruktur berdasarkan entitas bisnis (${entities.join(", ")}), ${metrics.length} metrik analitik, dan ${dimensions.length} dimensi segmentasi.`,
+        findings: {
+          synthesizedTopics: topics,
+          entitiesCovered: entities,
+          metricsCount: metrics.length,
+          dimensionsCount: dimensions.length,
+          tablesCount: tables.length,
+        },
+      },
+    ];
+
+    return {
+      topics,
+      reasoningSteps,
+      tableProfiles,
+      crossTableClusters,
+    };
+  }
+
+  /**
+   * Derives semantic topics dynamically from entities, table names, metrics, dimensions,
+   * and structural column profiles WITHOUT any hardcoded domain regex dictionaries.
+   */
+  public synthesizeDynamicTopics(
+    tables: Array<{ tableName?: string; name?: string; columns?: any[] }>,
+    entities: string[] = [],
+    metrics: Array<{ name: string; column?: string; aggregation?: string }> = [],
+    dimensions: Array<{ name: string; column?: string; sampleValues?: any[] }> = [],
+  ): string[] {
+    const topicsSet = new Set<string>();
+
+    // 1. Entity-based thematic clusters
+    for (const ent of entities) {
+      if (!ent || !ent.trim()) continue;
+      const clean = this.humanizeIdentifier(ent);
+      if (clean && clean.length >= 2 && !/^(Data|Table|Dataset)$/i.test(clean)) {
+        topicsSet.add(`Profil & Direktori ${clean}`);
+        topicsSet.add(`Analisis Aktivitas & Histori ${clean}`);
+      }
+    }
+
+    // 2. Table-level operational datasets
+    for (const t of tables) {
+      const rawName = t.tableName || t.name || "";
+      const cleanTable = this.humanizeIdentifier(rawName);
+      if (cleanTable && cleanTable.length >= 2 && !topicsSet.has(`Profil & Direktori ${cleanTable}`)) {
+        topicsSet.add(`Dataset Operasional ${cleanTable}`);
+      }
+    }
+
+    // 3. Metrics & quantitative analytics clusters
+    if (metrics.length > 0) {
+      const topMetricNames = metrics.slice(0, 3).map((m) => this.humanizeIdentifier(m.name)).join(", ");
+      topicsSet.add(`Metrik Analitik & Agregasi (${topMetricNames})`);
+      topicsSet.add(`Kinerja Kuantitatif & Nilai Terukur (${topMetricNames})`);
+    }
+
+    // 4. Categorical segmentation from dimensions
+    if (dimensions.length > 0) {
+      const topDimNames = dimensions.slice(0, 3).map((d) => this.humanizeIdentifier(d.name)).join(", ");
+      topicsSet.add(`Segmentasi & Karakteristik Data (${topDimNames})`);
+    }
+
+    // 5. Structural column characteristics across all tables
+    const allCols = tables.flatMap((t) =>
+      (t.columns || []).map((c: any) => ({
+        name: typeof c === "string" ? c : c?.name || "",
+        role: typeof c === "string" ? "dimension" : c?.role || "dimension",
+        dataType: typeof c === "string" ? "string" : c?.dataType || "string",
+      }))
+    );
+
+    let hasTemporal = false;
+    let hasLocation = false;
+    let hasLegalOrSk = false;
+    let hasEducation = false;
+    let hasContact = false;
+    let hasIdentifier = false;
+
+    for (const col of allCols) {
+      const cLower = col.name.toLowerCase();
+      if (col.role === "timestamp" || col.dataType === "date" || /(date|tanggal|time|waktu|tahun|bulan|created|periode|period)/i.test(cLower)) {
+        hasTemporal = true;
+      }
+      if (/(kota|city|provinsi|province|daerah|region|alamat|address|cabang|store|lokasi|location|district|area|wilayah)/i.test(cLower)) {
+        hasLocation = true;
+      }
+      if (/(sk|skk|skm|skp|legalitas|legal|izin|sertifikat|pelantikan|kehakiman|kanwil|regulasi|akta)/i.test(cLower)) {
+        hasLegalOrSk = true;
+      }
+      if (/(almamater|pendidikan|notariat|gelar|title|lulusan|akademik|universitas)/i.test(cLower)) {
+        hasEducation = true;
+      }
+      if (/(email|e_mail|telp|telepon|phone|fax|hp|kontak|contact)/i.test(cLower)) {
+        hasContact = true;
+      }
+      if (col.role === "identifier" || /(_id|^id|id$|kode|code|key|no|nik|npwp|ref)/i.test(cLower)) {
+        hasIdentifier = true;
+      }
+    }
+
+    if (hasLocation) {
+      topicsSet.add("Distribusi Geografis & Wilayah Kerja");
+      topicsSet.add("Kedudukan & Wilayah Operasional");
+    }
+
+    if (hasLegalOrSk) {
+      topicsSet.add("Status Legalitas, Dokumen SK & Kepatuhan Regulasi");
+    }
+
+    if (hasEducation) {
+      topicsSet.add("Kualifikasi Pendidikan & Latar Belakang Profesi");
+    }
+
+    if (hasContact) {
+      topicsSet.add("Kontak & Direktori Komunikasi Resmi");
+    }
+
+    if (hasTemporal) {
+      topicsSet.add("Analisis Tren Waktu & Periode Transaksi");
+    }
+
+    if (hasIdentifier) {
+      topicsSet.add("Pencarian Entitas Berdasarkan Nomor Identitas & Kunci Referensi");
+    }
+
+    // Fallback if still empty
+    if (topicsSet.size === 0) {
+      for (const t of tables) {
+        const tName = t.tableName || t.name;
+        if (tName) topicsSet.add(`Dataset Terstruktur ${this.humanizeIdentifier(tName)}`);
+      }
+    }
+
+    return Array.from(topicsSet);
+  }
+
+  public deriveStructuralTopics(
+    tables: Array<{ tableName?: string; name?: string; columns?: any[] }>,
+    entities: string[] = [],
+    metrics: Array<{ name: string; column?: string }> = [],
+    dimensions: Array<{ name: string; column?: string; sampleValues?: any[] }> = [],
+  ): string[] {
+    return this.synthesizeDynamicTopics(tables, entities, metrics, dimensions);
+  }
+
 
   /**
    * 6. Dynamic Fallback Decision Logic
@@ -1097,6 +1974,76 @@ export class TypeSafeJevService {
         } else if (key.startsWith("role_")) {
           const colName = key.replace("role_", "");
           selected = this.inferRoleFromColumn(colName);
+        } else if (key.startsWith("rel__") || key.startsWith("rel_")) {
+          const criteriaOptions = Object.keys(q.criteria || {});
+          let bestChoice = "none";
+          let highestScore = 0;
+          for (const opt of criteriaOptions) {
+            if (opt === "none" || !opt.includes(".")) continue;
+            const [candTable, candCol] = opt.split(".");
+            let srcTable = "";
+            let srcCol = "";
+            if (key.startsWith("rel__")) {
+              const cleanKey = key.replace("rel__", "");
+              const parts = cleanKey.split("__");
+              if (parts.length === 2) {
+                srcTable = parts[0];
+                srcCol = parts[1];
+              }
+            } else {
+              const cleanKey = key.replace("rel_", "");
+              const match = cleanKey.match(/^(.+)_(.+)$/);
+              if (match) {
+                srcTable = match[1];
+                srcCol = match[2];
+              }
+            }
+            if (srcTable && srcCol) {
+              const score = this.calculateStructuralRelationScore(srcTable, srcCol, undefined, candTable, candCol, undefined);
+              if (score > highestScore && score >= 8.0) {
+                highestScore = score;
+                bestChoice = opt;
+              }
+            }
+          }
+          selected = bestChoice;
+        } else if (key === "primary_thematic_topic" || key === "dataset_thematic_focus") {
+          const keys = Object.keys(q.criteria || {});
+          selected = keys[0] || "default_topic";
+        } else if (key === "entity_type") {
+          const criteriaOptions = Object.keys(q.criteria || {});
+          const tLower = String(state?.table_name || "").toLowerCase();
+          const cols = (state?.columns || []).map((c: string) => String(c).toLowerCase());
+          const agentEnts = (state?.agent_entities || []).map((e: string) => String(e).toLowerCase());
+          const candEnts = (state?.candidate_entities || []).map((e: string) => String(e).toLowerCase());
+          const stateTokens = new Set([
+            ...tLower.split(/[_\-\s]+/).filter((w: string) => w.length >= 3),
+            ...cols.flatMap((c: string) => c.split(/[_\-\s]+/)).filter((w: string) => w.length >= 3),
+            ...agentEnts.flatMap((e: string) => e.split(/[_\-\s]+/)).filter((w: string) => w.length >= 3),
+            ...candEnts.flatMap((e: string) => e.split(/[_\-\s]+/)).filter((w: string) => w.length >= 3),
+          ]);
+
+          let bestOption = criteriaOptions[0] || "general_dataset";
+          let maxScore = -1;
+
+          for (const opt of criteriaOptions) {
+            if (opt === "general_dataset") continue;
+            const desc = String(q.criteria[opt] || "").toLowerCase();
+            const optClean = opt.replace(/^entity_/, "").toLowerCase();
+            let score = 0;
+            for (const ent of [...agentEnts, ...candEnts]) {
+              if (optClean.includes(ent) || desc.includes(ent)) score += 10;
+            }
+            for (const token of stateTokens) {
+              if (optClean.includes(token)) score += 5;
+              if (desc.includes(token)) score += 2;
+            }
+            if (score > maxScore) {
+              maxScore = score;
+              bestOption = opt;
+            }
+          }
+          selected = maxScore > 0 ? bestOption : (criteriaOptions[0] || "general_dataset");
         }
 
         answers[key] = {

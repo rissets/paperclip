@@ -1,10 +1,12 @@
-import { eq, and, or, ilike, desc, sql } from "drizzle-orm";
+import { eq, ne, and, or, ilike, desc, sql, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   dataSources,
   dataSourceTables,
   dataSourceRecords,
   dataSourceChunks,
+  activityLog,
+  agents,
 } from "@paperclipai/db";
 import type {
   DataSource,
@@ -13,9 +15,13 @@ import type {
   StructuredQueryResult,
   DatabaseConnectionConfig,
   SqlQueryResult,
+  ColumnDefinition,
+  TableRelation,
 } from "@paperclipai/shared";
 import { KnowledgeIngestionService } from "./knowledge-ingestion.js";
 import { DatabaseIntegrationService } from "./database-integration.js";
+import { ClickhouseService } from "./clickhouse.js";
+import { readBuiltInAgentMarker } from "./built-in-agent-metadata.js";
 
 export class DataSourcesService {
   constructor(private db: Db) {}
@@ -109,13 +115,17 @@ export class DataSourcesService {
 
       if (ds.sourceType === "rag_document") {
         const chunks = await this.db
-          .select({ content: dataSourceChunks.content })
+          .select({ content: dataSourceChunks.content, chunkIndex: dataSourceChunks.chunkIndex })
           .from(dataSourceChunks)
           .where(eq(dataSourceChunks.dataSourceId, ds.id))
-          .limit(3);
+          .limit(20);
 
         const sampleText = chunks.map((c) => c.content).join("\n\n") || ds.name;
-        const domainResult = await jev.evaluateDocumentDomain(ds.name, sampleText);
+        const domainResult = await jev.evaluateDocumentDomain(
+          ds.name,
+          sampleText,
+          chunks.map((c) => ({ chunkIndex: c.chunkIndex, content: c.content }))
+        );
 
         const profile = {
           version: "1.0.0",
@@ -127,6 +137,7 @@ export class DataSourcesService {
           primaryTopics: domainResult.primaryTopics,
           topics: domainResult.primaryTopics,
           summary: domainResult.summary,
+          documentProfiles: domainResult.documentProfiles,
           onboardedAt: new Date().toISOString(),
         };
 
@@ -158,6 +169,30 @@ export class DataSourcesService {
         const dbSemanticRes = await jev.evaluateDatabaseTables(tableSummaries);
         const tableNames = tables.map((t) => t.tableName);
 
+        // Update each table's semanticModel with per-table context, role, and topics
+        for (const tbl of tables) {
+          const tProfile = dbSemanticRes.tableProfiles?.[tbl.tableName];
+          const currentModel = (tbl.semanticModel as any) || {};
+          const tableRels = dbSemanticRes.relationships.filter(
+            (r) =>
+              r.sourceTable.toLowerCase() === tbl.tableName.toLowerCase() ||
+              r.targetTable.toLowerCase() === tbl.tableName.toLowerCase()
+          );
+          await this.db
+            .update(dataSourceTables)
+            .set({
+              semanticModel: {
+                ...currentModel,
+                tableRole: tProfile?.tableRole || currentModel.tableRole,
+                context: tProfile?.context || currentModel.context,
+                topics: tProfile?.topics || currentModel.topics,
+                decisionSpecs: tProfile?.decisionSpecRefs || currentModel.decisionSpecs,
+                relationships: tableRels,
+              } as any,
+            })
+            .where(eq(dataSourceTables.id, tbl.id));
+        }
+
         const profile = {
           version: "1.0.0",
           onboardedBy: "DatabaseIntegrationAgent",
@@ -169,6 +204,8 @@ export class DataSourcesService {
           relationships: dbSemanticRes.relationships,
           primaryTopics: dbSemanticRes.primaryTopics,
           topics: dbSemanticRes.topics,
+          tableProfiles: dbSemanticRes.tableProfiles,
+          crossTableClusters: dbSemanticRes.crossTableClusters,
           summary: existingProfile?.summary || `Database ${ds.sourceType} dengan ${tableNames.length} tabel relasional terhubung.`,
           onboardedAt: new Date().toISOString(),
           suggestedQueries: dbSemanticRes.suggestedQueries,
@@ -195,16 +232,99 @@ export class DataSourcesService {
           .from(dataSourceTables)
           .where(eq(dataSourceTables.dataSourceId, ds.id));
 
+        const existingTables = await this.db
+          .select({
+            id: dataSourceTables.id,
+            tableName: dataSourceTables.tableName,
+            schemaDefinition: dataSourceTables.schemaDefinition,
+            semanticModel: dataSourceTables.semanticModel,
+          })
+          .from(dataSourceTables)
+          .where(eq(dataSourceTables.companyId, companyId));
+
+        const candidateTables = existingTables.map((et) => ({
+          id: et.id,
+          tableName: et.tableName,
+          columns: ((et.schemaDefinition as any[]) || []).map((c: any) =>
+            typeof c === "string" ? { name: c } : { name: c?.name || "", role: c?.role, dataType: c?.dataType }
+          ),
+        }));
+
+        const { relationships: crossRelationships } = await jev.evaluateCrossTableRelations(
+          tables.map((t) => ({
+            tableName: t.tableName,
+            columns: ((t.schemaDefinition as any[]) || []).map((c: any) =>
+              typeof c === "string" ? { name: c } : { name: c?.name || "", role: c?.role, dataType: c?.dataType }
+            ),
+          })),
+          candidateTables,
+        );
+
         const tableNames = tables.map((t) => t.tableName);
+        const allEntities = existingProfile?.entities || tableNames;
+        const allMetrics = existingProfile?.metrics || [];
+        const allDimensions = existingProfile?.dimensions || [];
+
+        const topicRes = await jev.evaluateDatasetTopics(
+          tables.map((t) => ({
+            tableName: t.tableName,
+            columns: (t.schemaDefinition as any[]) || [],
+          })),
+          allEntities,
+          allMetrics,
+          allDimensions,
+          undefined,
+          crossRelationships,
+        );
+
+        // Update each table's semanticModel with per-table topics, context, role, and relationships
+        for (const tbl of tables) {
+          const tProfile = topicRes.tableProfiles?.[tbl.tableName];
+          const tableRels = crossRelationships.filter(
+            (r) =>
+              r.sourceTable.toLowerCase() === tbl.tableName.toLowerCase() ||
+              r.targetTable.toLowerCase() === tbl.tableName.toLowerCase()
+          );
+          const currentModel = (tbl.semanticModel as any) || {};
+          await this.db
+            .update(dataSourceTables)
+            .set({
+              semanticModel: {
+                ...currentModel,
+                tableRole: tProfile?.tableRole || currentModel.tableRole,
+                context: tProfile?.context || currentModel.context,
+                topics: tProfile?.topics || currentModel.topics,
+                decisionSpecs: tProfile?.decisionSpecRefs || currentModel.decisionSpecs,
+                relationships: tableRels,
+              } as any,
+            })
+            .where(eq(dataSourceTables.id, tbl.id));
+        }
+
         const profile = {
           version: "1.0.0",
           onboardedBy: "StructuredIngestionAgent",
-          decisionSpecRefs: ["struct.column_role.v1", "struct.entity_metric_mapping.v1", "struct.sync_strategy.v1"],
-          domain: ds.name,
-          targetAgentAffinity: "data_agent",
-          entities: tableNames.length > 0 ? tableNames : [ds.name],
-          summary: `Dataset terstruktur berisikan tabel [${tableNames.join(", ")}].`,
-          onboardedAt: new Date().toISOString(),
+          decisionSpecRefs: [
+            "struct.column_role.v1",
+            "struct.entity_metric_mapping.v1",
+            "struct.sync_strategy.v1",
+            "struct.relation_discovery.v1",
+            "struct.topic_synthesis.v1",
+          ],
+          domain: existingProfile?.domain || ds.name,
+          targetAgentAffinity: existingProfile?.targetAgentAffinity || "data_agent",
+          entities: allEntities,
+          metrics: allMetrics,
+          dimensions: allDimensions,
+          relationships: crossRelationships,
+          primaryTopics: topicRes.topics,
+          topics: topicRes.topics,
+          tableProfiles: topicRes.tableProfiles,
+          crossTableClusters: topicRes.crossTableClusters,
+          summary: existingProfile?.summary || `Dataset terstruktur berisikan tabel [${tableNames.join(", ")}].`,
+          onboardedAt: existingProfile?.onboardedAt || new Date().toISOString(),
+          suggestedQueries: existingProfile?.suggestedQueries,
+          reasoningSteps: existingProfile?.reasoningSteps,
         };
 
         await this.db
@@ -219,8 +339,101 @@ export class DataSourcesService {
           })
           .where(eq(dataSources.id, ds.id));
 
+        // Ensure activity log is present for StructuredIngestionAgent
+        const agentRecords = await this.db
+          .select({ id: agents.id, name: agents.name, metadata: agents.metadata })
+          .from(agents)
+          .where(and(eq(agents.companyId, companyId), ne(agents.status, "terminated")));
+
+        const agentRecord = agentRecords.find((a) => {
+          const marker = readBuiltInAgentMarker(a.metadata);
+          return (
+            marker?.key === "structured-ingestion" ||
+            a.name === "Structured Ingestion Agent" ||
+            a.name === "StructuredIngestionAgent"
+          );
+        });
+
+        if (agentRecord) {
+          const existingLogs = await this.db
+            .select({ id: activityLog.id })
+            .from(activityLog)
+            .where(
+              and(
+                eq(activityLog.companyId, companyId),
+                eq(activityLog.entityId, ds.id),
+                eq(activityLog.action, "data_source.onboarded.structured"),
+              )
+            )
+            .limit(1);
+
+          if (existingLogs.length === 0) {
+            await this.db.insert(activityLog).values({
+              companyId,
+              actorType: "agent",
+              actorId: agentRecord.id,
+              agentId: agentRecord.id,
+              action: "data_source.onboarded.structured",
+              entityType: "data_source",
+              entityId: ds.id,
+              details: {
+                name: ds.name,
+                dataSourceName: ds.name,
+                kind: "structured",
+                sourceType: ds.sourceType,
+                description: `StructuredIngestionAgent successfully onboarded and semantically mapped data source '${ds.name}' using TypeSafe JEV System One DecisionSpecs (struct.column_role.v1, struct.entity_metric_mapping.v1, struct.sync_strategy.v1).`,
+                domain: profile.domain,
+                entities: profile.entities,
+                decisionSpecRefs: profile.decisionSpecRefs,
+                targetAgentAffinity: profile.targetAgentAffinity,
+              },
+            });
+          } else {
+            await this.db
+              .update(activityLog)
+              .set({
+                actorId: agentRecord.id,
+                agentId: agentRecord.id,
+                details: {
+                  ...((existingLogs[0] as any)?.details || {}),
+                  name: ds.name,
+                  dataSourceName: ds.name,
+                  kind: "structured",
+                  sourceType: ds.sourceType,
+                },
+              })
+              .where(eq(activityLog.id, existingLogs[0].id));
+          }
+        }
+
         updatedCount++;
       }
+    }
+
+    // General historical fix for any activity logs that had string actorId and null agentId
+    try {
+      const enterpriseAgents = await this.db
+        .select({ id: agents.id, name: agents.name })
+        .from(agents)
+        .where(eq(agents.companyId, companyId));
+
+      for (const ag of enterpriseAgents) {
+        await this.db
+          .update(activityLog)
+          .set({
+            actorId: ag.id,
+            agentId: ag.id,
+          })
+          .where(
+            and(
+              eq(activityLog.companyId, companyId),
+              eq(activityLog.actorId, ag.name),
+              isNull(activityLog.agentId),
+            )
+          );
+      }
+    } catch {
+      // Non-blocking
     }
 
     return updatedCount;
@@ -302,6 +515,38 @@ export class DataSourcesService {
           rows: queryResult.rows,
           totalRows: table.rowCount || queryResult.rowCount,
         };
+      }
+    }
+
+    // Try executing aggregated queries on ClickHouse OLAP engine if table is present
+    if (options.aggregate) {
+      try {
+        const clickhouse = new ClickhouseService();
+        const sanitizedName = table.tableName.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
+        const companyDb = clickhouse.getCompanyDatabase(companyId);
+        const chTables = await clickhouse.listTables(companyId);
+
+        if (chTables.includes(sanitizedName)) {
+          const { column, fn, groupBy } = options.aggregate;
+          const aggFn = fn.toUpperCase();
+          let chQuery = "";
+          if (groupBy) {
+            chQuery = `SELECT \`${groupBy}\`, ${aggFn}(\`${column}\`) AS \`${fn}_${column}\`, count(*) AS \`row_count\` FROM \`${sanitizedName}\` GROUP BY \`${groupBy}\` ORDER BY \`${fn}_${column}\` DESC LIMIT ${limit} OFFSET ${offset}`;
+          } else {
+            chQuery = `SELECT ${aggFn}(\`${column}\`) AS \`${fn}_${column}\`, count(*) AS \`total_rows\` FROM \`${sanitizedName}\``;
+          }
+
+          const chResult = await clickhouse.query(chQuery, companyDb);
+          return {
+            tableId,
+            tableName: table.tableName,
+            columns: chResult.columns,
+            rows: chResult.rows,
+            totalRows: chResult.rowCount,
+          };
+        }
+      } catch {
+        // Fall back gracefully to local row processing
       }
     }
 
@@ -648,9 +893,13 @@ export class DataSourcesService {
       throw new Error(`Data source not found: ${dataSourceId}`);
     }
 
+    if (ds.sourceType === "clickhouse") {
+      return this.queryClickhouse(companyId, sqlQuery, limit);
+    }
+
     if (ds.sourceType !== "postgres" && ds.sourceType !== "mariadb" && ds.sourceType !== "mysql") {
       throw new Error(
-        `Direct SQL queries are only supported on external database data sources, not ${ds.sourceType}`,
+        `Direct SQL queries are only supported on external database data sources or ClickHouse, not ${ds.sourceType}`,
       );
     }
 
@@ -661,6 +910,127 @@ export class DataSourcesService {
 
     const dbIntegration = new DatabaseIntegrationService();
     return dbIntegration.queryDatabase(config, sqlQuery, limit);
+  }
+
+  /**
+   * Run a direct read-only SQL query on ClickHouse OLAP storage
+   */
+  async queryClickhouse(
+    companyId: string,
+    sqlQuery: string,
+    limit?: number,
+  ): Promise<SqlQueryResult> {
+    const clickhouse = new ClickhouseService();
+    const companyDb = clickhouse.getCompanyDatabase(companyId);
+
+    let queryToRun = sqlQuery.trim();
+    if (limit && !/\bLIMIT\s+\d+/i.test(queryToRun)) {
+      queryToRun += ` LIMIT ${limit}`;
+    }
+
+    const result = await clickhouse.query(queryToRun, companyDb);
+
+    return {
+      columns: result.columns,
+      rows: result.rows,
+      rowCount: result.rowCount,
+      executionTimeMs: result.executionTimeMs,
+      sql: queryToRun,
+    };
+  }
+
+  /**
+   * Sync a data source or all data sources for a company to ClickHouse OLAP engine
+   */
+  async syncToClickhouse(
+    companyId: string,
+    dataSourceId?: string,
+  ): Promise<{
+    syncedTables: Array<{ tableName: string; rowCount: number; clickhouseTable: string }>;
+    totalRows: number;
+    companyDatabase: string;
+  }> {
+    const clickhouse = new ClickhouseService();
+    const companyDb = await clickhouse.ensureCompanyDatabase(companyId);
+
+    const dsWhere = dataSourceId
+      ? and(eq(dataSources.id, dataSourceId), eq(dataSources.companyId, companyId))
+      : eq(dataSources.companyId, companyId);
+
+    const dsList = await this.db.select().from(dataSources).where(dsWhere);
+
+    const syncedTables: Array<{ tableName: string; rowCount: number; clickhouseTable: string }> = [];
+    let totalRows = 0;
+
+    for (const ds of dsList) {
+      const tables = await this.db
+        .select()
+        .from(dataSourceTables)
+        .where(and(eq(dataSourceTables.dataSourceId, ds.id), eq(dataSourceTables.companyId, companyId)));
+
+      for (const tbl of tables) {
+        const sanitizedName = tbl.tableName.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
+        const sModel: any = tbl.semanticModel || {};
+        let ddl = sModel.clickhouseSchema?.createTableDdl;
+
+        // If DDL is missing, synthesize it from schemaDefinition
+        if (!ddl) {
+          const cols = (tbl.schemaDefinition || []) as ColumnDefinition[];
+          const chTypes: Record<string, string> = {
+            number: "Float64",
+            date: "String",
+            boolean: "UInt8",
+            string: "String",
+            json: "String",
+            unknown: "String",
+          };
+          const ddlCols = cols
+            .map((c) => `  \`${c.name}\` ${c.clickhouseType || chTypes[c.dataType] || "String"}`)
+            .join(",\n");
+          const pk = sModel.primaryKey || (cols.length > 0 ? cols[0].name : "");
+          const orderClause = pk ? `\`${pk}\`` : "tuple()";
+          ddl = `CREATE TABLE IF NOT EXISTS \`${sanitizedName}\` (\n${ddlCols}\n) ENGINE = MergeTree()\nORDER BY (${orderClause});`;
+        } else {
+          // Ensure table name in DDL is sanitized
+          ddl = ddl.replace(
+            /CREATE TABLE IF NOT EXISTS `([^`]+)`/i,
+            `CREATE TABLE IF NOT EXISTS \`${sanitizedName}\``,
+          );
+        }
+
+        // Clean any unquoted tuple identifiers in existing DDL (e.g. Tuple(0 Float64, 1 Float64))
+        ddl = ddl.replace(/Tuple\(([^)]+)\)/g, (_match: string, inner: string) => {
+          const parts = inner.split(",").map((part: string) => {
+            const trimmed = part.trim();
+            return trimmed.replace(/^`?([a-zA-Z0-9_]+)`?\s+([A-Za-z0-9_()', ]+)$/, "`$1` $2");
+          });
+          return `Tuple(${parts.join(", ")})`;
+        });
+
+        // Fetch records if available (CSV/Excel)
+        const records = await this.db
+          .select({ data: dataSourceRecords.data })
+          .from(dataSourceRecords)
+          .where(and(eq(dataSourceRecords.tableId, tbl.id), eq(dataSourceRecords.companyId, companyId)));
+
+        const rows = records.map((r) => r.data as Record<string, unknown>);
+
+        await clickhouse.syncTable(sanitizedName, ddl, rows.length > 0 ? rows : undefined, companyId);
+
+        syncedTables.push({
+          tableName: tbl.tableName,
+          rowCount: rows.length || tbl.rowCount,
+          clickhouseTable: sanitizedName,
+        });
+        totalRows += rows.length || tbl.rowCount;
+      }
+    }
+
+    return {
+      syncedTables,
+      totalRows,
+      companyDatabase: companyDb,
+    };
   }
 }
 
