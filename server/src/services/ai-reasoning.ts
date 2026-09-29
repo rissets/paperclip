@@ -1000,6 +1000,113 @@ Respond with ONLY valid JSON (no markdown formatting, no code block backticks):
     );
   }
 
+  /**
+   * Dynamically generate a safe read-only SQL query based on table schemas, columns, relationships, and user query.
+   */
+  async generateDynamicSqlQuery(options: {
+    userQuery: string;
+    dbType: string;
+    tables: Array<{
+      tableName: string;
+      columns: Array<{ name: string; dataType?: string; role?: string; semanticCategory?: string; isSearchable?: boolean }>;
+      relationships?: TableRelation[];
+    }>;
+    previousError?: string;
+  }): Promise<{ sql: string; explanation: string } | null> {
+    const quote = options.dbType === "postgres" ? `"` : "`";
+    const tablesSummary = options.tables.slice(0, 15).map((t) => {
+      const colList = t.columns.slice(0, 20).map((c) => `${c.name} (${c.dataType || "string"}${c.semanticCategory ? `, ${c.semanticCategory}` : ""})`).join(", ");
+      const relList = (t.relationships || []).map((r) => `${r.sourceColumn} -> ${r.targetTable}.${r.targetColumn}`).join("; ");
+      return `- Table ${quote}${t.tableName}${quote}: columns [${colList}]${relList ? ` | Relations: [${relList}]` : ""}`;
+    }).join("\n");
+
+    const prompt = `You are an expert SQL engineer. Generate a single, safe, read-only SELECT SQL query for ${options.dbType} to answer this user request:
+"${options.userQuery}"
+
+Available Database Tables & Columns:
+${tablesSummary}
+
+${options.previousError ? `\n[CORRECTIVE FEEDBACK - PREVIOUS ATTEMPT FAILED]:\n${options.previousError}\nPlease fix the column names, table names, or syntax.\n` : ""}
+
+Rules:
+1. ONLY produce a read-only SELECT query. Never use INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, or CREATE.
+2. Use proper ${options.dbType} identifier quoting (${quote}identifier${quote}).
+3. Always include a LIMIT clause (max 50) to prevent memory exhaustion.
+4. Output your response as a JSON object:
+{
+  "sql": "SELECT ...",
+  "explanation": "Brief explanation of query strategy"
+}`;
+
+    try {
+      let rawOutput: string | null = null;
+      try {
+        rawOutput = await this.runViaPiCli(prompt, this.defaultModel);
+      } catch {
+        rawOutput = await this.runViaRouterHttp(prompt, this.defaultModel);
+      }
+      if (!rawOutput) return null;
+      const parsed = this.extractJson(rawOutput);
+      if (parsed && typeof parsed.sql === "string") {
+        return {
+          sql: parsed.sql.trim().replace(/;+$/, ""),
+          explanation: parsed.explanation || "Dynamic SQL query",
+        };
+      }
+    } catch (err: any) {
+      console.warn("[AiReasoningService] generateDynamicSqlQuery error:", err.message);
+    }
+    return null;
+  }
+
+  /**
+   * Synthesize a grounded, fluent, and well-structured answer to a user question based on retrieved knowledge chunks.
+   */
+  async synthesizeKnowledgeResponse(options: {
+    userQuery: string;
+    chunks: Array<{
+      sourceName: string;
+      title?: string;
+      content: string;
+      chunkId?: string;
+    }>;
+  }): Promise<string | null> {
+    if (options.chunks.length === 0) return null;
+
+    const formattedContext = options.chunks.map((c, i) => {
+      return `[Chunk ${i + 1}] Source: "${c.sourceName}" | Section: "${c.title || "Document"}"\nContent: ${c.content}`;
+    }).join("\n\n---\n\n");
+
+    const prompt = `You are a knowledgeable, authoritative enterprise Knowledge Agent. Synthesize a direct, professional, and well-structured answer to the user query based ONLY on the provided verified enterprise knowledge documents.
+
+User Query:
+"${options.userQuery}"
+
+Verified Enterprise Document Chunks:
+${formattedContext}
+
+Instructions:
+1. Provide a direct, thorough, executive answer answering the user's specific question.
+2. Use fluent Indonesian (or English if the query was in English).
+3. Reference sources inline using numbered citations like [1], [2] matching the chunk numbers.
+4. Format key numbers, terms, or lists clearly with Markdown bolding and bullet points.
+5. Do NOT hallucinate facts not present in the chunks. If a detail is missing, acknowledge it gracefully.
+6. Provide the answer directly as clean markdown text.`;
+
+    try {
+      let rawOutput: string | null = null;
+      try {
+        rawOutput = await this.runViaPiCli(prompt, this.defaultModel);
+      } catch {
+        rawOutput = await this.runViaRouterHttp(prompt, this.defaultModel);
+      }
+      return rawOutput?.trim() || null;
+    } catch (err: any) {
+      console.warn("[AiReasoningService] synthesizeKnowledgeResponse error:", err.message);
+      return null;
+    }
+  }
+
   private runViaPiCli(
     prompt: string,
     model: string,

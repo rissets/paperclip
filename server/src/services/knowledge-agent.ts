@@ -1,6 +1,7 @@
 import type { Db } from "@paperclipai/db";
 import { DataSourcesService } from "./data-sources.js";
 import { TypeSafeJevService } from "./typesafe-jev.js";
+import { aiReasoningService } from "./ai-reasoning.js";
 import type { SpecialistExecution, Citation } from "@paperclipai/shared";
 
 export class KnowledgeAgentService {
@@ -13,7 +14,7 @@ export class KnowledgeAgentService {
   }
 
   /**
-   * Execute RAG search and synthesize grounded evidence using TypeSafe Jev System One
+   * Execute RAG search and synthesize grounded evidence using TypeSafe Jev System One + LLM synthesis
    */
   async answer(
     companyId: string,
@@ -67,24 +68,54 @@ export class KnowledgeAgentService {
       // fallback to original order
     }
 
-    const citations: Citation[] = orderedResults.slice(0, 5).map((r) => ({
+    const topResults = orderedResults.slice(0, 5);
+    const citations: Citation[] = topResults.map((r) => ({
       sourceName: r.dataSourceName,
       section: r.title || undefined,
       snippet: r.snippet,
     }));
 
-    let summary = `Ditemukan ${citations.length} rujukan relevan dari basis pengetahuan internal:\n\n`;
-    summary += answerabilityNote;
+    // 2. Dynamic Agentic LLM Synthesis
+    let synthesizedAnswer = "";
+    try {
+      const llmResponse = await aiReasoningService.synthesizeKnowledgeResponse({
+        userQuery: query,
+        chunks: topResults.map((r) => ({
+          sourceName: r.dataSourceName,
+          title: r.title || undefined,
+          content: r.content || r.snippet,
+          chunkId: r.chunkId,
+        })),
+      });
+      if (llmResponse && llmResponse.length > 20) {
+        synthesizedAnswer = llmResponse;
+      }
+    } catch (err: any) {
+      console.warn("[KnowledgeAgent] LLM synthesis failed, falling back to excerpts:", err.message);
+    }
 
-    for (let i = 0; i < citations.length; i++) {
-      const c = citations[i];
-      summary += `> **[${i + 1}] Sumber: ${c.sourceName}** (${c.section || "Bagian Dokumen"})\n`;
-      summary += `> "${c.snippet}"\n\n`;
+    let summary = "";
+    if (synthesizedAnswer) {
+      summary = `${synthesizedAnswer}\n\n${answerabilityNote}`;
+      summary += `### 📚 Sumber & Rujukan Dokumen Internal:\n`;
+      for (let i = 0; i < citations.length; i++) {
+        const c = citations[i];
+        summary += `> **[${i + 1}] Sumber: ${c.sourceName}** (${c.section || "Bagian Dokumen"})\n`;
+        summary += `> "${c.snippet}"\n\n`;
+      }
+    } else {
+      summary = `Ditemukan ${citations.length} rujukan relevan dari basis pengetahuan internal:\n\n`;
+      summary += answerabilityNote;
+      for (let i = 0; i < citations.length; i++) {
+        const c = citations[i];
+        summary += `> **[${i + 1}] Sumber: ${c.sourceName}** (${c.section || "Bagian Dokumen"})\n`;
+        summary += `> "${c.snippet}"\n\n`;
+      }
     }
 
     return {
       agent: "knowledge_agent",
-      task: `Retrieve verified knowledge chunks for: "${query}"`,
+      task: `Retrieve and synthesize verified knowledge for: "${query}"`,
       query,
       resultsSummary: summary,
       citations,

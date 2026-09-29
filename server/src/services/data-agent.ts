@@ -3,6 +3,7 @@ import { dataSourceTables, dataSources } from "@paperclipai/db";
 import { eq, and } from "drizzle-orm";
 import { DataSourcesService } from "./data-sources.js";
 import { TypeSafeJevService } from "./typesafe-jev.js";
+import { aiReasoningService } from "./ai-reasoning.js";
 import type { SpecialistExecution } from "@paperclipai/shared";
 
 export class DataAgentService {
@@ -192,6 +193,90 @@ export class DataAgentService {
                 }
               }
             }
+          }
+        }
+      }
+    }
+
+    // 2b. Dynamic Multi-Table SQL Reasoning & Execution for External Databases & ClickHouse
+    const dbSources = allSources.filter(
+      (s) => s.sourceType === "mariadb" || s.sourceType === "mysql" || s.sourceType === "postgres" || s.sourceType === "clickhouse",
+    );
+
+    if (dbSources.length > 0) {
+      // Find candidate DB source matching user query or first available DB source
+      let targetDbSource = dbSources[0];
+      for (const dbs of dbSources) {
+        if (queryLower.includes(dbs.name.toLowerCase())) {
+          targetDbSource = dbs;
+          break;
+        }
+      }
+
+      const dbTables = tables.filter((t) => t.dataSourceId === targetDbSource.id);
+      // Check if user query matches topics, tables, or entities in this database
+      const hasDbRelevance = dbTables.some((t) => {
+        const tName = t.tableName.toLowerCase();
+        if (queryLower.includes(tName)) return true;
+        const sem = (t.semanticModel as any) || {};
+        for (const ent of sem.entities || []) {
+          if (queryLower.includes(String(ent).toLowerCase())) return true;
+        }
+        return false;
+      }) || queryLower.includes(targetDbSource.name.toLowerCase()) || dbSources.length === 1;
+
+      if (dbTables.length > 0 && hasDbRelevance) {
+        const tablesInput = dbTables.map((t) => ({
+          tableName: t.tableName,
+          columns: (t.schemaDefinition as any[]) || [],
+          relationships: ((t.semanticModel as any)?.relationships || []) as any[],
+        }));
+
+        let previousError: string | undefined;
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          try {
+            const sqlDecision = await aiReasoningService.generateDynamicSqlQuery({
+              userQuery: query,
+              dbType: targetDbSource.sourceType,
+              tables: tablesInput,
+              previousError,
+            });
+
+            if (sqlDecision?.sql) {
+              const res = await this.dataSourcesService.querySql(companyId, targetDbSource.id, sqlDecision.sql, 25);
+              if (res && res.rows && res.rows.length > 0) {
+                let summary = `### Hasil Query Analitik Database: ${targetDbSource.name}\n\n`;
+                summary += `> **Strategi Query:** ${sqlDecision.explanation}\n`;
+                summary += `> \`\`\`sql\n> ${res.sql || sqlDecision.sql}\n> \`\`\`\n\n`;
+
+                const headers = res.columns || Object.keys(res.rows[0] || {});
+                summary += `| ${headers.join(" | ")} |\n`;
+                summary += `| ${headers.map(() => "---").join(" | ")} |\n`;
+                for (const row of res.rows.slice(0, 15)) {
+                  const line = headers.map((h) => {
+                    const val = (row as any)[h];
+                    if (typeof val === "number") return val.toLocaleString();
+                    return String(val ?? "-");
+                  });
+                  summary += `| ${line.join(" | ")} |\n`;
+                }
+
+                if (res.rowCount > 15) {
+                  summary += `\n*(Menampilkan 15 teratas dari ${res.rowCount} total baris &bull; Waktu eksekusi: ${res.executionTimeMs || 10}ms)*\n`;
+                }
+
+                return {
+                  agent: "data_agent",
+                  task: `Eksekusi SQL analitik pada ${targetDbSource.name}`,
+                  query: sqlDecision.sql,
+                  resultsSummary: summary,
+                  dataPreview: res.rows,
+                };
+              }
+            }
+          } catch (err: any) {
+            previousError = err.message;
+            console.warn(`[DataAgent] Dynamic SQL attempt ${attempt} failed:`, err.message);
           }
         }
       }

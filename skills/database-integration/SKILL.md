@@ -1,14 +1,14 @@
 ---
 name: database-integration
 description: >
-  Connect, inspect, and query external relational databases (PostgreSQL, MariaDB, MySQL).
-  Access tables, columns, primary & foreign key relationships, semantic models, and execute
-  controlled, safe read-only SELECT queries.
+  Autonomous dynamic querying, multi-table relationship navigation, and entity profiling across
+  external enterprise relational databases (PostgreSQL, MariaDB, MySQL). Use when answering questions
+  about live database records, multi-table foreign key joins, corporate registries, transactions, and JSON structures.
 ---
 
-# Enterprise Database Integration Skill
+# External Enterprise Database Integration Skill
 
-This skill equips Paperclip agents (especially `DatabaseIntegrationAgent` and `DataAgent`) to interact with live external enterprise databases connected through Paperclip's native database integration engine.
+This skill equips Paperclip agents (especially `DatabaseIntegrationAgent` and `DataAgent`) to **dynamically reason, navigate multi-table schemas, formulate dialect-specific SQL, execute queries with self-correcting retry loops, and synthesize grounded responses** from external relational databases.
 
 ## Environment & Authentication
 
@@ -26,128 +26,189 @@ fi
 
 ---
 
-## 1. Test Database Connection
+## End-to-End Retrieval Flow for External Databases
 
-Verify network reachability and credentials for PostgreSQL, MariaDB, or MySQL:
+When a user asks a question requiring data from an external database, the agent follows this 5-stage dynamic retrieval pipeline:
 
-```bash
-curl -sS -X POST "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/data-sources/test-connection" \
-  ${AUTH_HEADER:+-H "$AUTH_HEADER"} \
-  -H "Content-Type: application/json" \
-  -d '{
-    "type": "postgres",
-    "host": "localhost",
-    "port": 5432,
-    "database": "enterprise_db",
-    "username": "readonly_user",
-    "password": "secretpassword",
-    "ssl": false
-  }'
 ```
-
-**Response format:**
-```json
-{
-  "success": true,
-  "latencyMs": 14,
-  "database": "enterprise_db",
-  "version": "PostgreSQL 16.2",
-  "serverType": "postgres"
-}
-```
-
----
-
-## 2. Onboard & Connect an External Database
-
-Connect a database, discover all tables, columns, foreign key relations, and build bilingual semantic models:
-
-```bash
-curl -sS -X POST "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/data-sources/connect-database" \
-  ${AUTH_HEADER:+-H "$AUTH_HEADER"} \
-  -H "Content-Type: application/json" \
-  -d '{
-    "config": {
-      "type": "postgres",
-      "host": "localhost",
-      "port": 5432,
-      "database": "enterprise_db",
-      "username": "readonly_user",
-      "password": "secretpassword",
-      "ssl": false
-    },
-    "name": "Production ERP Database",
-    "description": "Enterprise PostgreSQL database for inventory and orders"
-  }'
+[ User Query ]
+       │
+       ▼
+1. Dynamic Discovery & Candidate Table Resolution
+   - Fetch active databases via GET /data-sources
+   - Inspect tableProfiles, semanticModels, and tableRoles
+   - Resolve candidate tables across 20+ tables
+       │
+       ▼
+2. Query Strategy Selection
+   ├──► Strategy A: Fast B-Tree Entity Profiling (searchableColumns, exact + prefix match)
+   └──► Strategy B: Dynamic Multi-Table Relational JOIN & Analytics (crossTableClusters)
+       │
+       ▼
+3. Safe Dialect-Specific SQL Formulation
+   - Dialect quoting: PostgreSQL ("") vs MariaDB/MySQL (``)
+   - Foreign key topology: JOIN table_b ON table_a.fk = table_b.pk
+   - JSON extraction: ->> vs JSON_UNQUOTE(JSON_EXTRACT())
+   - Read-only constraint + LIMIT clause (max 50)
+       │
+       ▼
+4. Execution & Self-Correction Feedback Loop (Agentic Retry)
+   - Execute POST /data-sources/:id/query-sql
+   - If SQL Error ──► Analyze DB error ──► Refine SQL aliases/columns ──► Retry (Max 3 iterations)
+   - If 0 Rows     ──► Fall back from exact match to LIKE '%term%' or broader cluster join
+       │
+       ▼
+5. Dynamic Synthesis & Grounded Provenance
+   - Format Markdown tables with formatted currency/units
+   - Parse nested JSON arrays into structured sections
+   - Conclude with official internal database citation
 ```
 
 ---
 
-## 3. Execute Controlled Read-Only SQL Query
+## 1. Stage 1: Dynamic Discovery & Schema Introspection
 
-Run safe read-only SQL (`SELECT` / `WITH`) against an external database data source:
+Do NOT assume static table names or hardcoded columns. Always discover the live database schema:
+
+```bash
+# List all active databases for the company
+curl -sS -X GET "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/data-sources" \
+  ${AUTH_HEADER:+-H "$AUTH_HEADER"}
+```
+
+**Inspecting Connected Database Metadata:**
+Identify data sources where `sourceType` is `"postgres"`, `"mariadb"`, or `"mysql"`. Each table contains:
+- `tableName`: e.g. `perseroan`, `modal`, `alamat`, `pengurus`
+- `schemaDefinition`: list of column objects (`name`, `dataType`, `role`, `semanticCategory`, `isSearchable`)
+- `semanticModel`:
+  - `tableRole`: `"fact_table"` | `"dimension_table"` | `"lookup_table"`
+  - `entities`: e.g. `["perseroan", "perusahaan", "pt"]`
+  - `searchableColumns`: e.g. `["nama_perseroan", "nomor_sk"]`
+  - `relationships`: foreign key links to other tables
+  - `jsonStructures`: nested JSON subfields (e.g. `data_pengurus`, `data_pemegang_saham`)
+- `crossTableClusters`: topology groupings (e.g. `Corporate Registry Cluster: [perseroan, modal, alamat, pengurus]`)
+
+---
+
+## 2. Stage 2 & 3: Query Formulation Strategies
+
+### Strategy A: Sub-Second Dynamic Entity Profiling
+
+When the user asks about a specific entity (e.g., *"Siapa pengurus dan berapa modal PT TELEKOMUNIKASI INDONESIA TBK?"*):
+
+1. **Extract Search Term**: Clean conversational verbs (`profiling`, `cari`, `info`, `siapa`, `cek`).
+2. **Target `searchableColumns`**: Find columns flagged with `isSearchable: true` or `role: "identifier"`.
+3. **Formulate Exact Search First**:
+   ```sql
+   -- For MariaDB/MySQL:
+   SELECT * FROM `tbl_perseroan` WHERE `nama_perseroan` = 'PT TELEKOMUNIKASI INDONESIA TBK' LIMIT 5;
+
+   -- For PostgreSQL:
+   SELECT * FROM "perseroan" WHERE "nama_perseroan" = 'PT TELEKOMUNIKASI INDONESIA TBK' LIMIT 5;
+   ```
+4. **Prefix Fallback (if 0 rows returned)**:
+   ```sql
+   SELECT * FROM `tbl_perseroan` WHERE `nama_perseroan` LIKE 'PT TELEKOMUNIKASI INDONESIA%' LIMIT 5;
+   ```
+
+---
+
+### Strategy B: Multi-Table Relational JOIN via `crossTableClusters`
+
+When the user asks complex analytical, relational, or multi-attribute questions (e.g., *"Tampilkan 5 perusahaan dengan modal disetor terbesar beserta alamat dan kota mereka"*):
+
+1. **Inspect `crossTableClusters` & `relationships`**:
+   - Master entity table: `tbl_perseroan` (PK: `perseroan_id`)
+   - Capital table: `tbl_modal` (FK: `tbl_modal.perseroan_id` -> `tbl_perseroan.perseroan_id`)
+   - Address table: `tbl_alamat` (FK: `tbl_alamat.perseroan_id` -> `tbl_perseroan.perseroan_id`)
+2. **Formulate Multi-Table SQL with Explicit Aliases**:
+   ```sql
+   SELECT
+     p.perseroan_id,
+     p.nama_perseroan,
+     p.status_perseroan,
+     m.modal_disetor,
+     a.alamat,
+     a.kota
+   FROM `tbl_perseroan` p
+   INNER JOIN `tbl_modal` m ON p.perseroan_id = m.perseroan_id
+   LEFT JOIN `tbl_alamat` a ON p.perseroan_id = a.perseroan_id
+   WHERE p.status_perseroan = 'AKTIF'
+   ORDER BY m.modal_disetor DESC
+   LIMIT 5;
+   ```
+
+---
+
+### Strategy C: Semi-Structured JSON Extraction
+
+When tables store nested corporate management, shareholders, or attributes inside JSON/JSONB columns:
+
+#### PostgreSQL Dialect (`->>` and `jsonb_array_elements`):
+```sql
+SELECT
+  id,
+  nama_perseroan,
+  pengurus->>'direktur_utama' AS direktur_utama,
+  pengurus->>'komisaris_utama' AS komisaris_utama,
+  modal->>'modal_disetor' AS modal_disetor
+FROM "perseroan"
+WHERE pengurus IS NOT NULL
+LIMIT 10;
+```
+
+#### MariaDB / MySQL Dialect (`JSON_UNQUOTE`, `JSON_EXTRACT`):
+```sql
+SELECT
+  id,
+  nama_perseroan,
+  JSON_UNQUOTE(JSON_EXTRACT(data_pengurus, '$.direktur_utama')) AS direktur_utama,
+  JSON_UNQUOTE(JSON_EXTRACT(data_modal, '$.modal_disetor')) AS modal_disetor
+FROM `perseroan`
+WHERE data_pengurus IS NOT NULL
+LIMIT 10;
+```
+
+---
+
+## 3. Stage 4: Execution & Self-Correction Feedback Loop
+
+Execute the formulated SQL via the Paperclip database query endpoint:
 
 ```bash
 curl -sS -X POST "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/data-sources/$DATA_SOURCE_ID/query-sql" \
   ${AUTH_HEADER:+-H "$AUTH_HEADER"} \
   -H "Content-Type: application/json" \
   -d '{
-    "sql": "SELECT o.id, c.name, o.total_amount FROM orders o JOIN customers c ON o.customer_id = c.id ORDER BY o.total_amount DESC LIMIT 10",
-    "limit": 10
+    "sql": "SELECT p.nama_perseroan, m.modal_disetor FROM tbl_perseroan p JOIN tbl_modal m ON p.id = m.perseroan_id ORDER BY m.modal_disetor DESC LIMIT 5",
+    "limit": 5
   }'
 ```
 
-**Response format:**
-```json
-{
-  "columns": ["id", "name", "total_amount"],
-  "rows": [
-    { "id": 101, "name": "PT Jaya Abadi", "total_amount": 250000000 },
-    { "id": 102, "name": "CV Maju Terus", "total_amount": 180000000 }
-  ],
-  "rowCount": 2,
-  "executionTimeMs": 18,
-  "sql": "SELECT o.id, c.name, o.total_amount FROM orders o JOIN customers c ON o.customer_id = c.id ORDER BY o.total_amount DESC LIMIT 10"
-}
-```
+### Self-Correction Feedback Loop (Retry Mechanics):
+- **Error: Column Not Found (`Unknown column 'x'`)**:
+  Inspect `schemaDefinition` for the candidate table, correct the column name (e.g. `nominal_modal` instead of `modal`), and retry immediately.
+- **Error: Ambiguous Column (`Column 'id' in field list is ambiguous`)**:
+  Disambiguate with table aliases (e.g. `p.id` instead of `id`) and retry.
+- **0 Rows on Exact Search**:
+  Switch from exact equality (`WHERE col = '...'`) to prefix match (`WHERE col LIKE '...'`) or strip entity prefix ("PT", "CV") and retry.
 
 ---
 
-## 4. Safety & Invariants
+## 4. Stage 5: Response Formatting & Provenance Standard
 
-- **Read-Only Strictness**: Any mutating keywords (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `TRUNCATE`, `GRANT`, `REVOKE`, `CREATE`) are rejected with `400 Bad Request`.
-- **Query Bounds**: Limit is capped at 500 rows maximum to prevent memory exhaustion.
-- **Transactions**: PostgreSQL queries are wrapped in `READ ONLY` transactions.
+Always format responses according to the enterprise provenance standard:
 
----
-
-## 5. Dynamic Discovery & Generic Entity Profiling
-
-Paperclip agents dynamically discover connected data sources and profile domain entities without requiring hardcoded table names, static schema assumptions, or hardcoded entity prefixes.
-
-### Ingestion & Onboarding Stage
-During data source onboarding, the `DatabaseIntegrationAgent` (or `StructuredIngestionAgent`):
-1. **Discovers Schema & Types**: Introspects tables, columns, data types, and primary/foreign keys.
-2. **Detects JSON Structures**: Samples top rows to extract nested keys (e.g., shareholders, management, line items).
-3. **Assigns Semantic Categories**: Categorizes columns into standardized categories:
-   - `identity`: primary identifiers, entity names, registration/SK numbers, codes.
-   - `location`: addresses, cities, provinces, postal codes, countries.
-   - `financial`: authorized/paid capital, prices, totals, balances.
-   - `contact`: phone numbers, emails, websites.
-   - `temporal`: establishment dates, decree dates, transaction timestamps.
-   - `status`: active, closed, pending, cancelled.
-   - `classification`: entity types, business sectors, categories.
-   - `nested_structure`: parsed JSON objects/arrays (directors, shareholders, items).
-   - `content`: descriptions, articles of association, notes.
-4. **Builds Semantic Entities & Searchable Columns**: Generates human-friendly labels and registers `entities` and `searchableColumns` in `semanticModel` for downstream routing.
-
-### Runtime Dynamic Profiling Protocol
-When answering entity profiling queries:
-1. **Dynamic Entity Resolution**: The `DataAgent` inspects active data sources from `GET /api/companies/$PAPERCLIP_COMPANY_ID/data-sources` and matches the user query against discovered `entities` and `searchableColumns`.
-2. **Internal-First Priority**: Never query public web search engines if an internal database or data source holds relevant enterprise/entity records.
-3. **Targeted Query Formulation**: Runs exact search, and if 0 rows returned, uses indexed B-Tree prefix match (`WHERE col LIKE "TERM%"`).
-4. **Dynamic Profile Formatting**: Groups row fields dynamically by their onboarding `semanticCategory` (Identitas, Lokasi, Keuangan/Modal, Pengurus/Struktur, Status, dll.) and formats parsed JSON arrays into readable markdown tables.
-5. **Grounded Provenance**: Concludes with a dynamic provenance citation referencing the actual data source and table name:
-   > *Terverifikasi dari database resmi internal [Nama Data Source] ([Nama Tabel]).*
-
-
+1. **Executive Insight & Context**:
+   Lead with the key finding or answer directly.
+2. **Structured Presentation**:
+   - For multi-row results: Clean Markdown table with formatted numbers (e.g. `Rp 250.000.000`).
+   - For single-entity profiles: Grouped sections by `semanticCategory` (Identitas, Finansial/Modal, Lokasi/Alamat, Pengurus JSON).
+3. **Query Strategy Transparency**:
+   Include a collapsible or quoted snippet showing the executed SQL query for auditability:
+   > **Strategi Query:** Evaluasi relasi multi-tabel (`tbl_perseroan` &times; `tbl_modal`)
+   > ```sql
+   > SELECT p.nama_perseroan, m.modal_disetor FROM tbl_perseroan p JOIN tbl_modal m ON p.perseroan_id = m.perseroan_id ORDER BY m.modal_disetor DESC LIMIT 5;
+   > ```
+4. **Mandatory Internal Provenance Citation**:
+   > *Data resmi terverifikasi 100% dari database internal **[Nama Data Source]** (Tabel: `[nama_tabel]`). Query dieksekusi secara terisolasi tanpa akses publik luar.*

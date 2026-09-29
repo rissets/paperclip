@@ -3290,23 +3290,42 @@ export function accessRoutes(
 
   router.get("/skills/index", (req, res) => {
     assertAuthenticated(req);
-    res.json({
-      skills: [
-        { name: "paperclip", path: "/api/skills/paperclip" },
-        {
-          name: "para-memory-files",
-          path: "/api/skills/para-memory-files"
-        },
-        {
-          name: "paperclip-create-agent",
-          path: "/api/skills/paperclip-create-agent"
-        },
-        {
-          name: "paperclip-converting-plans-to-tasks",
-          path: "/api/skills/paperclip-converting-plans-to-tasks"
+    const paperclipSkillsDir = resolvePaperclipSkillsDir();
+    const skillsList: Array<{ name: string; path: string }> = [];
+    if (paperclipSkillsDir) {
+      try {
+        const entries = fs.readdirSync(paperclipSkillsDir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (entry.isDirectory() && !entry.name.startsWith(".")) {
+            if (fs.existsSync(path.join(paperclipSkillsDir, entry.name, "SKILL.md"))) {
+              skillsList.push({
+                name: entry.name,
+                path: `/api/skills/${entry.name}`,
+              });
+            }
+          }
         }
-      ]
-    });
+      } catch {
+        // skip on read error
+      }
+    }
+
+    if (skillsList.length === 0) {
+      skillsList.push(
+        { name: "paperclip", path: "/api/skills/paperclip" },
+        { name: "para-memory-files", path: "/api/skills/para-memory-files" },
+        { name: "paperclip-create-agent", path: "/api/skills/paperclip-create-agent" },
+        { name: "paperclip-converting-plans-to-tasks", path: "/api/skills/paperclip-converting-plans-to-tasks" },
+        { name: "data-sources", path: "/api/skills/data-sources" },
+        { name: "data-sources-structured", path: "/api/skills/data-sources-structured" },
+        { name: "data-sources-knowledge", path: "/api/skills/data-sources-knowledge" },
+        { name: "database-integration", path: "/api/skills/database-integration" },
+      );
+    } else {
+      skillsList.sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    res.json({ skills: skillsList });
   });
 
   router.get("/skills/:skillName", (req, res) => {
