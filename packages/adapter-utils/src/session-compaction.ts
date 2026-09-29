@@ -27,6 +27,13 @@ const DEFAULT_SESSION_COMPACTION_POLICY: SessionCompactionPolicy = {
   maxSessionAgeHours: 72,
 };
 
+const PI_SESSION_COMPACTION_POLICY: SessionCompactionPolicy = {
+  enabled: true,
+  maxSessionRuns: 50,
+  maxRawInputTokens: 250_000,
+  maxSessionAgeHours: 24,
+};
+
 // Adapters with native context management still participate in session resume,
 // but Paperclip should not rotate them using threshold-based compaction.
 const ADAPTER_MANAGED_SESSION_POLICY: SessionCompactionPolicy = {
@@ -87,7 +94,7 @@ export const ADAPTER_SESSION_MANAGEMENT: Record<string, AdapterSessionManagement
   pi_local: {
     supportsSessionResume: true,
     nativeContextManagement: "unknown",
-    defaultSessionCompaction: DEFAULT_SESSION_COMPACTION_POLICY,
+    defaultSessionCompaction: PI_SESSION_COMPACTION_POLICY,
   },
   hermes_local: {
     supportsSessionResume: true,

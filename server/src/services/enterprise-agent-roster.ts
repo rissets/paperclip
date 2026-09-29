@@ -207,7 +207,7 @@ export class EnterpriseAgentRosterService {
           status: "idle",
           adapterType: "pi_local",
           adapterConfig: {
-            model: "cmd/gpt-5.6-luna",
+            model: "rissets/neural/deepseek-v4.1-flash",
           },
           permissions: {
             canCreateAgents: true,
@@ -235,7 +235,7 @@ export class EnterpriseAgentRosterService {
         reportsTo: spec.reportsToHomseo ? homseoId : null,
         adapterType: "pi_local",
         adapterConfig: {
-          model: "cmd/gpt-5.6-luna",
+          model: "rissets/neural/deepseek-v4.1-flash",
         },
         permissions: {
           canCreateAgents: true,
