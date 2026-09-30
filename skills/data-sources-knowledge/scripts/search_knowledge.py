@@ -44,6 +44,12 @@ def parse_args():
         help="Output format: compact (concise passages), markdown (structured markdown), json (raw JSON)",
     )
     parser.add_argument(
+        "--agent-id",
+        type=str,
+        default=os.environ.get("PAPERCLIP_AGENT_ID"),
+        help="Agent ID (defaults to $PAPERCLIP_AGENT_ID)",
+    )
+    parser.add_argument(
         "--company-id",
         type=str,
         default=os.environ.get("PAPERCLIP_COMPANY_ID"),
@@ -97,7 +103,7 @@ def main():
     elif mode == "selected" and assigned:
         payload["dataSourceIds"] = assigned
 
-    agent_id = os.environ.get("PAPERCLIP_AGENT_ID")
+    agent_id = args.agent_id or os.environ.get("PAPERCLIP_AGENT_ID")
     if agent_id:
         payload["agentId"] = agent_id
 
