@@ -157,6 +157,7 @@ export interface ExecutionWorkspaceAgentRef {
   id: string | null;
   name: string;
   companyId: string;
+  metadata?: Record<string, unknown> | null;
 }
 
 export interface RealizedExecutionWorkspace extends ExecutionWorkspaceInput {
@@ -2895,6 +2896,13 @@ function buildWorkspaceCommandEnv(input: {
   env.PAPERCLIP_AGENT_ID = input.agent.id ?? "";
   env.PAPERCLIP_AGENT_NAME = input.agent.name;
   env.PAPERCLIP_COMPANY_ID = input.agent.companyId;
+  const dsAccess = (input.agent.metadata as any)?.dataSourceAccess;
+  if (dsAccess) {
+    env.PAPERCLIP_DATA_SOURCES_MODE = dsAccess.mode || "none";
+    if (dsAccess.mode === "selected" && Array.isArray(dsAccess.dataSourceIds)) {
+      env.PAPERCLIP_ASSIGNED_DATA_SOURCES = dsAccess.dataSourceIds.join(",");
+    }
+  }
   env.PAPERCLIP_ISSUE_ID = input.issue?.id ?? "";
   env.PAPERCLIP_ISSUE_IDENTIFIER = input.issue?.identifier ?? "";
   env.PAPERCLIP_ISSUE_TITLE = input.issue?.title ?? "";

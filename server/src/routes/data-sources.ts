@@ -1,13 +1,15 @@
 import { Router, type Request, type Response } from "express";
 import multer from "multer";
+import { eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { agents } from "@paperclipai/db";
 import { assertCompanyAccess } from "./authz.js";
 import { DataSourcesService } from "../services/data-sources.js";
 import { OnboardingOrchestratorService } from "../services/onboarding-orchestrator.js";
 import { EnterpriseOrchestratorService } from "../services/enterprise-orchestrator.js";
 import { DatabaseIntegrationService } from "../services/database-integration.js";
 import { ClickhouseService } from "../services/clickhouse.js";
-import { badRequest, notFound } from "../errors.js";
+import { badRequest, forbidden, notFound } from "../errors.js";
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -24,11 +26,36 @@ export function dataSourceRoutes(db: Db) {
   const clickhouse = new ClickhouseService();
   const orchestrator = new EnterpriseOrchestratorService(db);
 
-  // 1. List data sources for company
+  const getRequestingAgentId = (req: Request): string | null => {
+    if (req.actor.type === "agent" && req.actor.agentId) {
+      return req.actor.agentId;
+    }
+    const queryAgentId = typeof req.query.agentId === "string" ? req.query.agentId.trim() : null;
+    if (queryAgentId) return queryAgentId;
+    const headerAgentId =
+      (typeof req.headers["x-agent-id"] === "string" ? req.headers["x-agent-id"].trim() : null) ??
+      (typeof req.headers["x-paperclip-agent-id"] === "string" ? req.headers["x-paperclip-agent-id"].trim() : null);
+    if (headerAgentId) return headerAgentId;
+    return null;
+  };
+
+  // 1. List data sources for company (filtered by agent access when invoked by or for an agent)
   router.get("/companies/:companyId/data-sources", async (req: Request, res: Response) => {
     const companyId = req.params.companyId as string;
     await assertCompanyAccess(req, companyId);
-    const list = await dsService.list(companyId);
+    let list = await dsService.list(companyId);
+
+    const agentId = getRequestingAgentId(req);
+    if (agentId) {
+      const access = await dsService.getAgentDataSources(companyId, agentId);
+      if (access.mode === "none") {
+        return res.json([]);
+      }
+      if (access.mode === "selected") {
+        const allowed = new Set(access.dataSourceIds);
+        list = list.filter((ds: any) => allowed.has(ds.id));
+      }
+    }
     res.json(list);
   });
 
@@ -203,6 +230,18 @@ export function dataSourceRoutes(db: Db) {
     const companyId = req.params.companyId as string;
     const id = req.params.id as string;
     await assertCompanyAccess(req, companyId);
+
+    const agentId = getRequestingAgentId(req);
+    if (agentId) {
+      const access = await dsService.getAgentDataSources(companyId, agentId);
+      if (access.mode === "none") {
+        throw forbidden("Akses ditolak: Agen ini tidak memiliki izin akses ke data source apa pun");
+      }
+      if (access.mode === "selected" && !access.dataSourceIds.includes(id)) {
+        throw forbidden(`Akses ditolak: Data source '${id}' tidak ditugaskan ke agen ini`);
+      }
+    }
+
     const ds = await dsService.getById(companyId, id);
     if (!ds) throw notFound(`Data source not found: ${id}`);
     res.json(ds);
@@ -223,8 +262,20 @@ export function dataSourceRoutes(db: Db) {
     "/companies/:companyId/data-sources/:id/tables/:tableId/query",
     async (req: Request, res: Response) => {
       const companyId = req.params.companyId as string;
+      const id = req.params.id as string;
       const tableId = req.params.tableId as string;
       await assertCompanyAccess(req, companyId);
+
+      const agentId = getRequestingAgentId(req);
+      if (agentId) {
+        const access = await dsService.getAgentDataSources(companyId, agentId);
+        if (access.mode === "none") {
+          throw forbidden("Akses ditolak: Agen ini tidak memiliki izin akses ke data source apa pun");
+        }
+        if (access.mode === "selected" && !access.dataSourceIds.includes(id)) {
+          throw forbidden(`Akses ditolak: Data source '${id}' tidak ditugaskan ke agen ini`);
+        }
+      }
 
       const filter = req.body?.filter;
       const limit = req.body?.limit ? Number(req.body.limit) : undefined;
@@ -249,6 +300,17 @@ export function dataSourceRoutes(db: Db) {
       const companyId = req.params.companyId as string;
       const id = req.params.id as string;
       await assertCompanyAccess(req, companyId);
+
+      const agentId = getRequestingAgentId(req);
+      if (agentId) {
+        const access = await dsService.getAgentDataSources(companyId, agentId);
+        if (access.mode === "none") {
+          throw forbidden("Akses ditolak: Agen ini tidak memiliki izin akses ke database apa pun");
+        }
+        if (access.mode === "selected" && !access.dataSourceIds.includes(id)) {
+          throw forbidden(`Akses ditolak: Database '${id}' tidak ditugaskan ke agen ini`);
+        }
+      }
 
       const sqlQuery = req.body?.sql as string;
       if (!sqlQuery || !sqlQuery.trim()) {
@@ -359,14 +421,66 @@ export function dataSourceRoutes(db: Db) {
     }
 
     const dataSourceId = req.body?.dataSourceId as string | undefined;
+    const dataSourceIds = Array.isArray(req.body?.dataSourceIds) ? req.body.dataSourceIds : undefined;
+    const rawAgentId = (req.body?.agentId as string | undefined) || (req.headers["x-paperclip-agent-id"] as string | undefined);
+    const agentId = rawAgentId || getRequestingAgentId(req);
     const limit = req.body?.limit ? Number(req.body.limit) : undefined;
 
     const results = await dsService.searchKnowledge(companyId, query, {
       dataSourceId,
+      dataSourceIds,
+      agentId: agentId || undefined,
       limit,
     });
 
     res.json(results);
+  });
+
+  // 6b. Get Agent Assigned Data Sources
+  router.get("/companies/:companyId/agents/:agentId/data-sources", async (req: Request, res: Response) => {
+    const companyId = req.params.companyId as string;
+    const agentId = req.params.agentId as string;
+    await assertCompanyAccess(req, companyId);
+    const result = await dsService.getAgentDataSources(companyId, agentId);
+    res.json(result);
+  });
+
+  // 6c. Update Agent Assigned Data Sources
+  router.put("/companies/:companyId/agents/:agentId/data-sources", async (req: Request, res: Response) => {
+    const companyId = req.params.companyId as string;
+    const agentId = req.params.agentId as string;
+    await assertCompanyAccess(req, companyId);
+    const mode = req.body?.mode || "all";
+    const dataSourceIds = Array.isArray(req.body?.dataSourceIds) ? req.body.dataSourceIds : [];
+    const result = await dsService.updateAgentDataSources(companyId, agentId, {
+      mode,
+      dataSourceIds,
+    });
+    res.json(result);
+  });
+
+  // Shorthand routes without companyId in path
+  router.get("/agents/:agentId/data-sources", async (req: Request, res: Response) => {
+    const agentId = req.params.agentId as string;
+    const [agent] = await db.select({ companyId: agents.companyId }).from(agents).where(eq(agents.id, agentId)).limit(1);
+    if (!agent) throw notFound("Agent not found");
+    await assertCompanyAccess(req, agent.companyId);
+    const result = await dsService.getAgentDataSources(agent.companyId, agentId);
+    res.json(result);
+  });
+
+  router.put("/agents/:agentId/data-sources", async (req: Request, res: Response) => {
+    const agentId = req.params.agentId as string;
+    const [agent] = await db.select({ companyId: agents.companyId }).from(agents).where(eq(agents.id, agentId)).limit(1);
+    if (!agent) throw notFound("Agent not found");
+    await assertCompanyAccess(req, agent.companyId);
+    const mode = req.body?.mode || "all";
+    const dataSourceIds = Array.isArray(req.body?.dataSourceIds) ? req.body.dataSourceIds : [];
+    const result = await dsService.updateAgentDataSources(agent.companyId, agentId, {
+      mode,
+      dataSourceIds,
+    });
+    res.json(result);
   });
 
   // 7. Orchestrator: List sessions

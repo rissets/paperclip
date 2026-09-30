@@ -97,19 +97,22 @@ export class KnowledgeAgentService {
     let summary = "";
     if (synthesizedAnswer) {
       summary = `${synthesizedAnswer}\n\n${answerabilityNote}`;
-      summary += `### 📚 Sumber & Rujukan Dokumen Internal:\n`;
-      for (let i = 0; i < citations.length; i++) {
-        const c = citations[i];
-        summary += `> **[${i + 1}] Sumber: ${c.sourceName}** (${c.section || "Bagian Dokumen"})\n`;
-        summary += `> "${c.snippet}"\n\n`;
+      summary += `### 📚 Referensi Dokumen:\n`;
+      const seenSources = new Set<string>();
+      let refIdx = 1;
+      for (const c of citations) {
+        const key = `${c.sourceName}-${c.section || ""}`;
+        if (seenSources.has(key)) continue;
+        seenSources.add(key);
+        summary += `- **[${refIdx++}] ${c.sourceName}**${c.section ? ` — ${c.section}` : ""}\n`;
       }
     } else {
       summary = `Ditemukan ${citations.length} rujukan relevan dari basis pengetahuan internal:\n\n`;
       summary += answerabilityNote;
       for (let i = 0; i < citations.length; i++) {
         const c = citations[i];
-        summary += `> **[${i + 1}] Sumber: ${c.sourceName}** (${c.section || "Bagian Dokumen"})\n`;
-        summary += `> "${c.snippet}"\n\n`;
+        summary += `- **[${i + 1}] ${c.sourceName}** (${c.section || "Bagian Dokumen"})\n`;
+        summary += `  > "${c.snippet}"\n\n`;
       }
     }
 

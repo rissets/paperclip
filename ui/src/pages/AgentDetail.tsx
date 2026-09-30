@@ -28,6 +28,7 @@ import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
 import { copyTextToClipboard } from "../lib/clipboard";
 import { AgentSkillsTab } from "./agent-skills/AgentSkillsTab";
+import { AgentDataSourcesTab } from "./agent-data-sources/AgentDataSourcesTab";
 import { AgentConfigForm } from "../components/AgentConfigForm";
 import { getAdapterDisplay } from "../adapters/adapter-display-registry";
 import { adapterLabels, roleLabels, help } from "../components/agent-config-primitives";
@@ -1456,6 +1457,13 @@ export function AgentDetail() {
         />
       )}
 
+      {activeView === "data-sources" && (
+        <AgentDataSourcesTab
+          agent={agent}
+          companyId={resolvedCompanyId ?? undefined}
+        />
+      )}
+
       {activeView === "tools" && resolvedCompanyId && (
         <AgentToolsTab agent={agent} companyId={resolvedCompanyId} />
       )}
@@ -1735,6 +1743,12 @@ export function AgentOverview({
     ?? "Adapter default";
   const lastRun = runs[0] ?? null;
 
+  const { data: dataSourcesData } = useQuery({
+    queryKey: queryKeys.agents.dataSources(agent.id),
+    queryFn: () => agentsApi.dataSources(agent.id, agent.companyId),
+    staleTime: 30_000,
+  });
+
   return (
     <div className="space-y-6">
       <LatestRunCard runs={runs} agentId={agentRouteId} issuesById={issuesById} />
@@ -1797,28 +1811,67 @@ export function AgentOverview({
             <p className="text-sm text-muted-foreground">No skills enabled.</p>
           )}
         </section>
+
+        <section className="rounded-lg border border-border p-4" aria-labelledby="agent-data-sources-heading">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <h3 id="agent-data-sources-heading" className="text-sm font-medium">Data Sources</h3>
+            <Link className="text-xs text-muted-foreground hover:text-foreground" to={agentDetailHref(agentRouteId, "data-sources")}>Manage</Link>
+          </div>
+          {dataSourcesData?.mode === "all" ? (
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <Badge variant="secondary" className="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-0">
+                  Universal Access
+                </Badge>
+              </div>
+              <p className="text-xs text-muted-foreground">Connected to all {dataSourcesData.availableDataSources?.length ?? 0} enterprise data sources (RAG, Structured & Databases).</p>
+            </div>
+          ) : dataSourcesData?.mode === "selected" ? (
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <Badge variant="secondary" className="bg-blue-500/10 text-blue-600 dark:text-blue-400 border-0">
+                  Scoped Access
+                </Badge>
+                <span className="text-xs text-muted-foreground">{dataSourcesData.dataSourceIds?.length ?? 0} connected</span>
+              </div>
+              <p className="text-xs text-muted-foreground">Connected to specific assigned data sources only.</p>
+            </div>
+          ) : (
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <Badge variant="outline" className="text-muted-foreground">
+                  Isolated
+                </Badge>
+              </div>
+              <p className="text-xs text-muted-foreground">No data sources connected.</p>
+            </div>
+          )}
+        </section>
       </div>
 
       {/* Structured Ingestion Configuration for Structured Ingestion Specialists */}
-      {(agent.name?.toLowerCase().includes("structured") ||
+      {((agent.name?.toLowerCase().includes("structured ingestion") ||
         (agent.metadata as any)?.paperclipBuiltInAgent?.key === "structured-ingestion" ||
-        agent.capabilities?.toLowerCase().includes("structured file ingestion")) && (
+        agent.capabilities?.toLowerCase().includes("structured file ingestion")) &&
+        (agent.metadata as any)?.paperclipBuiltInAgent?.key !== "data-agent" &&
+        agent.name?.toLowerCase() !== "data agent") && (
         <StructuredIngestionConfigCard agent={agent} companyId={agent.companyId} />
       )}
 
       {/* Knowledge Ingestion & RAG Configuration for Knowledge Ingestion Specialists */}
-      {(agent.name?.toLowerCase().includes("knowledge") ||
+      {((agent.name?.toLowerCase().includes("knowledge ingestion") ||
         (agent.metadata as any)?.paperclipBuiltInAgent?.key === "knowledge-ingestion" ||
-        agent.capabilities?.toLowerCase().includes("unstructured document ingestion") ||
-        agent.capabilities?.toLowerCase().includes("rag semantic search")) && (
+        agent.capabilities?.toLowerCase().includes("unstructured document ingestion")) &&
+        (agent.metadata as any)?.paperclipBuiltInAgent?.key !== "knowledge-agent" &&
+        agent.name?.toLowerCase() !== "knowledge agent") && (
         <KnowledgeIngestionConfigCard agent={agent} companyId={agent.companyId} />
       )}
 
       {/* Database Ingestion & Relational Topology Configuration for Database Ingestion Specialists */}
-      {(agent.name?.toLowerCase().includes("database") ||
-        (agent.metadata as any)?.paperclipBuiltInAgent?.key === "database-ingestion" ||
-        agent.capabilities?.toLowerCase().includes("relational database") ||
-        agent.capabilities?.toLowerCase().includes("database connectivity")) && (
+      {((agent.name?.toLowerCase().includes("database ingestion") ||
+        (agent.metadata as any)?.paperclipBuiltInAgent?.key === "database-ingestion") &&
+        (agent.metadata as any)?.paperclipBuiltInAgent?.key !== "data-agent" &&
+        agent.name?.toLowerCase() !== "data agent") && (
         <DatabaseIngestionConfigCard agent={agent} companyId={agent.companyId} />
       )}
 

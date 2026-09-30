@@ -3125,6 +3125,7 @@ export function buildInvocationEnvForLogs(
 export function buildPaperclipEnv(agent: {
   id: string;
   companyId: string;
+  metadata?: Record<string, unknown> | null;
 }): Record<string, string> {
   const resolveHostForUrl = (rawHost: string): string => {
     const host = rawHost.trim();
@@ -3137,6 +3138,13 @@ export function buildPaperclipEnv(agent: {
     PAPERCLIP_AGENT_ID: agent.id,
     PAPERCLIP_COMPANY_ID: agent.companyId,
   };
+  const dsAccess = (agent.metadata as any)?.dataSourceAccess;
+  if (dsAccess) {
+    vars.PAPERCLIP_DATA_SOURCES_MODE = dsAccess.mode || "none";
+    if (dsAccess.mode === "selected" && Array.isArray(dsAccess.dataSourceIds)) {
+      vars.PAPERCLIP_ASSIGNED_DATA_SOURCES = dsAccess.dataSourceIds.join(",");
+    }
+  }
   const runtimeHost = resolveHostForUrl(
     process.env.PAPERCLIP_LISTEN_HOST ?? process.env.HOST ?? "localhost",
   );

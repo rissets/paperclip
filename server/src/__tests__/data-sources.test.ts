@@ -121,6 +121,29 @@ Evaluasi didasarkan pada kualitas, rekam jejak, garansi purna jual, dan harga pe
     // Business & procurement query matches more closely than food recipe
     expect(simAB).toBeGreaterThan(simAC);
   });
+
+  it("does not treat isolated single numbers or table indices as section headers", async () => {
+    const tableMarkdown = `# Panduan Dashboard
+1
+Konten baris nomor satu
+2
+Konten baris nomor dua
+3
+Konten baris nomor tiga`;
+
+    const { chunks } = await KnowledgeIngestionService.processDocument(
+      "panduan.md",
+      Buffer.from(tableMarkdown, "utf-8"),
+      "text/markdown",
+    );
+
+    expect(chunks.length).toBeGreaterThan(0);
+    for (const chunk of chunks) {
+      expect(chunk.title).not.toBe("1");
+      expect(chunk.title).not.toBe("2");
+      expect(chunk.title).not.toBe("3");
+    }
+  });
 });
 
 describe("Database Integration Service", () => {

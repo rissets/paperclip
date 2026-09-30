@@ -4,6 +4,7 @@ import type {
   AgentSkillAssignmentMode,
   AgentPermissions,
   AgentDetail,
+  AgentDataSourcesResponse,
   AgentInstructionsBundle,
   AgentInstructionsFileDetail,
   AgentSkillSnapshot,
@@ -149,6 +150,19 @@ export const agentsApi = {
     api.patch<Agent>(agentPath(id, companyId), data),
   updatePermissions: (id: string, data: AgentPermissionUpdate, companyId?: string) =>
     api.patch<AgentDetail>(agentPath(id, companyId, "/permissions"), data),
+  dataSources: (id: string, companyId?: string) =>
+    api.get<AgentDataSourcesResponse>(
+      companyId ? `/companies/${companyId}/agents/${id}/data-sources` : `/agents/${id}/data-sources`,
+    ),
+  updateDataSources: (
+    id: string,
+    data: { mode: "all" | "selected" | "none"; dataSourceIds?: string[] },
+    companyId?: string,
+  ) =>
+    api.put<AgentDataSourcesResponse>(
+      companyId ? `/companies/${companyId}/agents/${id}/data-sources` : `/agents/${id}/data-sources`,
+      data,
+    ),
   instructionsBundle: (id: string, companyId?: string) =>
     api.get<AgentInstructionsBundle>(agentPath(id, companyId, "/instructions-bundle")),
   updateInstructionsBundle: (

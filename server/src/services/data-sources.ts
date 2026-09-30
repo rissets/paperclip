@@ -1,4 +1,4 @@
-import { eq, ne, and, or, ilike, desc, sql, isNull } from "drizzle-orm";
+import { eq, ne, and, or, ilike, desc, sql, isNull, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   dataSources,
@@ -678,10 +678,37 @@ export class DataSourcesService {
   async searchKnowledge(
     companyId: string,
     query: string,
-    options: { dataSourceId?: string; limit?: number } = {},
+    options: { dataSourceId?: string; dataSourceIds?: string[]; agentId?: string; limit?: number } = {},
   ): Promise<KnowledgeSearchResult[]> {
     const limit = options.limit || 5;
     const queryEmbedding = KnowledgeIngestionService.generateEmbedding(query);
+
+    let allowedDataSourceIds: string[] | null = null;
+    if (options.agentId) {
+      const [agent] = await this.db
+        .select({ metadata: agents.metadata })
+        .from(agents)
+        .where(and(eq(agents.id, options.agentId), eq(agents.companyId, companyId)))
+        .limit(1);
+      const access = (agent?.metadata as any)?.dataSourceAccess;
+      if (access && access.mode === "none") {
+        return [];
+      }
+      if (access && access.mode === "selected") {
+        const ids = Array.isArray(access.dataSourceIds) ? access.dataSourceIds : [];
+        if (ids.length === 0) return [];
+        allowedDataSourceIds = ids;
+      }
+    }
+
+    if (options.dataSourceIds && options.dataSourceIds.length > 0) {
+      if (allowedDataSourceIds) {
+        allowedDataSourceIds = options.dataSourceIds.filter((id) => allowedDataSourceIds!.includes(id));
+        if (allowedDataSourceIds.length === 0) return [];
+      } else {
+        allowedDataSourceIds = options.dataSourceIds;
+      }
+    }
 
     const stopWords = new Set([
       "dan", "di", "ke", "dari", "yang", "untuk", "pada", "dengan", "ini", "itu",
@@ -719,7 +746,12 @@ export class DataSourcesService {
     // Fetch candidate chunks
     let whereClause = eq(dataSourceChunks.companyId, companyId);
     if (options.dataSourceId) {
+      if (allowedDataSourceIds && !allowedDataSourceIds.includes(options.dataSourceId)) {
+        return [];
+      }
       whereClause = and(whereClause, eq(dataSourceChunks.dataSourceId, options.dataSourceId)) as any;
+    } else if (allowedDataSourceIds && allowedDataSourceIds.length > 0) {
+      whereClause = and(whereClause, inArray(dataSourceChunks.dataSourceId, allowedDataSourceIds)) as any;
     }
 
     // Keyword predicates for candidate filtering
@@ -856,11 +888,16 @@ export class DataSourcesService {
           }
         }
 
+        let displayTitle = chunk.title;
+        if (!displayTitle || /^\d+$/.test(displayTitle.trim())) {
+          displayTitle = chunk.dataSourceName;
+        }
+
         scoredResults.push({
           chunkId: chunk.chunkId,
           dataSourceId: chunk.dataSourceId,
           dataSourceName: chunk.dataSourceName,
-          title: chunk.title,
+          title: displayTitle,
           content: chunk.content,
           score: Number(combinedScore.toFixed(4)),
           snippet,
@@ -872,7 +909,23 @@ export class DataSourcesService {
     // Sort by relevance score descending
     scoredResults.sort((a, b) => b.score - a.score);
 
-    return scoredResults.slice(0, limit);
+    // Deduplicate near-identical chunks (e.g. duplicate uploads or overlapping windows)
+    const deduplicatedResults: KnowledgeSearchResult[] = [];
+    const seenContents = new Set<string>();
+
+    for (const res of scoredResults) {
+      const normalizedPrefix = res.content.trim().toLowerCase().slice(0, 160).replace(/\s+/g, " ");
+      if (seenContents.has(normalizedPrefix)) {
+        continue;
+      }
+      seenContents.add(normalizedPrefix);
+      deduplicatedResults.push(res);
+      if (deduplicatedResults.length >= limit) {
+        break;
+      }
+    }
+
+    return deduplicatedResults;
   }
 
   /**
@@ -1031,6 +1084,117 @@ export class DataSourcesService {
       totalRows,
       companyDatabase: companyDb,
     };
+  }
+
+  /**
+   * Get assigned data sources for a specific agent
+   */
+  async getAgentDataSources(companyId: string, agentId: string) {
+    const [agent] = await this.db
+      .select()
+      .from(agents)
+      .where(and(eq(agents.id, agentId), eq(agents.companyId, companyId)));
+
+    if (!agent) {
+      throw new Error(`Agent not found: ${agentId}`);
+    }
+
+    const availableDataSources = await this.list(companyId);
+    const access = (agent.metadata as any)?.dataSourceAccess;
+
+    let mode: "all" | "selected" | "none" = "none";
+    let dataSourceIds: string[] = [];
+
+    if (access && typeof access === "object") {
+      mode = access.mode || "none";
+      dataSourceIds = Array.isArray(access.dataSourceIds) ? access.dataSourceIds : [];
+    } else {
+      // Default heuristics: built-in knowledge & data agents default to "all"
+      const marker = readBuiltInAgentMarker(agent.metadata);
+      const isKnowledge = marker?.key === "knowledge-agent" || agent.name.toLowerCase().includes("knowledge");
+      const isData = marker?.key === "data-agent" || agent.name.toLowerCase().includes("data agent");
+      const isHomseo = marker?.key === "homseo" || agent.name.toLowerCase().includes("homseo");
+      const isIngestion = agent.name.toLowerCase().includes("ingestion");
+
+      if (isKnowledge || isData || isHomseo || isIngestion) {
+        mode = "all";
+      } else {
+        mode = "none";
+      }
+    }
+
+    let assignedDataSources: DataSource[] = [];
+    if (mode === "all") {
+      assignedDataSources = availableDataSources;
+    } else if (mode === "selected") {
+      const idSet = new Set(dataSourceIds);
+      assignedDataSources = availableDataSources.filter((ds) => idSet.has(ds.id));
+    } else {
+      assignedDataSources = [];
+    }
+
+    return {
+      agentId,
+      companyId,
+      agentName: agent.name,
+      mode,
+      dataSourceIds: mode === "selected" ? dataSourceIds : (mode === "all" ? availableDataSources.map((ds) => ds.id) : []),
+      assignedDataSources,
+      availableDataSources,
+    };
+  }
+
+  /**
+   * Update assigned data sources for a specific agent
+   */
+  async updateAgentDataSources(
+    companyId: string,
+    agentId: string,
+    input: { mode: "all" | "selected" | "none"; dataSourceIds?: string[] },
+  ) {
+    const [agent] = await this.db
+      .select()
+      .from(agents)
+      .where(and(eq(agents.id, agentId), eq(agents.companyId, companyId)));
+
+    if (!agent) {
+      throw new Error(`Agent not found: ${agentId}`);
+    }
+
+    const currentMetadata = (agent.metadata as Record<string, unknown>) || {};
+    const nextMetadata = {
+      ...currentMetadata,
+      dataSourceAccess: {
+        mode: input.mode,
+        dataSourceIds: input.mode === "selected" ? (input.dataSourceIds || []) : [],
+        updatedAt: new Date().toISOString(),
+      },
+    };
+
+    await this.db
+      .update(agents)
+      .set({
+        metadata: nextMetadata,
+        updatedAt: new Date(),
+      })
+      .where(eq(agents.id, agentId));
+
+    // Audit activity log
+    await this.db.insert(activityLog).values({
+      companyId,
+      actorType: "agent",
+      actorId: agentId,
+      agentId,
+      action: "agent.update_data_sources",
+      entityType: "agent",
+      entityId: agentId,
+      details: {
+        mode: input.mode,
+        assignedCount: input.mode === "selected" ? (input.dataSourceIds || []).length : input.mode === "all" ? "all" : 0,
+      },
+    });
+
+    return this.getAgentDataSources(companyId, agentId);
   }
 }
 

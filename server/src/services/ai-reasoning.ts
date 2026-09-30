@@ -1086,11 +1086,11 @@ Verified Enterprise Document Chunks:
 ${formattedContext}
 
 Instructions:
-1. Provide a direct, thorough, executive answer answering the user's specific question.
+1. Provide a direct, thorough, executive answer answering the user's specific question. Open with a clear summary paragraph.
 2. Use fluent Indonesian (or English if the query was in English).
-3. Reference sources inline using numbered citations like [1], [2] matching the chunk numbers.
-4. Format key numbers, terms, or lists clearly with Markdown bolding and bullet points.
-5. Do NOT hallucinate facts not present in the chunks. If a detail is missing, acknowledge it gracefully.
+3. Present key components, cards, or metrics using structured markdown tables or clean scannable bullet points with bold titles.
+4. STRICT RULE: DO NOT duplicate quotes in blockquotes under every bullet point. Present facts directly and authoritatively.
+5. Do NOT hallucinate facts not present in the chunks. If a specific metric or formula is only described generally in the text, explain what is documented clearly and concisely without being overly defensive.
 6. Provide the answer directly as clean markdown text.`;
 
     try {

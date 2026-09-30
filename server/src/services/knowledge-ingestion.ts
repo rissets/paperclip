@@ -135,7 +135,12 @@ export class KnowledgeIngestionService {
         /^PASAL\s+[0-9]+/i.test(line) ||
         /^SECTION\s+[0-9]+/i.test(line) ||
         /^ARTICLE\s+[0-9]+/i.test(line) ||
-        (line.length < 80 && line === line.toUpperCase() && /^[A-Z0-9\s:_-]+$/.test(line) && !line.includes("."));
+        (line.length >= 4 &&
+         line.length < 80 &&
+         /[A-Z]/.test(line) &&
+         line === line.toUpperCase() &&
+         /^[A-Z0-9\s:_-]+$/.test(line) &&
+         !line.includes("."));
 
       if (isHeader) {
         if (currentParagraphs.length > 0) {

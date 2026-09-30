@@ -13,6 +13,7 @@ describe("agent detail navigation", () => {
       "overview",
       "instructions",
       "skills",
+      "data-sources",
       "runtime",
       "secrets",
       "tools",

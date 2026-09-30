@@ -109,6 +109,22 @@ export interface AgentDetail extends Agent {
   access: AgentAccessState;
 }
 
+export type AgentDataSourceAccessMode = "all" | "selected" | "none";
+
+export interface AgentDataSourceAccessConfig {
+  mode: AgentDataSourceAccessMode;
+  dataSourceIds: string[];
+}
+
+export interface AgentDataSourcesResponse {
+  agentId: string;
+  companyId: string;
+  mode: AgentDataSourceAccessMode;
+  dataSourceIds: string[];
+  assignedDataSources: any[];
+  availableDataSources: any[];
+}
+
 export type ClearAgentErrorResponse = Agent;
 
 export interface AgentKeyCreated {

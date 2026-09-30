@@ -1,122 +1,85 @@
 ---
 name: data-sources-knowledge
 description: >
-  Search, retrieve, and synthesize unstructured enterprise knowledge documents (PDF, DOCX, Markdown, Text)
-  using Hybrid Vector + Lexical BM25 search and TypeSafe Jev verification. Use when answering questions about
-  company policies, standard operating procedures (SOP), SLAs, compliance, guidelines, and manuals.
+  Search, retrieve, and synthesize unstructured enterprise knowledge documents (PDF, DOCX, Markdown, Text, HTML)
+  using Hybrid Vector + Lexical BM25 retrieval and TypeSafe Jev verification. Use when answering questions about
+  company policies, standard operating procedures (SOP), SLAs, compliance, guidelines, and technical manuals.
 ---
 
 # Knowledge RAG & Semantic Retrieval Skill
 
-This skill equips Paperclip agents (especially `KnowledgeAgent` and `ResearchAgent`) to search and synthesize enterprise knowledge documents using a production-grade Hybrid Retrieval engine verified by TypeSafe Jev System One.
+This skill equips Paperclip agents (such as `KnowledgeAgent`, `ResearchAgent`, or any agent assigned RAG data sources) to search, retrieve, and synthesize information from company knowledge documents using an ultra-fast Hybrid Retrieval engine (Dense Vector + Lexical BM25).
 
-## Environment & Authentication
+---
 
-The following environment variables are provided during heartbeat/agent execution:
-- `PAPERCLIP_API_URL`: Paperclip server base URL (e.g., `http://localhost:3100`)
-- `PAPERCLIP_COMPANY_ID`: Active company ID
-- `PAPERCLIP_API_KEY`: Bearer authentication token (if required)
+## 🚀 Fast 2-Step Execution Protocol (Speed & Precision)
 
+To deliver instant, accurate responses and avoid execution lag, always follow this streamlined 2-step protocol:
+
+```
+[ Step 1: Single-Pass Retrieval ] ──► [ Step 2: Structured Executive Synthesis ]
+  (1 fast Python tool or script)         (Immediate direct answer in thread)
+```
+
+> **CRITICAL RULES**: 
+> 1. Run **EXACTLY ONE** retrieval call using the Python CLI tool. The hybrid engine fuses dense vector embeddings with BM25 term weighting and returns ranked relevant chunks.
+> 2. **DO NOT** execute multi-turn query loops, repetitive exploratory commands, or environment dumps.
+> 3. Synthesize and deliver the final answer immediately in the next turn.
+
+---
+
+## 1. Primary Action Tool: `search_knowledge.py`
+
+Use the pre-built Python CLI tool directly from bash. It connects directly to the Paperclip Knowledge API and outputs cleanly formatted results in < 100ms.
+
+### Basic Search (Top 6 Chunks):
 ```bash
-AUTH_HEADER=""
-if [ -n "$PAPERCLIP_API_KEY" ]; then
-  AUTH_HEADER="Authorization: Bearer $PAPERCLIP_API_KEY"
-fi
+python3 skills/data-sources-knowledge/scripts/search_knowledge.py --query "<pertanyaan atau topik yang dicari>" --limit 6
 ```
 
----
-
-## 1. Knowledge RAG Retrieval Architecture
-
-Paperclip implements a 4-stage hybrid retrieval pipeline:
-
-```
-[ User Query ]
-       │
-       ▼
-1. Query Analysis & Stopword Stripping
-       │
-       ├──► Dense Vector Embedding (float array / pgvector) ──► Cosine Similarity (30%)
-       │                                                                  │
-       └──► Substantive Terms & Exact Phrase Extraction     ──► Lexical BM25 & Term Frequency (70%)
-                                                                          │
-                                                                          ▼
-                                                             2. Reciprocal Score Fusion
-                                                                          │
-                                                                          ▼
-                                                             3. Term Density Snippet Windowing
-                                                                          │
-                                                                          ▼
-                                                             4. TypeSafe Jev System One Re-ranking &
-                                                                Answerability Verification (isAnswerable, confidence)
-                                                                          │
-                                                                          ▼
-                                                             [ Grounded Citations & Synthesis ]
-```
-
-1. **Dense Vector Embeddings**: Cosine similarity matches semantic conceptual meaning even when exact wording differs.
-2. **Lexical BM25 & Coverage Boost**: Matches exact legal terms, policy numbers, article codes, and phrase clusters.
-3. **Term Density Windowing**: Snippets are extracted around the highest keyword concentration to provide concise context.
-4. **TypeSafe Jev System One (jev-1.13.0) Re-ranking**: Fast zero-latency semantic verification checks whether chunks truly answer the user query and assesses confidence to avoid hallucinated answers.
-
----
-
-## 2. Searching Knowledge Documents
-
-Execute a hybrid semantic search across company documents:
-
+### Scoped Search (Target Specific Data Source ID):
 ```bash
-curl -sS -X POST "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/data-sources/search-knowledge" \
-  ${AUTH_HEADER:+-H "$AUTH_HEADER"} \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "Berapa jaminan SLA uptime untuk layanan cloud tier-1 dan bagaimana prosedur refund jika terjadi downtime?",
-    "limit": 5
-  }'
+python3 skills/data-sources-knowledge/scripts/search_knowledge.py --query "<kata kunci>" --data-source-id "<data-source-id>" --limit 4
 ```
 
-**Targeted Document Search (Optional Filter):**
-To scope the search to a specific document (e.g., SLA Policy):
-```json
-{
-  "query": "kebijakan refund",
-  "dataSourceId": "ds-rag-sla-uuid",
-  "limit": 3
-}
-```
+### Output Formats:
+- `--format compact` (Default): Clean, truncated passages with titles and source document names.
+- `--format markdown`: Markdown formatted sections with similarity scores.
+- `--format json`: Machine-readable raw JSON data.
 
-**Response Format:**
-```json
-[
-  {
-    "chunkId": "chk-uuid-001",
-    "dataSourceId": "ds-rag-sla-uuid",
-    "dataSourceName": "Cloud SLA Policy 2024",
-    "title": "Pasal 4: Jaminan Ketersediaan Layanan (Uptime SLA)",
-    "content": "Penyedia menjamin ketersediaan layanan cloud Tier-1 sebesar 99.99% setiap bulannya. Jika uptime berada di bawah 99.95%, pelanggan berhak mengajukan kredit tagihan sebesar 10%...",
-    "snippet": "Penyedia menjamin ketersediaan layanan cloud Tier-1 sebesar 99.99% setiap bulannya...",
-    "score": 0.88,
-    "tokenCount": 142
-  }
-]
-```
+*(Note: You can also use `bash skills/data-sources-knowledge/scripts/search-knowledge.sh "<query>" 6` as a shell alternative).*
 
 ---
 
-## 3. Grounded Synthesis & Citation Protocol
+## 2. Executive Synthesis & Presentation Protocol
 
-To prevent AI hallucination and comply with enterprise governance:
+To ensure clear, executive-grade answers:
 
-1. **Lead with the Direct Answer**:
-   Summarize the core policy rule or answer directly in the first paragraph.
-2. **Mandatory Grounded Blockquote Citations**:
-   For every factual statement or policy quote, provide the exact reference in blockquote format:
-   ```markdown
-   > **[1] Sumber: Cloud SLA Policy 2024** (Pasal 4: Jaminan Ketersediaan Layanan)
-   > "Penyedia menjamin ketersediaan layanan cloud Tier-1 sebesar 99.99% setiap bulannya. Jika uptime berada di bawah 99.95%, pelanggan berhak mengajukan kredit tagihan sebesar 10%."
-   ```
-3. **Handle Unanswerable or Ambiguous Queries**:
-   If TypeSafe Jev marks `isAnswerable: false` or if `confidence < 0.60`, do NOT guess or extrapolate beyond the retrieved text. Explicitly state:
-   *"Informasi spesifik mengenai klausul X tidak disebutkan dalam dokumen internal yang tersedia. Rujukan terdekat hanya membahas ketentuan Y."*
-4. **Document Profiles & Multi-Document Citations**:
-   When answering questions that span multiple documents (e.g. Employee Handbook + IT Security Policy), synthesize each domain under distinct subheadings and cite both sources.
+### A. Lead with the Direct Answer
+Open directly with an executive summary paragraph answering the core question. Use fluent, natural language matching the user's prompt (e.g. natural Indonesian for Indonesian prompts, English for English prompts).
+
+### B. Structured Presentation (Tables or Scannable Bullets)
+- For multi-attribute queries, guidelines, component specs, or metrics: **Use a clean Markdown table** or **structured bold bullet points**.
+- **STRICT ANTI-REDUNDANCY RULE**: 
+  **NEVER repeat identical text in blockquotes under bullet points.** 
+  Synthesize the facts directly, clearly, and concisely.
+
+**Contoh Format Ringkasan Bersih:**
+
+| Komponen / Topik | Rincian & Ketentuan Terverifikasi | Dokumen Sumber |
+|---|---|---|
+| **Ketentuan Utama** | Rincian kebijakan atau prosedur standar operasional | Bab / Bagian Terkait |
+| **Persyaratan / Kriteria** | Syarat pemenuhan atau kualifikasi yang dipersyaratkan | Panduan Operasional |
+| **Prosedur / Alur** | Langkah-langkah kerja atau eskalasi sistem | Standar Pelaksanaan |
+
+### C. Concise Document Reference Footnote
+List verified source documents neatly at the bottom instead of cluttering individual points with repetitive quote blocks:
+
+```markdown
+---
+### 📚 Referensi Dokumen Internal:
+- *Nama_Dokumen_SOP* — Bagian X.Y (Judul Bagian/Topik)
+```
+
+### D. Honest Transparency for Unspecified Details
+If a specific detail or technical indicator is mentioned broadly in the source document without deep elaboration, explain what is officially documented and state concisely that deeper technical details are not elaborated in the active guide.

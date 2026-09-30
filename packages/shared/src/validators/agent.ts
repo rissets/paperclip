@@ -289,3 +289,12 @@ export const updateAgentPermissionsSchema = z.object({
 });
 
 export type UpdateAgentPermissions = z.infer<typeof updateAgentPermissionsSchema>;
+
+export const agentDataSourceAccessModeSchema = z.enum(["all", "selected", "none"]);
+
+export const updateAgentDataSourcesSchema = z.object({
+  mode: agentDataSourceAccessModeSchema,
+  dataSourceIds: z.array(z.string()).optional().default([]),
+});
+
+export type UpdateAgentDataSourcesInput = z.infer<typeof updateAgentDataSourcesSchema>;
