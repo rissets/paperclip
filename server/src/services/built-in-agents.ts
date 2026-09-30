@@ -47,6 +47,7 @@ export interface BuiltInAgentDefinition {
   defaultAdapterConfig?: Record<string, unknown>;
   defaultBudgetMonthlyCents?: number;
   defaultRuntimeConfig?: Record<string, unknown>;
+  defaultSkillKeys?: string[];
   bundle?: BuiltInAgentBundleDefinition;
 }
 
@@ -365,6 +366,67 @@ const STRUCTURED_INGESTION_INSTRUCTIONS = readBuiltInText("structured-ingestion/
 const KNOWLEDGE_INGESTION_INSTRUCTIONS = readBuiltInText("knowledge-ingestion/AGENTS.md", FALLBACK_KNOWLEDGE_INGESTION_INSTRUCTIONS);
 const DATABASE_INGESTION_INSTRUCTIONS = readBuiltInText("database-ingestion/AGENTS.md", FALLBACK_DATABASE_INGESTION_INSTRUCTIONS);
 
+const FALLBACK_DATA_AGENT_INSTRUCTIONS = [
+  "# Data Agent",
+  "",
+  "You are Paperclip's built-in Data Agent Specialist.",
+  "Your dedicated mission is to execute data analytics, SQL queries, and entity lookups across internal structured datasets (CSV/Excel) and connected external relational databases (PostgreSQL, MariaDB, MySQL).",
+  "",
+  "## Primary Capabilities & Responsibilities",
+  "1. **External Relational Database Analytics**: Query live connected databases using safe read-only SQL queries with automatic dialect quoting.",
+  "2. **Fast B-Tree Entity Profiling**: Look up business and legal entities (companies, registration numbers, codes) using indexed searchableColumns.",
+  "3. **Multi-Table Relational JOINs**: Connect related tables using foreign keys and crossTableClusters topology discovered during onboarding.",
+  "4. **ClickHouse OLAP Execution**: Execute high-performance aggregations (sum, avg, count, groupBy) on ClickHouse columnar storage.",
+  "5. **Self-Correction Retry Loop**: Automatically inspect database error feedback and correct column or alias issues dynamically.",
+  "",
+  "## Invariants",
+  "- Never execute mutating SQL queries (INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE). All queries must be strictly read-only SELECT.",
+  "- Keep queries scoped strictly to the company boundary.",
+  "- Format responses with clean Markdown tables, formatted numbers, and grounded provenance citations.",
+  "",
+].join("\n");
+
+const FALLBACK_KNOWLEDGE_AGENT_INSTRUCTIONS = [
+  "# Knowledge Agent",
+  "",
+  "You are Paperclip's built-in Knowledge Agent Specialist.",
+  "Your dedicated mission is to answer enterprise inquiries regarding company policies, standard operating procedures (SOP), SLAs, and compliance using Hybrid Vector + Lexical RAG.",
+  "",
+  "## Primary Capabilities & Responsibilities",
+  "1. **Hybrid Semantic Retrieval**: Retrieve document passages using combined dense vector cosine similarity and lexical BM25 term weighting.",
+  "2. **TypeSafe Jev Verification**: Verify retrieved chunks against TypeSafe Jev System One for answerability and confidence scoring.",
+  "3. **Dynamic LLM Synthesis**: Synthesize direct, thorough, executive answers grounded entirely in verified document evidence.",
+  "4. **Grounded Provenance Citations**: Cite document names and section titles using blockquote citation standards.",
+  "",
+  "## Invariants",
+  "- Never hallucinate policy details not present in retrieved document chunks.",
+  "- Acknowledge unanswerable queries gracefully when document evidence is insufficient.",
+  "- Keep all document retrieval scoped strictly to company boundaries.",
+  "",
+].join("\n");
+
+const FALLBACK_HOMSEO_INSTRUCTIONS = [
+  "# Homseo",
+  "",
+  "You are Homseo, Chief of Staff & Main Enterprise Agent Orchestrator for Paperclip.",
+  "Your dedicated mission is to coordinate enterprise agents, route user inquiries dynamically via TypeSafe Jev System One, and synthesize cross-domain responses.",
+  "",
+  "## Primary Capabilities & Responsibilities",
+  "1. **Semantic Intent Routing**: Evaluate user queries against live data source semantic profiles using TypeSafe Jev System One (< 150ms latency).",
+  "2. **Specialist Delegation**: Dispatch structured data and database queries to Data Agent, and document/policy queries to Knowledge Agent.",
+  "3. **Cross-Domain Hybrid Synthesis**: Concurrently execute both specialists when inquiries span factual numbers and policy context, delivering unified executive briefs.",
+  "4. **Governance & Roster Oversight**: Ensure all company agents are aligned with company objectives and operational boundaries.",
+  "",
+  "## Invariants",
+  "- Ground all responses in verified internal data sources.",
+  "- Strictly enforce company boundaries across all data operations.",
+  "",
+].join("\n");
+
+const DATA_AGENT_INSTRUCTIONS = readBuiltInText("data-agent/AGENTS.md", FALLBACK_DATA_AGENT_INSTRUCTIONS);
+const KNOWLEDGE_AGENT_INSTRUCTIONS = readBuiltInText("knowledge-agent/AGENTS.md", FALLBACK_KNOWLEDGE_AGENT_INSTRUCTIONS);
+const HOMSEO_INSTRUCTIONS = readBuiltInText("homseo/AGENTS.md", FALLBACK_HOMSEO_INSTRUCTIONS);
+
 const DEFINITIONS = validateBuiltInAgentDefinitions([
   {
     key: "briefs",
@@ -537,7 +599,7 @@ const DEFINITIONS = validateBuiltInAgentDefinitions([
     displayName: "Structured Ingestion Agent",
     featureKeys: ["structured-ingestion", "onboarding", "data-source"],
     shortPurpose:
-      "Performs structured data ingestion, dynamic schema profiling, semantic topic and relation discovery, and ClickHouse synchronization during datasource onboarding and on-demand updates.",
+      "Structured file ingestion (CSV, Excel, Sheets, Parquet), automated schema profiling, data quality evaluation, semantic model building, batch indexing, dynamic JEV topic & context discovery, ClickHouse sync.",
     defaultInstructions: STRUCTURED_INGESTION_INSTRUCTIONS,
     defaultRole: "engineer",
     defaultTitle: "Structured Data Ingestion Specialist",
@@ -554,13 +616,18 @@ const DEFINITIONS = validateBuiltInAgentDefinitions([
       model: "rissets/neural/deepseek-v4.1-flash",
     },
     defaultBudgetMonthlyCents: 0,
+    defaultSkillKeys: [
+      "paperclipai/paperclip/data-sources-structured",
+      "paperclipai/paperclip/data-sources",
+      "paperclipai/paperclip/paperclip",
+    ],
   },
   {
     key: "knowledge-ingestion",
     displayName: "Knowledge Ingestion Agent",
     featureKeys: ["knowledge-ingestion", "onboarding", "rag", "unstructured"],
     shortPurpose:
-      "Performs unstructured document ingestion, semantic chunking, vector embedding generation, and hybrid search indexing into ClickHouse during datasource onboarding and on-demand updates.",
+      "Unstructured document ingestion (PDF, DOCX, TXT, MD), semantic text chunking, embedding generation, vector and BM25 hybrid search indexing, document domain classification, ClickHouse hybrid vector sync.",
     defaultInstructions: KNOWLEDGE_INGESTION_INSTRUCTIONS,
     defaultRole: "researcher",
     defaultTitle: "Knowledge & Unstructured Ingestion Specialist",
@@ -577,13 +644,18 @@ const DEFINITIONS = validateBuiltInAgentDefinitions([
       model: "rissets/bedrock-aws/zai.glm-5",
     },
     defaultBudgetMonthlyCents: 0,
+    defaultSkillKeys: [
+      "paperclipai/paperclip/data-sources-knowledge",
+      "paperclipai/paperclip/data-sources",
+      "paperclipai/paperclip/paperclip",
+    ],
   },
   {
     key: "database-ingestion",
     displayName: "Database Ingestion Agent",
     featureKeys: ["database-ingestion", "onboarding", "database", "cdc"],
     shortPurpose:
-      "Performs live relational database connection onboarding, catalog introspection, CDC/batch data replication, and continuous ClickHouse synchronization during datasource onboarding and on-demand updates.",
+      "External database connectivity (PostgreSQL, MariaDB, MySQL, SQL Server, Oracle), schema & relation discovery, primary & foreign keys extraction, bilingual semantic modeling, CDC replication to ClickHouse.",
     defaultInstructions: DATABASE_INGESTION_INSTRUCTIONS,
     defaultRole: "engineer",
     defaultTitle: "Database & Live Connection Ingestion Specialist",
@@ -600,19 +672,116 @@ const DEFINITIONS = validateBuiltInAgentDefinitions([
       model: "rissets/bedrock-aws/zai.glm-5",
     },
     defaultBudgetMonthlyCents: 0,
+    defaultSkillKeys: [
+      "paperclipai/paperclip/database-integration",
+      "paperclipai/paperclip/data-sources",
+      "paperclipai/paperclip/paperclip",
+    ],
+  },
+  {
+    key: "data-agent",
+    displayName: "Data Agent",
+    featureKeys: ["data-agent", "runtime", "data-source", "analytics"],
+    shortPurpose:
+      "Internal database analytics, legal & commercial entity profiling across connected databases, tabular metrics aggregation on CSV and Excel datasets, ClickHouse execution, safe read-only SQL queries.",
+    defaultInstructions: DATA_AGENT_INSTRUCTIONS,
+    defaultRole: "engineer",
+    defaultTitle: "Data Agent Specialist",
+    defaultIcon: "bar-chart",
+    defaultPermissions: {
+      canCreateAgents: false,
+      canCreateSkills: false,
+    },
+    defaultStatus: "idle",
+    defaultManager: "single_root_agent",
+    allowedAdapterTypes: ["pi_local", "codex_local", "claude_local", "gemini_local", "opencode_local", "cursor_local", "process"],
+    defaultAdapterType: "pi_local",
+    defaultAdapterConfig: {
+      model: "rissets/neural/deepseek-v4.1-flash",
+    },
+    defaultBudgetMonthlyCents: 0,
+    defaultSkillKeys: [
+      "paperclipai/paperclip/data-sources-structured",
+      "paperclipai/paperclip/database-integration",
+      "paperclipai/paperclip/data-sources",
+      "paperclipai/paperclip/paperclip",
+    ],
+  },
+  {
+    key: "knowledge-agent",
+    displayName: "Knowledge Agent",
+    featureKeys: ["knowledge-agent", "runtime", "rag", "retrieval"],
+    shortPurpose:
+      "RAG semantic search, policy and SOP retrieval, document analysis, citation extraction, ClickHouse vector retrieval, TypeSafe Jev verification.",
+    defaultInstructions: KNOWLEDGE_AGENT_INSTRUCTIONS,
+    defaultRole: "researcher",
+    defaultTitle: "Knowledge Agent Specialist",
+    defaultIcon: "book-open",
+    defaultPermissions: {
+      canCreateAgents: false,
+      canCreateSkills: false,
+    },
+    defaultStatus: "idle",
+    defaultManager: "single_root_agent",
+    allowedAdapterTypes: ["pi_local", "codex_local", "claude_local", "gemini_local", "opencode_local", "cursor_local", "process"],
+    defaultAdapterType: "pi_local",
+    defaultAdapterConfig: {
+      model: "rissets/neural/deepseek-v4.1-flash",
+    },
+    defaultBudgetMonthlyCents: 0,
+    defaultSkillKeys: [
+      "paperclipai/paperclip/data-sources-knowledge",
+      "paperclipai/paperclip/data-sources",
+      "paperclipai/paperclip/paperclip",
+    ],
+  },
+  {
+    key: "homseo",
+    displayName: "Homseo",
+    featureKeys: ["homseo", "orchestrator", "chief-of-staff"],
+    shortPurpose:
+      "Chief of Staff, Cross-domain enterprise orchestration, Jev System One semantic routing, external database intelligence, structured analytics, RAG knowledge synthesis.",
+    defaultInstructions: HOMSEO_INSTRUCTIONS,
+    defaultRole: "general",
+    defaultTitle: "Enterprise Orchestrator & Chief of Staff",
+    defaultIcon: "shield",
+    defaultPermissions: {
+      canCreateAgents: true,
+      canCreateSkills: true,
+    },
+    defaultStatus: "idle",
+    defaultManager: null,
+    allowedAdapterTypes: ["pi_local", "codex_local", "claude_local", "gemini_local", "opencode_local", "cursor_local", "process"],
+    defaultAdapterType: "pi_local",
+    defaultAdapterConfig: {
+      model: "rissets/neural/deepseek-v4.1-flash",
+    },
+    defaultBudgetMonthlyCents: 0,
+    defaultSkillKeys: [
+      "paperclipai/paperclip/data-sources",
+      "paperclipai/paperclip/data-sources-structured",
+      "paperclipai/paperclip/data-sources-knowledge",
+      "paperclipai/paperclip/database-integration",
+      "paperclipai/paperclip/paperclip",
+      "paperclipai/paperclip/paperclip-board",
+      "paperclipai/paperclip/paperclip-converting-plans-to-tasks",
+      "paperclipai/paperclip/paperclip-create-agent",
+      "paperclipai/paperclip/para-memory-files",
+    ],
   },
 ]);
 
 const DEFINITIONS_BY_KEY = new Map(DEFINITIONS.map((definition) => [definition.key, definition]));
 
 // Bundled built-in agents that should be provisioned automatically when a
-// company is created (and re-ensured on startup reconcile). Empty by default so
-// a new user starts clean — the Reflection Coach and Summarizer are opt-in, not
-// seeded. Add a definition key here to restore automatic provisioning.
+// company is created (and re-ensured on startup reconcile).
 const AUTO_PROVISION_ON_COMPANY_CREATE_KEYS = new Set<string>([
+  "homseo",
   "structured-ingestion",
   "knowledge-ingestion",
   "database-ingestion",
+  "data-agent",
+  "knowledge-agent",
 ]);
 
 const ROOT_AGENT_DEFAULT_CHANGE_GRANTS: PermissionKey[] = ["agents:configure", "skills:create"];
@@ -863,6 +1032,21 @@ function builtInMetadata(definition: BuiltInAgentDefinition, existing?: Record<s
 function definitionPatch(definition: BuiltInAgentDefinition, input: BuiltInAgentProvisionInput = {}) {
   const adapterType = input.adapterType ?? defaultAdapterType(definition);
   assertAdapterAllowed(definition, adapterType);
+  const baseAdapterConfig = input.adapterConfig ?? definition.defaultAdapterConfig ?? {};
+  let adapterConfig = baseAdapterConfig;
+  if (definition.defaultSkillKeys && definition.defaultSkillKeys.length > 0) {
+    const existingPreference = readPaperclipSkillSyncPreference(baseAdapterConfig);
+    const existing = existingPreference.desiredSkillEntries;
+    const existingKeys = new Set(existing.map((e) => e.key));
+    const merged = [...existing];
+    for (const key of definition.defaultSkillKeys) {
+      if (!existingKeys.has(key)) {
+        merged.push({ key, versionId: null });
+        existingKeys.add(key);
+      }
+    }
+    adapterConfig = writePaperclipSkillSyncPreference(baseAdapterConfig, merged);
+  }
   return {
     name: definition.displayName,
     role: definition.defaultRole,
@@ -870,7 +1054,7 @@ function definitionPatch(definition: BuiltInAgentDefinition, input: BuiltInAgent
     icon: definition.defaultIcon ?? null,
     capabilities: definition.shortPurpose,
     adapterType,
-    adapterConfig: input.adapterConfig ?? definition.defaultAdapterConfig ?? {},
+    adapterConfig,
     permissions: definition.defaultPermissions ?? {},
     budgetMonthlyCents: input.budgetMonthlyCents ?? definition.defaultBudgetMonthlyCents ?? 0,
   };
@@ -1210,6 +1394,30 @@ export function builtInAgentService(db: Db) {
     });
     if (!updated) throw notFound("Built-in agent not found");
     return updated as Agent;
+  }
+
+  async function syncDefaultSkillsToAgent(agent: Agent, definition: BuiltInAgentDefinition) {
+    if (!definition.defaultSkillKeys || definition.defaultSkillKeys.length === 0) return agent;
+    const existingConfig = (agent.adapterConfig ?? {}) as Record<string, unknown>;
+    const preference = readPaperclipSkillSyncPreference(existingConfig);
+    const desired = preference.desiredSkillEntries;
+    const desiredMap = new Map(desired.map((d) => [d.key, d]));
+    let changed = false;
+    for (const key of definition.defaultSkillKeys) {
+      if (!desiredMap.has(key)) {
+        const skill = await skillSvc.getByKey(agent.companyId, key).catch(() => null);
+        desiredMap.set(key, { key, versionId: skill?.currentVersionId ?? null });
+        changed = true;
+      }
+    }
+    if (!changed) return agent;
+    const nextDesired = Array.from(desiredMap.values());
+    const adapterConfig = writePaperclipSkillSyncPreference(existingConfig, nextDesired);
+    const updated = await agentSvc.update(agent.id, { adapterConfig }, {
+      allowBuiltInAgentMetadata: true,
+      recordRevision: { source: "built-in-agent:default-skills-sync" },
+    });
+    return (updated ?? agent) as Agent;
   }
 
   async function materializeSkill(agent: Agent, definition: BuiltInAgentDefinition, mode: "reconcile" | "reset") {
@@ -1708,6 +1916,9 @@ export function builtInAgentService(db: Db) {
     if (definition.key === "database-ingestion" && (candNorm === "databaseintegrationagent" || candNorm === "databaseintegration" || candNorm === "databaseingestionagent")) return true;
     if (definition.key === "structured-ingestion" && (candNorm === "structuredingestionagent" || candNorm === "structuredingestion")) return true;
     if (definition.key === "knowledge-ingestion" && (candNorm === "knowledgeingestionagent" || candNorm === "knowledgeingestion")) return true;
+    if (definition.key === "data-agent" && (candNorm === "dataagent" || candNorm === "data")) return true;
+    if (definition.key === "knowledge-agent" && (candNorm === "knowledgeagent" || candNorm === "knowledge")) return true;
+    if (definition.key === "homseo" && candNorm === "homseo") return true;
     return false;
   }
 
@@ -1793,6 +2004,7 @@ export function builtInAgentService(db: Db) {
     if (existing) {
       const patch: Partial<typeof agents.$inferInsert> = {
         metadata: builtInMetadata(definition, existing.metadata),
+        capabilities: definition.shortPurpose,
       };
       if (
         !existingPendingApproval
@@ -1823,9 +2035,12 @@ export function builtInAgentService(db: Db) {
         return state(definition, updated as Agent);
       }
       await ensureBuiltInAgentDefaultGrants(updated as Agent, definition);
+      await syncDefaultSkillsToAgent(updated as Agent, definition);
       const resources = await reconcileBundleResources(updated as Agent, definition, "reconcile");
       return state(definition, await agentSvc.getById(existing.id) as Agent, resources);
     }
+
+    await skillSvc.list(companyId).catch(() => []);
 
     const reportsTo = definition.defaultManager === "single_root_agent"
       ? await findSingleRootManager(companyId)
@@ -1871,6 +2086,7 @@ export function builtInAgentService(db: Db) {
     });
 
     await ensureBuiltInAgentDefaultGrants(created, definition);
+    let activeAgent = created;
     if (definition.defaultInstructions && !definition.bundle) {
       try {
         const materialized = await instructionsSvc.materializeManagedBundle(created, {
@@ -1880,17 +2096,19 @@ export function builtInAgentService(db: Db) {
           replaceExisting: true,
           clearLegacyPromptTemplate: true,
         });
-        await agentSvc.update(created.id, {
+        const updated = await agentSvc.update(created.id, {
           adapterConfig: materialized.adapterConfig,
         }, {
           allowBuiltInAgentMetadata: true,
           recordRevision: { source: "built-in-agent:init-instructions" },
         });
+        if (updated) activeAgent = updated as Agent;
       } catch (err) {
         console.warn(`[paperclip] Failed to initialize instructions for ${definition.key}:`, err);
       }
     }
-    const resources = await reconcileBundleResources(created, definition, "reconcile");
+    await syncDefaultSkillsToAgent(activeAgent, definition);
+    const resources = await reconcileBundleResources(activeAgent, definition, "reconcile");
     return state(definition, await agentSvc.getById(created.id) as Agent, resources);
   }
 
@@ -2038,6 +2256,7 @@ export function builtInAgentService(db: Db) {
     });
     if (!updated) throw notFound("Built-in agent not found");
     await ensureBuiltInAgentDefaultGrants(updated as Agent, definition);
+    await syncDefaultSkillsToAgent(updated as Agent, definition);
     return state(definition, updated as Agent);
   }
 
