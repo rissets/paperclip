@@ -1396,14 +1396,17 @@ function JevSemanticProfileView({
               <div className="flex flex-wrap gap-1.5">
                 {(currentTableProfile?.topics && currentTableProfile.topics.length > 0) ||
                 (currentModel.topics && currentModel.topics.length > 0) ? (
-                  (currentTableProfile?.topics || currentModel.topics).map((top: string) => (
-                    <span
-                      key={top}
-                      className="rounded-md bg-muted border border-border px-2.5 py-1 text-xs font-medium text-foreground hover:border-primary/40 transition-colors"
-                    >
-                      {top}
-                    </span>
-                  ))
+                  (currentTableProfile?.topics || currentModel.topics).map((top: any, idx: number) => {
+                    const label = typeof top === "string" ? top : top?.topic || top?.name || JSON.stringify(top);
+                    return (
+                      <span
+                        key={idx}
+                        className="rounded-md bg-muted border border-border px-2.5 py-1 text-xs font-medium text-foreground hover:border-primary/40 transition-colors"
+                      >
+                        {label}
+                      </span>
+                    );
+                  })
                 ) : (
                   <span className="text-xs text-muted-foreground italic">
                     Per-table topics synthesized dynamically during onboarding.
@@ -1626,14 +1629,17 @@ function JevSemanticProfileView({
               </div>
               <div className="flex flex-wrap gap-1.5">
                 {activeDoc.topics && activeDoc.topics.length > 0 ? (
-                  activeDoc.topics.map((top: string) => (
-                    <span
-                      key={top}
-                      className="rounded-md bg-muted border border-border px-2.5 py-1 text-xs font-medium text-foreground"
-                    >
-                      {top}
-                    </span>
-                  ))
+                  activeDoc.topics.map((top: any, idx: number) => {
+                    const label = typeof top === "string" ? top : top?.topic || top?.name || JSON.stringify(top);
+                    return (
+                      <span
+                        key={idx}
+                        className="rounded-md bg-muted border border-border px-2.5 py-1 text-xs font-medium text-foreground"
+                      >
+                        {label}
+                      </span>
+                    );
+                  })
                 ) : (
                   <span className="text-xs text-muted-foreground italic">No section topics specified.</span>
                 )}
@@ -1648,14 +1654,17 @@ function JevSemanticProfileView({
                   <span>Key Entities Identified in Document</span>
                 </div>
                 <div className="flex flex-wrap gap-1.5">
-                  {activeDoc.entities.map((ent: string) => (
-                    <span
-                      key={ent}
-                      className="rounded-md bg-primary/10 border border-primary/20 px-2.5 py-1 text-xs font-semibold text-primary"
-                    >
-                      {ent}
-                    </span>
-                  ))}
+                  {activeDoc.entities.map((ent: any, idx: number) => {
+                    const label = typeof ent === "string" ? ent : ent?.name || ent?.entity || JSON.stringify(ent);
+                    return (
+                      <span
+                        key={idx}
+                        className="rounded-md bg-primary/10 border border-primary/20 px-2.5 py-1 text-xs font-semibold text-primary"
+                      >
+                        {label}
+                      </span>
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -1752,7 +1761,7 @@ function JevSemanticProfileView({
                         <div className="space-y-0.5">
                           <h5 className="text-xs font-bold text-foreground flex items-center gap-1.5">
                             <Network className="h-3.5 w-3.5 text-primary" />
-                            {cluster.name}
+                            {cluster.name || cluster.clusterName || `Cluster #${cIdx + 1}`}
                           </h5>
                           <p className="text-xs text-muted-foreground leading-relaxed">
                             {cluster.description}
@@ -1799,14 +1808,17 @@ function JevSemanticProfileView({
                             Cross-Table Topics:
                           </span>
                           <div className="flex flex-wrap gap-1.5">
-                            {cluster.topics.map((top: string) => (
-                              <span
-                                key={top}
-                                className="rounded bg-muted border border-border px-2 py-0.5 text-xs text-foreground font-medium"
-                              >
-                                {top}
-                              </span>
-                            ))}
+                            {cluster.topics.map((top: any, tIdx: number) => {
+                              const label = typeof top === "string" ? top : top?.topic || top?.name || JSON.stringify(top);
+                              return (
+                                <span
+                                  key={tIdx}
+                                  className="rounded bg-muted border border-border px-2 py-0.5 text-xs text-foreground font-medium"
+                                >
+                                  {label}
+                                </span>
+                              );
+                            })}
                           </div>
                         </div>
                       )}
@@ -1871,14 +1883,17 @@ function JevSemanticProfileView({
               </p>
               <div className="flex flex-wrap gap-2 pt-1">
                 {profile.entities && profile.entities.length > 0 ? (
-                  profile.entities.map((ent: string) => (
-                    <span
-                      key={ent}
-                      className="rounded-lg bg-primary/10 border border-primary/20 px-2.5 py-1 text-xs font-semibold text-primary"
-                    >
-                      {ent}
-                    </span>
-                  ))
+                  profile.entities.map((ent: any, idx: number) => {
+                    const label = typeof ent === "string" ? ent : ent?.name || ent?.entity || JSON.stringify(ent);
+                    return (
+                      <span
+                        key={idx}
+                        className="rounded-lg bg-primary/10 border border-primary/20 px-2.5 py-1 text-xs font-semibold text-primary"
+                      >
+                        {label}
+                      </span>
+                    );
+                  })
                 ) : (
                   <span className="text-xs text-muted-foreground italic">No primary entities isolated.</span>
                 )}
@@ -1894,14 +1909,17 @@ function JevSemanticProfileView({
               </p>
               <div className="flex flex-wrap gap-2 pt-1">
                 {((profile.topics && profile.topics.length > 0) || (profile.primaryTopics && profile.primaryTopics.length > 0)) ? (
-                  (profile.topics || profile.primaryTopics).map((top: string) => (
-                    <span
-                      key={top}
-                      className="rounded-lg bg-muted border border-border px-2.5 py-1 text-xs font-medium text-foreground"
-                    >
-                      {top}
-                    </span>
-                  ))
+                  (profile.topics || profile.primaryTopics).map((top: any, idx: number) => {
+                    const label = typeof top === "string" ? top : top?.topic || top?.name || JSON.stringify(top);
+                    return (
+                      <span
+                        key={idx}
+                        className="rounded-lg bg-muted border border-border px-2.5 py-1 text-xs font-medium text-foreground"
+                      >
+                        {label}
+                      </span>
+                    );
+                  })
                 ) : (
                   <span className="text-xs text-muted-foreground italic">Domain topics inferred automatically.</span>
                 )}
@@ -1946,18 +1964,59 @@ function JevSemanticProfileView({
               <h4 className="text-sm font-semibold text-foreground flex items-center gap-2">
                 <Compass className="h-4 w-4 text-primary" /> Suggested Analytical Questions (AI Formulated)
               </h4>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                {profile.suggestedQueries.map((q: string, idx: number) => (
-                  <div
-                    key={idx}
-                    className="p-3 rounded-lg border border-border bg-muted/20 text-xs text-foreground flex items-start gap-2"
-                  >
-                    <span className="rounded-full bg-primary/10 text-primary w-5 h-5 flex items-center justify-center shrink-0 text-xs font-bold">
-                      {idx + 1}
-                    </span>
-                    <span className="leading-relaxed">{q}</span>
-                  </div>
-                ))}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {profile.suggestedQueries.map((q: any, idx: number) => {
+                  const title =
+                    typeof q === "string"
+                      ? q
+                      : q?.title || q?.query || q?.description || `Analytical Query #${idx + 1}`;
+                  const queryText =
+                    typeof q === "object" && q !== null && q.query && q.query !== title
+                      ? q.query
+                      : null;
+                  const category =
+                    typeof q === "object" && q !== null ? q.category : null;
+                  const description =
+                    typeof q === "object" && q !== null && q.description && q.description !== title
+                      ? q.description
+                      : null;
+                  const sqlSnippet =
+                    typeof q === "object" && q !== null ? q.sqlSnippet : null;
+
+                  return (
+                    <div
+                      key={idx}
+                      className="p-3.5 rounded-lg border border-border bg-muted/20 text-xs text-foreground flex flex-col gap-2 hover:border-primary/40 transition-colors"
+                    >
+                      <div className="flex items-start gap-2.5">
+                        <span className="rounded-full bg-primary/10 text-primary w-5 h-5 flex items-center justify-center shrink-0 text-xs font-bold mt-0.5">
+                          {idx + 1}
+                        </span>
+                        <div className="flex-1 min-w-0 space-y-1">
+                          <div className="flex items-start justify-between gap-2">
+                            <span className="font-semibold text-foreground leading-snug">{title}</span>
+                            {category && (
+                              <span className="rounded px-1.5 py-0.5 text-xs font-medium bg-muted text-muted-foreground uppercase border border-border shrink-0">
+                                {category}
+                              </span>
+                            )}
+                          </div>
+                          {queryText && (
+                            <p className="text-xs text-muted-foreground leading-relaxed">{queryText}</p>
+                          )}
+                          {description && (
+                            <p className="text-xs text-muted-foreground/80 italic">{description}</p>
+                          )}
+                          {sqlSnippet && (
+                            <div className="rounded bg-muted/60 p-2 font-mono text-xs text-foreground overflow-x-auto border border-border mt-1">
+                              <code>{sqlSnippet}</code>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
