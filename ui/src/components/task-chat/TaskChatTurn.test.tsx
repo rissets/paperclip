@@ -521,4 +521,36 @@ describe("TaskChatTurn", () => {
     flushSync(() => summaryBtn()!.click());
     expect(fold()?.getAttribute("data-folded")).toBe("false");
   });
+
+  it("collapses runner standaloneHeader activity by default when conversationMode is true", () => {
+    flushSync(() => {
+      root.render(
+        <MemoryRouter>
+          <ThemeProvider>
+            <TaskChatTurn
+              item={{
+                ...SETTLED,
+                standaloneHeader: true,
+                items: [tool("a"), tool("b")],
+                finalResponse: { id: "m1", kind: "message", author: "agent", text: "Answer ready" },
+              }}
+              conversationMode={true}
+              renderChild={(c) => <span data-testid="child">{c.id}</span>}
+            />
+          </ThemeProvider>
+        </MemoryRouter>,
+      );
+    });
+    // Toggle button should show step count
+    expect(summaryBtn()?.textContent).toContain("2 steps");
+    // Timeline should not be visible when collapsed
+    expect(container.querySelector('[data-testid="task-chat-turn-timeline"]')).toBeNull();
+    // Final response bubble should be visible
+    expect(container.querySelector('[data-testid="task-chat-final-response"]')?.textContent).toContain("Answer ready");
+
+    // Clicking the toggle button should expand the timeline
+    flushSync(() => summaryBtn()!.click());
+    expect(container.querySelector('[data-testid="task-chat-turn-timeline"]')).not.toBeNull();
+    expect(container.querySelectorAll('[data-testid="child"]').length).toBe(2);
+  });
 });

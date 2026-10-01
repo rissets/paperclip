@@ -7845,7 +7845,6 @@ export function issueService(db: Db) {
         visibleIssueCondition(),
       ];
       if (!filters?.q?.trim()) {
-        conditions.push(isNull(issues.conversationAgentId));
         if (!filters?.touchedByUserId && !filters?.unreadForUserId && !filters?.inboxArchivedByUserId) {
           conditions.push(nonIdleSlackIssueCondition());
         }
@@ -8179,7 +8178,6 @@ export function issueService(db: Db) {
 
       const conditions = [eq(issues.companyId, companyId), visibleIssueCondition()];
       if (!filters?.q?.trim()) {
-        conditions.push(isNull(issues.conversationAgentId));
         if (!filters?.touchedByUserId && !filters?.unreadForUserId && !filters?.inboxArchivedByUserId) {
           conditions.push(nonIdleSlackIssueCondition());
         }
@@ -9699,7 +9697,11 @@ export function issueService(db: Db) {
 
     getConversation: async (companyId: string, agentId: string, userId: string) => db.select().from(issues).where(and(
       eq(issues.companyId, companyId), eq(issues.conversationAgentId, agentId), eq(issues.conversationUserId, userId),
-    )).then((rows) => rows[0] ?? null),
+    )).orderBy(desc(issues.updatedAt)).then((rows) => rows[0] ?? null),
+
+    listConversations: async (companyId: string, agentId: string, userId: string) => db.select().from(issues).where(and(
+      eq(issues.companyId, companyId), eq(issues.conversationAgentId, agentId), eq(issues.conversationUserId, userId),
+    )).orderBy(desc(issues.updatedAt)),
 
     create: async (
       companyId: string,
@@ -9750,7 +9752,7 @@ export function issueService(db: Db) {
       }
       const persist = async (tx: DbTransaction) => {
         await assertExecutionTaskParent(tx as unknown as Db, companyId, issueData.parentId);
-        if (issueData.conversationAgentId && issueData.conversationUserId) {
+        if (issueData.conversationAgentId && issueData.conversationUserId && allowDuplicate !== true) {
           const identity = `conversation:${companyId}:${issueData.conversationAgentId}:${issueData.conversationUserId}`;
           await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${identity}, 0))`);
           const [existing] = await tx.select().from(issues).where(and(eq(issues.companyId, companyId),

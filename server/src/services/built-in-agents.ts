@@ -407,27 +407,8 @@ const FALLBACK_KNOWLEDGE_AGENT_INSTRUCTIONS = [
   "",
 ].join("\n");
 
-const FALLBACK_HOMSEO_INSTRUCTIONS = [
-  "# Homseo",
-  "",
-  "You are Homseo, Chief of Staff & Main Enterprise Agent Orchestrator for Paperclip.",
-  "Your dedicated mission is to coordinate enterprise agents, route user inquiries dynamically via TypeSafe Jev System One, and synthesize cross-domain responses.",
-  "",
-  "## Primary Capabilities & Responsibilities",
-  "1. **Semantic Intent Routing**: Evaluate user queries against live data source semantic profiles using TypeSafe Jev System One (< 150ms latency).",
-  "2. **Specialist Delegation**: Dispatch structured data and database queries to Data Agent, and document/policy queries to Knowledge Agent.",
-  "3. **Cross-Domain Hybrid Synthesis**: Concurrently execute both specialists when inquiries span factual numbers and policy context, delivering unified executive briefs.",
-  "4. **Governance & Roster Oversight**: Ensure all company agents are aligned with company objectives and operational boundaries.",
-  "",
-  "## Invariants",
-  "- Ground all responses in verified internal data sources.",
-  "- Strictly enforce company boundaries across all data operations.",
-  "",
-].join("\n");
-
 const DATA_AGENT_INSTRUCTIONS = readBuiltInText("data-agent/AGENTS.md", FALLBACK_DATA_AGENT_INSTRUCTIONS);
 const KNOWLEDGE_AGENT_INSTRUCTIONS = readBuiltInText("knowledge-agent/AGENTS.md", FALLBACK_KNOWLEDGE_AGENT_INSTRUCTIONS);
-const HOMSEO_INSTRUCTIONS = readBuiltInText("homseo/AGENTS.md", FALLBACK_HOMSEO_INSTRUCTIONS);
 
 const DEFINITIONS = validateBuiltInAgentDefinitions([
   {
@@ -737,40 +718,6 @@ const DEFINITIONS = validateBuiltInAgentDefinitions([
       "paperclipai/paperclip/paperclip",
     ],
   },
-  {
-    key: "homseo",
-    displayName: "Homseo",
-    featureKeys: ["homseo", "orchestrator", "chief-of-staff"],
-    shortPurpose:
-      "Chief of Staff, Cross-domain enterprise orchestration, Jev System One semantic routing, external database intelligence, structured analytics, RAG knowledge synthesis.",
-    defaultInstructions: HOMSEO_INSTRUCTIONS,
-    defaultRole: "general",
-    defaultTitle: "Enterprise Orchestrator & Chief of Staff",
-    defaultIcon: "shield",
-    defaultPermissions: {
-      canCreateAgents: true,
-      canCreateSkills: true,
-    },
-    defaultStatus: "idle",
-    defaultManager: null,
-    allowedAdapterTypes: ["pi_local", "codex_local", "claude_local", "gemini_local", "opencode_local", "cursor_local", "process"],
-    defaultAdapterType: "pi_local",
-    defaultAdapterConfig: {
-      model: "rissets/neural/deepseek-v4.1-flash",
-    },
-    defaultBudgetMonthlyCents: 0,
-    defaultSkillKeys: [
-      "paperclipai/paperclip/data-sources",
-      "paperclipai/paperclip/data-sources-structured",
-      "paperclipai/paperclip/data-sources-knowledge",
-      "paperclipai/paperclip/database-integration",
-      "paperclipai/paperclip/paperclip",
-      "paperclipai/paperclip/paperclip-board",
-      "paperclipai/paperclip/paperclip-converting-plans-to-tasks",
-      "paperclipai/paperclip/paperclip-create-agent",
-      "paperclipai/paperclip/para-memory-files",
-    ],
-  },
 ]);
 
 const DEFINITIONS_BY_KEY = new Map(DEFINITIONS.map((definition) => [definition.key, definition]));
@@ -778,7 +725,6 @@ const DEFINITIONS_BY_KEY = new Map(DEFINITIONS.map((definition) => [definition.k
 // Bundled built-in agents that should be provisioned automatically when a
 // company is created (and re-ensured on startup reconcile).
 const AUTO_PROVISION_ON_COMPANY_CREATE_KEYS = new Set<string>([
-  "homseo",
   "structured-ingestion",
   "knowledge-ingestion",
   "database-ingestion",
@@ -1920,7 +1866,6 @@ export function builtInAgentService(db: Db) {
     if (definition.key === "knowledge-ingestion" && (candNorm === "knowledgeingestionagent" || candNorm === "knowledgeingestion")) return true;
     if (definition.key === "data-agent" && (candNorm === "dataagent" || candNorm === "data")) return true;
     if (definition.key === "knowledge-agent" && (candNorm === "knowledgeagent" || candNorm === "knowledge")) return true;
-    if (definition.key === "homseo" && candNorm === "homseo") return true;
     return false;
   }
 

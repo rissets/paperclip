@@ -74,6 +74,7 @@ interface TaskChatThreadViewProps {
   scroll?: boolean;
   attachments?: IssueAttachment[];
   onOpenSkill?: (skillId: string, name: string) => void;
+  conversationMode?: boolean;
 }
 
 function renderItem(
@@ -95,6 +96,7 @@ function renderItem(
   retryFailedRunId?: string | null,
   attachments: IssueAttachment[] = [],
   onOpenSkill?: (skillId: string, name: string) => void,
+  conversationMode = false,
 ) {
   switch (item.kind) {
     case "project_created": return <TaskChatProjectCreatedCard item={item} />;
@@ -121,6 +123,7 @@ function renderItem(
             attachedTurnItem.standaloneHeader ? undefined : item.timestamp
           }
           leading={attachedTurnItem.standaloneHeader ? undefined : actions}
+          conversationMode={conversationMode}
           renderChild={(child) =>
             renderItem(
               child,
@@ -138,6 +141,7 @@ function renderItem(
               undefined,
               attachments,
               onOpenSkill,
+              conversationMode,
             )
           }
         />
@@ -158,7 +162,7 @@ function renderItem(
           queuedAction={renderQueuedAction?.(item)}
           beforeTurn={item.attachedTurn?.standaloneHeader ? turn : undefined}
           attachedTurn={item.attachedTurn?.standaloneHeader ? undefined : turn}
-          hideAgentIdentity={Boolean(item.attachedTurn?.standaloneHeader)}
+          hideAgentIdentity={Boolean(item.attachedTurn?.standaloneHeader && !conversationMode)}
           onTryAgainNoLiveExecutionPath={onTryAgainNoLiveExecutionPath}
           tryAgainNoLiveExecutionPathPending={
             tryAgainNoLiveExecutionPathPending
@@ -205,7 +209,7 @@ function renderItem(
       // same compact activity treatment. Keeping this decision at the common
       // renderer boundary also gives old persisted runs the current taxonomy,
       // alignment, one-line targets, and collapsed-by-default behavior.
-      return <TaskChatRunnerActivityGroup item={item} />;
+      return <TaskChatRunnerActivityGroup item={item} conversationMode={conversationMode} />;
     case "interaction":
       return renderInteraction ? renderInteraction(item) : null;
     case "plan_document":
@@ -225,6 +229,7 @@ function renderItem(
       return (
         <TaskChatTurn
           item={item}
+          conversationMode={conversationMode}
           renderChild={(child) =>
             renderItem(
               child,
@@ -242,6 +247,7 @@ function renderItem(
               undefined,
               attachments,
               onOpenSkill,
+              conversationMode,
             )
           }
         />
@@ -308,6 +314,7 @@ export function TaskChatThreadView({
   scroll = true,
   attachments = EMPTY_ATTACHMENTS,
   onOpenSkill,
+  conversationMode = false,
 }: TaskChatThreadViewProps) {
   const streamlined = useStreamlinedTaskChatPresentation();
   const retryableMarkerId =
@@ -344,6 +351,7 @@ export function TaskChatThreadView({
               retryFailedRunId,
               attachments,
               onOpenSkill,
+              conversationMode,
             ),
           }))
           .filter((entry) => entry.content !== null)
@@ -402,6 +410,8 @@ export function TaskChatThreadView({
                   onRetryFailedRun,
                   retryFailedRunId,
                   attachments,
+                  onOpenSkill,
+                  conversationMode,
                 )}
               </div>
             ))}
@@ -412,12 +422,15 @@ export function TaskChatThreadView({
     renderInteraction, renderBrief, renderMessageActions, renderQueuedAction,
     onTryAgainNoLiveExecutionPath, tryAgainNoLiveExecutionPathPending,
     retryableMarkerId, onRetryFailedRun, retryFailedRunId, attachments, onOpenSkill,
+    conversationMode,
   ]);
   const body = (
     <div
       className={cn(
-        "paperclip-mobile-thread mx-auto flex w-full max-w-(--tc-shell-max-w) flex-col px-1 py-3 md:px-4 md:py-4",
-        streamlined ? "md:px-0" : "gap-5",
+        "paperclip-mobile-thread mx-auto flex w-full max-w-(--tc-shell-max-w) flex-col",
+        conversationMode
+          ? "px-4 py-4 md:px-8 md:py-6 gap-4 md:gap-5"
+          : cn("px-1 py-3 md:px-4 md:py-4", streamlined ? "md:px-0" : "gap-5"),
         className,
       )}
     >

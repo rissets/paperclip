@@ -491,6 +491,13 @@ export async function deliverConversationComments(
         issue.id,
       )) {
         await resumeConversationForReset(db, comment);
+        const [priorAgentComment] = await tx.select({ id: issueComments.id }).from(issueComments).where(and(
+          eq(issueComments.companyId, issue.companyId),
+          eq(issueComments.issueId, issue.id),
+          isNull(issueComments.deletedAt),
+          eq(issueComments.authorType, "agent"),
+        )).limit(1);
+        const forceFresh = !priorAgentComment || isConversationReset(comment.body);
         await enqueue(issue.conversationAgentId!, {
           source: "on_demand",
           triggerDetail: "manual",
@@ -506,6 +513,7 @@ export async function deliverConversationComments(
             wakeCommentId: comment.id,
             wakeCommentIds: [comment.id],
             source: "issue.comment",
+            ...(forceFresh ? { forceFreshSession: true } : {}),
           },
         });
       }

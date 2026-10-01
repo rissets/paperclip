@@ -1,94 +1,499 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  Bot,
+  Check,
+  ChevronDown,
+  MessageSquare,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Plus,
+  Search,
+} from "lucide-react";
 import { agentChatsApi } from "@/api/agentChats";
 import { agentsApi } from "@/api/agents";
 import { authApi } from "@/api/auth";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { useCompany } from "@/context/CompanyContext";
 import { useAgentChatEnabled } from "@/hooks/useAgentChatEnabled";
-import { recordAgentChatVisit } from "@/lib/recent-agent-chats";
 import { queryKeys } from "@/lib/queryKeys";
-import { useParams } from "@/lib/router";
-import { agentRouteRef } from "@/lib/utils";
+import { recordAgentChatVisit } from "@/lib/recent-agent-chats";
+import { useNavigate, useParams, useSearchParams } from "@/lib/router";
+import { deriveInitials } from "@/components/Identity";
+import { agentRouteRef, cn } from "@/lib/utils";
 import { TaskDetailSurface } from "./IssueDetail";
-import type { Issue } from "@paperclipai/shared";
+import type { Agent, Issue } from "@paperclipai/shared";
+
+type EnrichedRecentChat = Issue & {
+  latestSnippet?: string | null;
+  lastActivityAt?: string | Date | null;
+};
 
 export function AgentChat() {
   const { agentRef = "" } = useParams<{ agentRef: string }>();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeChatIdFromUrl = searchParams.get("chatId");
   const { selectedCompanyId } = useCompany();
   const { enabled, loaded } = useAgentChatEnabled();
-  const client = useQueryClient();
-  const agents = useQuery({
+  const queryClient = useQueryClient();
+  const navigate = useNavigate();
+
+  const [searchQuery, setSearchQuery] = useState("");
+  const [isCreatingChat, setIsCreatingChat] = useState(false);
+
+  // Resizable & minimizable sidebar state
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    try {
+      const saved = localStorage.getItem("paperclip:agent-chat-sidebar-width");
+      if (saved) {
+        const val = Number(saved);
+        if (!isNaN(val) && val >= 200 && val <= 520) return val;
+      }
+    } catch {}
+    return 280;
+  });
+
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem("paperclip:agent-chat-sidebar-collapsed") === "true";
+    } catch {
+      return false;
+    }
+  });
+
+  const isResizingRef = useRef(false);
+  const dragStartXRef = useRef(0);
+  const dragStartWidthRef = useRef(280);
+
+  const handleSidebarResizeStart = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      isResizingRef.current = true;
+      dragStartXRef.current = e.clientX;
+      dragStartWidthRef.current = sidebarWidth;
+
+      const onMouseMove = (moveEvent: MouseEvent) => {
+        if (!isResizingRef.current) return;
+        const dx = moveEvent.clientX - dragStartXRef.current;
+        const newWidth = Math.min(Math.max(dragStartWidthRef.current + dx, 200), 520);
+        setSidebarWidth(newWidth);
+      };
+
+      const onMouseUp = () => {
+        if (!isResizingRef.current) return;
+        isResizingRef.current = false;
+        window.removeEventListener("mousemove", onMouseMove);
+        window.removeEventListener("mouseup", onMouseUp);
+        setSidebarWidth((latest) => {
+          try {
+            localStorage.setItem("paperclip:agent-chat-sidebar-width", String(latest));
+          } catch {}
+          return latest;
+        });
+      };
+
+      window.addEventListener("mousemove", onMouseMove);
+      window.addEventListener("mouseup", onMouseUp);
+    },
+    [sidebarWidth],
+  );
+
+  const toggleSidebarCollapse = useCallback(() => {
+    setIsSidebarCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("paperclip:agent-chat-sidebar-collapsed", String(next));
+      } catch {}
+      return next;
+    });
+  }, []);
+
+  // 1. Fetch Agents List
+  const agentsQuery = useQuery({
     queryKey: queryKeys.agents.list(selectedCompanyId!),
     queryFn: () => agentsApi.list(selectedCompanyId!),
     enabled: !!selectedCompanyId,
   });
-  const session = useQuery({
+  const agents = agentsQuery.data ?? [];
+
+  // 2. Fetch Session Info
+  const sessionQuery = useQuery({
     queryKey: queryKeys.auth.session,
     queryFn: () => authApi.getSession(),
   });
   const userId =
-    session.data?.user?.id ?? session.data?.session?.userId ?? null;
-  const agent = agents.data?.find(
-    (item) => item.id === agentRef || agentRouteRef(item) === agentRef,
-  );
-  const chatKey = queryKeys.agentChats.detail(selectedCompanyId, userId, agent?.id);
-  const chat = useQuery({
-    queryKey: chatKey,
-    queryFn: () => agentChatsApi.get(selectedCompanyId!, agent!.id),
-    enabled: enabled && !!agent && session.isFetched,
-  });
-  const creating = useRef<Promise<Issue> | null>(null);
+    sessionQuery.data?.user?.id ?? sessionQuery.data?.session?.userId ?? null;
+
+  // 3. Resolve Current Active Agent
+  const currentAgent: Agent | null = useMemo(() => {
+    if (!agents.length) return null;
+    return (
+      agents.find(
+        (a) => a.id === agentRef || agentRouteRef(a) === agentRef,
+      ) ?? null
+    );
+  }, [agents, agentRef]);
+
+  // Record visit
   useEffect(() => {
-    creating.current = null;
-  }, [selectedCompanyId, userId, agent?.id]);
-  useEffect(() => {
-    if (enabled && agent && session.isFetched)
-      recordAgentChatVisit(agent.companyId, userId, agent.id);
-  }, [enabled, agent?.id, agent?.companyId, userId, session.isFetched]);
-  const ensureIssue = useCallback(async () => {
-    if (!agent || !selectedCompanyId) throw new Error("Agent not found");
-    if (chat.data) return chat.data;
-    const promise = (creating.current ??= agentChatsApi.ensure(
-      selectedCompanyId,
-      agent.id,
-    ));
-    try {
-      const issue = await promise;
-      client.setQueryData(queryKeys.issues.detail(issue.id), issue);
-      client.setQueryData(chatKey, issue);
-      return issue;
-    } catch (error) {
-      creating.current = null;
-      throw error;
+    if (enabled && currentAgent && selectedCompanyId) {
+      recordAgentChatVisit(selectedCompanyId, userId, currentAgent.id);
     }
-  }, [agent, selectedCompanyId, chat.data, client, userId]);
-  if (!loaded || agents.isPending || session.isPending)
-    return (
-      <p className="text-sm text-muted-foreground">Loading conversation…</p>
+  }, [enabled, currentAgent, selectedCompanyId, userId]);
+
+  // 4. Fetch Recents / History list
+  const recentsQueryKey = useMemo(
+    () => queryKeys.agentChats.recents(selectedCompanyId, currentAgent?.id),
+    [selectedCompanyId, currentAgent?.id],
+  );
+
+  const { data: rawRecents = [], isLoading: recentsLoading } = useQuery<EnrichedRecentChat[]>({
+    queryKey: recentsQueryKey,
+    queryFn: () =>
+      currentAgent && selectedCompanyId
+        ? (agentChatsApi.listRecents(selectedCompanyId, currentAgent.id) as Promise<EnrichedRecentChat[]>)
+        : Promise.resolve([]),
+    enabled: !!selectedCompanyId && !!currentAgent,
+  });
+
+  const recentChats = useMemo(() => {
+    return Array.isArray(rawRecents) ? rawRecents : [];
+  }, [rawRecents]);
+
+  // Active chat ID resolution
+  const activeChatId = useMemo(() => {
+    if (activeChatIdFromUrl) return activeChatIdFromUrl;
+    const matchingAgentChat = recentChats.find(
+      (c) => c.conversationAgentId === currentAgent?.id,
     );
-  if (!enabled && !chat.data)
-    return (
-      <p className="text-sm text-muted-foreground">
-        Agent Chat is disabled. Enable it in Experimental settings. Existing
-        history remains available through task links.
-      </p>
+    return matchingAgentChat?.id ?? recentChats[0]?.id ?? null;
+  }, [activeChatIdFromUrl, recentChats, currentAgent?.id]);
+
+  // 5. Fetch Active Chat Detail
+  const activeChatQueryKey = useMemo(
+    () => ["agent-chats", "detail", selectedCompanyId, currentAgent?.id, activeChatId],
+    [selectedCompanyId, currentAgent?.id, activeChatId],
+  );
+
+  const { data: activeIssue, isLoading: activeIssueLoading } = useQuery({
+    queryKey: activeChatQueryKey,
+    queryFn: () =>
+      currentAgent && selectedCompanyId
+        ? agentChatsApi.get(selectedCompanyId, currentAgent.id, activeChatId)
+        : Promise.resolve(null),
+    enabled: !!selectedCompanyId && !!currentAgent,
+  });
+
+  // Ensure Issue handler
+  const ensureIssue = useCallback(async () => {
+    if (activeIssue) return activeIssue;
+    if (!currentAgent || !selectedCompanyId) throw new Error("Agent not found");
+    const fresh = await agentChatsApi.createFresh(selectedCompanyId, currentAgent.id);
+    setSearchParams((params) => {
+      params.set("chatId", fresh.id);
+      return params;
+    });
+    void queryClient.invalidateQueries({ queryKey: recentsQueryKey });
+    return fresh;
+  }, [activeIssue, currentAgent, selectedCompanyId, setSearchParams, queryClient, recentsQueryKey]);
+
+  // 6. Mutation: Start New Chat
+  const handleNewChat = useCallback(async () => {
+    if (!selectedCompanyId || !currentAgent || isCreatingChat) return;
+    setIsCreatingChat(true);
+    try {
+      const fresh = await agentChatsApi.createFresh(selectedCompanyId, currentAgent.id);
+      setSearchParams((params) => {
+        params.set("chatId", fresh.id);
+        return params;
+      });
+      queryClient.setQueryData(
+        ["agent-chats", "detail", selectedCompanyId, currentAgent.id, fresh.id],
+        fresh,
+      );
+      void queryClient.invalidateQueries({ queryKey: recentsQueryKey });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.issues.list(selectedCompanyId) });
+    } catch (err) {
+      console.error("Failed to create new chat:", err);
+    } finally {
+      setIsCreatingChat(false);
+    }
+  }, [selectedCompanyId, currentAgent, isCreatingChat, setSearchParams, queryClient, recentsQueryKey]);
+
+  // Filtered recents by search query
+  const filteredRecents = useMemo(() => {
+    if (!searchQuery.trim()) return recentChats;
+    const q = searchQuery.toLowerCase();
+    return recentChats.filter(
+      (c) =>
+        c.title?.toLowerCase().includes(q) ||
+        c.latestSnippet?.toLowerCase().includes(q) ||
+        c.identifier?.toLowerCase().includes(q),
     );
-  if (agents.error || chat.error)
+  }, [recentChats, searchQuery]);
+
+  if (!loaded || agentsQuery.isPending || sessionQuery.isPending) {
     return (
-      <p className="text-sm text-destructive">
-        {(agents.error ?? chat.error)?.message}
-      </p>
+      <div className="flex h-full items-center justify-center p-8">
+        <p className="text-xs text-muted-foreground animate-pulse">Loading conversation…</p>
+      </div>
     );
-  if (!agent)
-    return <p className="text-sm text-destructive">Agent not found.</p>;
-  if (chat.isPending)
+  }
+
+  if (!enabled && !activeIssue) {
     return (
-      <p className="text-sm text-muted-foreground">Loading conversation…</p>
+      <div className="flex h-full items-center justify-center p-8 text-center max-w-md mx-auto">
+        <p className="text-xs text-muted-foreground">
+          Agent Chat is disabled. Enable it in Experimental settings. Existing
+          history remains available through task links.
+        </p>
+      </div>
     );
+  }
+
+  if (agentsQuery.error) {
+    return (
+      <div className="flex h-full items-center justify-center p-8">
+        <p className="text-xs text-destructive">{agentsQuery.error.message}</p>
+      </div>
+    );
+  }
+
+  if (!currentAgent) {
+    return (
+      <div className="flex h-full items-center justify-center p-8">
+        <p className="text-xs text-destructive">Agent not found.</p>
+      </div>
+    );
+  }
+
   return (
-    <TaskDetailSurface
-      key={`${agent.id}:${userId}`}
-      conversation={{ agent, issue: chat.data ?? null, ensureIssue }}
-    />
+    <div className="flex h-full w-full overflow-hidden bg-background">
+      {/* ─────────────────────────────────────────────────────────────
+          LEFT SIDEBAR: Chat History & New Chat
+      ───────────────────────────────────────────────────────────── */}
+      <aside
+        style={{ width: isSidebarCollapsed ? 0 : `${sidebarWidth}px` }}
+        className={cn(
+          "shrink-0 border-r border-border bg-card/40 flex flex-col h-full select-none relative transition-[width] duration-150 ease-out",
+          isSidebarCollapsed && "overflow-hidden border-r-0 opacity-0 pointer-events-none",
+        )}
+      >
+        {/* Resize Handle on Right Border */}
+        {!isSidebarCollapsed && (
+          <div
+            onMouseDown={handleSidebarResizeStart}
+            className="absolute top-0 right-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30 transition-colors z-20"
+            title="Drag to resize sidebar"
+          />
+        )}
+
+        {/* Top Header: Current Agent & Switcher & Collapse */}
+        <div className="flex items-center justify-between border-b border-border p-3 shrink-0 gap-1.5">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                className="flex items-center gap-2 hover:bg-accent/50 p-1.5 -m-1.5 rounded-md transition-colors text-left min-w-0 flex-1"
+              >
+                <div className="relative shrink-0">
+                  <Avatar className="size-6 border border-border">
+                    <AvatarFallback className="bg-primary/10 text-primary font-semibold text-xs">
+                      {deriveInitials(currentAgent.name)}
+                    </AvatarFallback>
+                  </Avatar>
+                  <span className="absolute -bottom-0.5 -right-0.5 size-2 rounded-full bg-emerald-500 ring-1 ring-background" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <span className="truncate font-semibold text-xs text-foreground block">
+                    {currentAgent.name}
+                  </span>
+                  <span className="truncate text-xs text-muted-foreground block">
+                    {currentAgent.role ?? "agent"}
+                  </span>
+                </div>
+                <ChevronDown className="size-3 text-muted-foreground shrink-0 ml-1" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-56">
+              <DropdownMenuLabel className="text-xs">Switch Agent</DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              {agents.map((a) => (
+                <DropdownMenuItem
+                  key={a.id}
+                  onClick={() => navigate(`/chats/${encodeURIComponent(agentRouteRef(a))}`)}
+                  className="flex items-center justify-between text-xs"
+                >
+                  <span>{a.name}</span>
+                  {a.id === currentAgent.id && <Check className="size-3.5 text-primary" />}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+
+          <div className="flex items-center gap-1 shrink-0">
+            {/* New Chat Button */}
+            <Button
+              variant="outline"
+              size="icon-xs"
+              onClick={handleNewChat}
+              disabled={isCreatingChat}
+              title="New Chat"
+              className="shrink-0"
+            >
+              <Plus className="size-3.5" />
+            </Button>
+
+            {/* Minimize / Collapse Sidebar Button */}
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              onClick={toggleSidebarCollapse}
+              title="Minimize sidebar"
+              aria-label="Minimize sidebar"
+              className="text-muted-foreground hover:text-foreground shrink-0"
+            >
+              <PanelLeftClose className="size-3.5" />
+            </Button>
+          </div>
+        </div>
+
+        {/* Section Title with New Chat Button */}
+        <div className="flex items-center justify-between px-3 pt-3 pb-1 shrink-0">
+          <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            Chat
+          </span>
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            onClick={handleNewChat}
+            disabled={isCreatingChat}
+            title="New Chat"
+          >
+            <Plus className="size-4" />
+          </Button>
+        </div>
+
+        {/* Search Filter */}
+        {recentChats.length > 3 && (
+          <div className="px-3 py-1.5 shrink-0">
+            <div className="relative flex items-center">
+              <Search className="absolute left-2.5 size-3.5 text-muted-foreground pointer-events-none" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search chats…"
+                className="w-full rounded-md border border-input bg-background/50 pl-8 pr-2.5 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-1 focus:ring-ring"
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Scrollable Conversation List */}
+        <div className="flex-1 overflow-y-auto p-2 space-y-1">
+          {recentsLoading && recentChats.length === 0 ? (
+            <div className="p-4 text-center">
+              <p className="text-xs text-muted-foreground animate-pulse">Loading history…</p>
+            </div>
+          ) : filteredRecents.length === 0 ? (
+            <div className="p-4 text-center">
+              <p className="text-xs text-muted-foreground">No conversations found</p>
+            </div>
+          ) : (
+            filteredRecents.map((chat) => {
+              const isActive = chat.id === activeChatId;
+              const chatAgent = agents.find((a) => a.id === chat.conversationAgentId) ?? currentAgent;
+              const snippet = chat.latestSnippet ?? "No messages yet";
+              const timeDate = chat.lastActivityAt ? new Date(chat.lastActivityAt) : new Date(chat.createdAt);
+              const dateLabel = timeDate.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+              return (
+                <button
+                  key={chat.id}
+                  type="button"
+                  onClick={() => {
+                    setSearchParams((params) => {
+                      params.set("chatId", chat.id);
+                      return params;
+                    });
+                  }}
+                  className={cn(
+                    "flex w-full items-start gap-2.5 rounded-lg p-2.5 text-left transition-colors text-xs",
+                    isActive
+                      ? "bg-accent text-accent-foreground font-medium shadow-xs"
+                      : "text-muted-foreground hover:bg-accent/40 hover:text-foreground",
+                  )}
+                >
+                  <Avatar className="size-7 shrink-0 mt-0.5 border border-border/60">
+                    <AvatarFallback className="bg-primary/10 text-primary font-medium text-xs">
+                      {deriveInitials(chatAgent.name)}
+                    </AvatarFallback>
+                  </Avatar>
+
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between gap-1 mb-0.5">
+                      <span className="truncate font-medium text-foreground max-w-36">
+                        {chat.title}
+                      </span>
+                      <span className="shrink-0 text-xs text-muted-foreground/80">
+                        {dateLabel}
+                      </span>
+                    </div>
+                    <p className="truncate text-xs text-muted-foreground">
+                      <span>{snippet}</span>
+                    </p>
+                  </div>
+                </button>
+              );
+            })
+          )}
+        </div>
+      </aside>
+
+      {/* ─────────────────────────────────────────────────────────────
+          RIGHT MAIN PANEL: Native Task Surface (with Worked, seconds, tools used!)
+      ───────────────────────────────────────────────────────────── */}
+      <main className="flex flex-1 flex-col h-full min-w-0 bg-background overflow-hidden relative">
+        {/* Restore / Expand Sidebar Button when collapsed */}
+        {isSidebarCollapsed && (
+          <div className="absolute top-2.5 left-3 z-30">
+            <Button
+              variant="outline"
+              size="icon-xs"
+              onClick={toggleSidebarCollapse}
+              title="Expand sidebar"
+              aria-label="Expand sidebar"
+              className="size-7 rounded-md bg-card/90 shadow-sm backdrop-blur-sm border border-border hover:bg-accent"
+            >
+              <PanelLeftOpen className="size-3.5 text-muted-foreground hover:text-foreground" />
+            </Button>
+          </div>
+        )}
+        {activeIssueLoading && !activeIssue ? (
+          <div className="flex h-full items-center justify-center p-8">
+            <p className="text-xs text-muted-foreground animate-pulse">Loading conversation…</p>
+          </div>
+        ) : (
+          <TaskDetailSurface
+            key={activeIssue?.id ?? `${currentAgent.id}:${userId}`}
+            conversation={{
+              agent: currentAgent,
+              issue: activeIssue ?? null,
+              ensureIssue,
+            }}
+          />
+        )}
+      </main>
+    </div>
   );
 }

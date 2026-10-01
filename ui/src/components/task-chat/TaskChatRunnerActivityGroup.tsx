@@ -308,9 +308,11 @@ function ExpandedActivity({
 export function TaskChatRunnerActivityGroup({
   item,
   defaultExpanded = false,
+  conversationMode = false,
 }: {
   item: TaskChatActivityPhaseItem;
   defaultExpanded?: boolean;
+  conversationMode?: boolean;
 }) {
   const [expanded, setExpanded] = useTaskChatExpansion(
     item.id,
@@ -323,7 +325,19 @@ export function TaskChatRunnerActivityGroup({
   const latest = activities.at(-1);
   const summary = completedActivitySummary(activities);
   const SummaryIcon = summary.icon;
-  const countLabel = `${activities.length} ${activities.length === 1 ? "activity" : "activities"}`;
+  const countLabel = conversationMode
+    ? `${activities.length} ${activities.length === 1 ? "step" : "steps"}`
+    : `${activities.length} ${activities.length === 1 ? "activity" : "activities"}`;
+
+  const isInternalPrompt = Boolean(
+    item.interstitial?.text && (
+      item.interstitial.text.includes("Paperclip Resume Delta") ||
+      item.interstitial.text.includes("Paperclip Wake Payload") ||
+      item.interstitial.text.includes("You are resuming an existing Paperclip session") ||
+      item.interstitial.text.includes("This heartbeat is scoped to the issue below")
+    ),
+  );
+
   return (
     <section
       className="flex min-w-0 flex-col gap-2"
@@ -331,7 +345,7 @@ export function TaskChatRunnerActivityGroup({
       data-activity-group={item.id}
       data-expanded={expanded}
     >
-      {item.interstitial ? (
+      {item.interstitial && !isInternalPrompt && !conversationMode ? (
         <div
           className="min-w-0 text-sm text-foreground/90"
           data-testid="task-chat-phase-interstitial"

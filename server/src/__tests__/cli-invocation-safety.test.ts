@@ -336,6 +336,7 @@ const SKIP_DIRS = new Set([
   "coverage",
   ".paperclip",
   "tmp",
+  "graphify-out",
 ]);
 
 const SKIP_PATH_PREFIXES = [

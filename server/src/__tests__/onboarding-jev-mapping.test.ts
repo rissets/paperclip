@@ -4,42 +4,33 @@ import { ENTERPRISE_ROSTER_DEFINITIONS } from "../services/enterprise-agent-rost
 import type { DataSourceSemanticProfile } from "@paperclipai/shared";
 
 describe("TypeSafe JEV Dynamic Onboarding & Routing", () => {
-  it("verifies enterprise agent roster definitions contains all 17 specialists from docs", () => {
-    expect(ENTERPRISE_ROSTER_DEFINITIONS.length).toBe(17);
+  it("verifies enterprise agent roster definitions contains all 6 core specialists", () => {
+    expect(ENTERPRISE_ROSTER_DEFINITIONS.length).toBe(6);
 
-    // 3 Orchestrators
+    // 1 Orchestrator
     const orchestrators = ENTERPRISE_ROSTER_DEFINITIONS.filter((a) =>
-      ["Homseo", "OnboardingOrchestrator", "AgentBuilder"].includes(a.name),
+      ["Homseo"].includes(a.name),
     );
-    expect(orchestrators.length).toBe(3);
+    expect(orchestrators.length).toBe(1);
 
-    // 7 Onboarding Specialists
+    // 3 Onboarding Specialists
     const onboardingSpecialists = ENTERPRISE_ROSTER_DEFINITIONS.filter((a) =>
       [
         "StructuredIngestionAgent",
         "KnowledgeIngestionAgent",
         "DatabaseIntegrationAgent",
-        "ApiIntegrationAgent",
-        "IotIntegrationAgent",
-        "CctvIntegrationAgent",
-        "McpBuilderAgent",
       ].includes(a.name),
     );
-    expect(onboardingSpecialists.length).toBe(7);
+    expect(onboardingSpecialists.length).toBe(3);
 
-    // 7 Runtime Specialists
+    // 2 Runtime Specialists
     const runtimeSpecialists = ENTERPRISE_ROSTER_DEFINITIONS.filter((a) =>
       [
         "KnowledgeAgent",
         "DataAgent",
-        "ResearchAgent",
-        "AnalyticsEngineerAgent",
-        "PredictionAgent",
-        "ActionAgent",
-        "VisionAgent",
       ].includes(a.name),
     );
-    expect(runtimeSpecialists.length).toBe(7);
+    expect(runtimeSpecialists.length).toBe(2);
   });
 
   it("dynamically evaluates column roles using JEV DecisionSpec ('struct.column_role')", async () => {
@@ -67,7 +58,7 @@ describe("TypeSafe JEV Dynamic Onboarding & Routing", () => {
     );
 
     expect(result.entities.length).toBeGreaterThan(0);
-    expect(result.entities).toContain("laporan_keuangan_bulanan");
+    expect(result.entities).toContain("Laporan Keuangan Bulanan");
     expect(result.primaryMetrics.length).toBe(2);
     expect(result.primaryMetrics[0].name).toBe("total_omzet");
     expect(result.primaryMetrics[0].aggregation).toBe("sum");

@@ -171,7 +171,9 @@ describeEmbeddedPostgres("built-in agents", () => {
     const definitions = listBuiltInAgentDefinitions();
     expect(definitions.map((definition) => definition.key).sort()).toEqual([
       "briefs",
+      "data-agent",
       "database-ingestion",
+      "knowledge-agent",
       "knowledge-ingestion",
       "learning",
       "reflection-coach",

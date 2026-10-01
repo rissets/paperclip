@@ -17263,6 +17263,102 @@ export function issueRoutes(
     res.json(bundle);
   });
 
+    router.get("/companies/:companyId/chats/:agentRef/recents", async (req, res) => {
+      const companyId = req.params.companyId as string;
+      assertCompanyAccess(req, companyId);
+      if (req.actor.type !== "board" || !req.actor.userId) throw forbidden("Board user access required");
+      if (!(await instanceSettings.getExperimental()).enableAgentChat) throw notFound("Agent Chat is disabled");
+      const resolved = await agentsSvc.resolveByReference(companyId, req.params.agentRef as string);
+      if (resolved.ambiguous) throw conflict("Agent reference is ambiguous");
+      if (!resolved.agent) throw notFound("Agent not found");
+      const agent = resolved.agent;
+
+      const userChats = await db.select().from(issueRows).where(and(
+        eq(issueRows.companyId, companyId),
+        eq(issueRows.conversationUserId, req.actor.userId),
+        isNull(issueRows.hiddenAt),
+      )).orderBy(desc(issueRows.updatedAt));
+
+      const enrichedChats = await Promise.all(userChats.map(async (chat) => {
+        const [latestComment] = await db.select({
+          body: issueComments.body,
+          authorType: issueComments.authorType,
+          createdAt: issueComments.createdAt,
+        }).from(issueComments).where(and(
+          eq(issueComments.companyId, companyId),
+          eq(issueComments.issueId, chat.id),
+          isNull(issueComments.deletedAt),
+        )).orderBy(desc(issueComments.createdAt)).limit(1);
+
+        return {
+          ...chat,
+          latestSnippet: latestComment ? latestComment.body.replace(/\s+/g, " ").trim().slice(0, 90) : null,
+          lastActivityAt: latestComment?.createdAt ?? chat.updatedAt,
+        };
+      }));
+
+      res.json(enrichedChats);
+    });
+
+    router.post("/companies/:companyId/chats/:agentRef/new", async (req, res) => {
+      const companyId = req.params.companyId as string;
+      assertCompanyAccess(req, companyId);
+      if (req.actor.type !== "board" || !req.actor.userId) throw forbidden("Board user access required");
+      if (!(await instanceSettings.getExperimental()).enableAgentChat) throw notFound("Agent Chat is disabled");
+      const resolved = await agentsSvc.resolveByReference(companyId, req.params.agentRef as string);
+      if (resolved.ambiguous) throw conflict("Agent reference is ambiguous");
+      if (!resolved.agent) throw notFound("Agent not found");
+      const agent = resolved.agent;
+
+      const existingList = await db.select().from(issueRows).where(and(
+        eq(issueRows.companyId, companyId),
+        eq(issueRows.conversationAgentId, agent.id),
+        eq(issueRows.conversationUserId, req.actor.userId),
+        isNull(issueRows.hiddenAt),
+      )).orderBy(desc(issueRows.updatedAt));
+
+      if (existingList.length > 0) {
+        const latest = existingList[0];
+        const userComments = await db.select({ id: issueComments.id }).from(issueComments).where(and(
+          eq(issueComments.companyId, companyId),
+          eq(issueComments.issueId, latest.id),
+          eq(issueComments.authorType, "user"),
+          isNull(issueComments.deletedAt),
+        )).limit(1);
+
+        if (userComments.length === 0) {
+          res.json(latest);
+          return;
+        }
+      }
+
+      const issue = await svc.create(companyId, {
+        title: `Chat with ${agent.name}`,
+        assigneeAgentId: agent.id,
+        conversationAgentId: agent.id,
+        conversationUserId: req.actor.userId,
+        conversationState: "waiting",
+        status: "in_review",
+        createdByUserId: req.actor.userId,
+        allowDuplicate: true,
+      });
+
+      await logActivity(db, {
+        companyId,
+        actorType: "user",
+        actorId: req.actor.userId,
+        action: "issue.created",
+        entityType: "issue",
+        entityId: issue.id,
+        details: {
+          title: issue.title,
+          identifier: issue.identifier,
+          agentId: agent.id,
+        },
+      });
+      res.json(issue);
+    });
+
   // Resolving an unused chat is read-only. POST is used only by first send/upload.
   for (const method of ["get", "post"] as const) {
     router[method]("/companies/:companyId/chats/:agentRef", async (req, res) => {
@@ -17274,6 +17370,14 @@ export function issueRoutes(
       if (resolved.ambiguous) throw conflict("Agent reference is ambiguous");
       if (!resolved.agent) throw notFound("Agent not found");
       const agent = resolved.agent;
+      if (req.query.issueId) {
+        const specific = await svc.getById(req.query.issueId as string);
+        if (specific && specific.companyId === companyId && specific.conversationUserId === req.actor.userId) {
+          if (!(await assertIssueReadAllowed(req, res, specific))) return;
+          res.json(specific);
+          return;
+        }
+      }
       const existing = await svc.getConversation(companyId, agent.id, req.actor.userId);
       if (existing && !(await assertIssueReadAllowed(req, res, existing))) return;
       if (existing || method === "get") { res.json(existing); return; }
@@ -17322,11 +17426,33 @@ export function issueRoutes(
           const saved = await svc.addComment(issue.id, req.body.body, { userId }, {
             clientRequestId: req.body.clientRequestId, authorType: "user", attachmentIds: req.body.attachmentIds,
           }, tx);
-          if (!existing) await logActivity(tx as unknown as Db, {
-            companyId: issue.companyId, actorType: actor.actorType, actorId: actor.actorId,
-            action: "issue.comment_added", entityType: "issue", entityId: issue.id,
-            details: { commentId: saved.id, identifier: issue.identifier },
-          }, publications);
+          if (!existing) {
+            await logActivity(tx as unknown as Db, {
+              companyId: issue.companyId, actorType: actor.actorType, actorId: actor.actorId,
+              action: "issue.comment_added", entityType: "issue", entityId: issue.id,
+              details: { commentId: saved.id, identifier: issue.identifier },
+            }, publications);
+
+            if (issue.title?.startsWith("Chat with ") && req.body.body.trim() !== "/new") {
+              const newTitle = req.body.body.replace(/\s+/g, " ").trim().slice(0, 50);
+              if (newTitle) {
+                await tx.update(issueRows).set({ title: newTitle, updatedAt: new Date() }).where(eq(issueRows.id, issue.id));
+                await logActivity(tx as unknown as Db, {
+                  companyId: issue.companyId,
+                  actorType: actor.actorType,
+                  actorId: actor.actorId,
+                  action: "issue.updated",
+                  entityType: "issue",
+                  entityId: issue.id,
+                  details: {
+                    title: newTitle,
+                    previousTitle: issue.title,
+                    identifier: issue.identifier,
+                  },
+                }, publications);
+              }
+            }
+          }
           return saved;
         });
         for (const publication of publications) publishActivity(publication);

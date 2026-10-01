@@ -1,0 +1,2 @@
+DROP INDEX "issues_conversation_identity_idx";--> statement-breakpoint
+CREATE INDEX "issues_conversation_identity_idx" ON "issues" USING btree ("company_id","conversation_agent_id","conversation_user_id");

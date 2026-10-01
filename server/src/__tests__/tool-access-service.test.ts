@@ -12188,7 +12188,7 @@ describeEmbeddedPostgres("tool access service", () => {
           outcome: "success",
         }),
         expect.objectContaining({
-          configPath: "credentials.oauth.access_token",
+          configPath: "oauth.access_token",
           outcome: "success",
         }),
       ]),

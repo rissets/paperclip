@@ -104,9 +104,11 @@ describeEmbeddedPostgres("companyService", () => {
     // the Reflection Coach and Summarizer remain opt-in.
     const agentRows = await db.select().from(agents).where(eq(agents.companyId, created.id));
     const builtInRows = agentRows.filter((row) => readBuiltInAgentMarker(row.metadata));
-    expect(builtInRows).toHaveLength(3);
+    expect(builtInRows).toHaveLength(5);
     expect(builtInRows.map((r) => readBuiltInAgentMarker(r.metadata)?.key).sort()).toEqual([
+      "data-agent",
       "database-ingestion",
+      "knowledge-agent",
       "knowledge-ingestion",
       "structured-ingestion",
     ]);
@@ -116,7 +118,7 @@ describeEmbeddedPostgres("companyService", () => {
     // Startup reconcile keeps the provisioned built-ins intact.
     await reconcileBuiltInAgentsOnStartup(db);
     const afterReconcileRows = await db.select().from(agents).where(eq(agents.companyId, created.id));
-    expect(afterReconcileRows.filter((row) => readBuiltInAgentMarker(row.metadata))).toHaveLength(3);
+    expect(afterReconcileRows.filter((row) => readBuiltInAgentMarker(row.metadata))).toHaveLength(5);
 
     // The Reflection Coach remains available to enable on demand, and enabling
     // it materializes its bundled skill + paused routine.

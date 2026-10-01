@@ -1113,10 +1113,9 @@ export class DataSourcesService {
       const marker = readBuiltInAgentMarker(agent.metadata);
       const isKnowledge = marker?.key === "knowledge-agent" || agent.name.toLowerCase().includes("knowledge");
       const isData = marker?.key === "data-agent" || agent.name.toLowerCase().includes("data agent");
-      const isHomseo = marker?.key === "homseo" || agent.name.toLowerCase().includes("homseo");
       const isIngestion = agent.name.toLowerCase().includes("ingestion");
 
-      if (isKnowledge || isData || isHomseo || isIngestion) {
+      if (isKnowledge || isData || isIngestion) {
         mode = "all";
       } else {
         mode = "none";

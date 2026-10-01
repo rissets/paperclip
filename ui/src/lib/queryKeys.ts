@@ -2,6 +2,8 @@ export const queryKeys = {
   agentChats: {
     detail: (companyId: string | null, userId: string | null, agentId: string | undefined) =>
       ["agent-chat", companyId, userId, agentId] as const,
+    recents: (companyId: string | null, agentId: string | undefined) =>
+      ["agent-chat-recents", companyId, agentId] as const,
   },
   companies: {
     /**

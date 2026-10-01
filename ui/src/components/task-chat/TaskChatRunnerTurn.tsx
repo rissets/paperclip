@@ -1,4 +1,5 @@
-import { useRef } from "react";
+import { useRef, useState, useMemo } from "react";
+import { ChevronRight } from "lucide-react";
 import type { ExecutionProjection } from "@paperclipai/shared";
 import { useSecondTick } from "@/hooks/useSecondTick";
 import { cn } from "@/lib/utils";
@@ -126,6 +127,7 @@ export function TaskChatRunnerTurn({
   activityUnavailable = false,
   suppressFinal = false,
   continuedAfterSteering = false,
+  conversationMode = false,
   onRuntimeRequestDecision,
 }: {
   /** Stable identity used to clear replay-latched final text for the next turn. */
@@ -143,12 +145,14 @@ export function TaskChatRunnerTurn({
   suppressFinal?: boolean;
   /** The visible tail resumes the same native run after an accepted steer. */
   continuedAfterSteering?: boolean;
+  conversationMode?: boolean;
   onRuntimeRequestDecision?: (
     item: TaskChatRuntimeRequestItem,
     decision: TaskChatRuntimeRequestDecision,
   ) => void | Promise<void>;
 }) {
   const terminal = isTerminalRunStatus(status);
+  const [workerExpanded, setWorkerExpanded] = useState(false);
   const yielded = items.some(
     (item) =>
       item.kind === "protocol" &&
@@ -201,72 +205,155 @@ export function TaskChatRunnerTurn({
     !terminal,
   );
 
+  const stepCount = useMemo(() => {
+    let count = 0;
+    for (const row of timelineRows) {
+      if (row.kind === "activity_phase") {
+        count += Math.max(1, row.items.length);
+      } else {
+        count += 1;
+      }
+    }
+    return Math.max(1, count || items.length || 1);
+  }, [timelineRows, items]);
+
   return (
     <div
       className="flex min-w-0 flex-col"
       data-testid="task-chat-runner-turn"
       data-phase={status === "queued" ? "startup" : undefined}
     >
-      <div
-        className={cn(
-          "flex min-h-8 min-w-0 items-center gap-2",
-          status === "queued" ? "pb-1" : "pb-1 pt-2",
-        )}
-        data-testid="task-chat-runner-identity-row"
-      >
-        {agentName ? (
-          <TaskChatAgentIdentity agentName={agentName} agentIcon={agentIcon} agent={agent} />
-        ) : null}
-        <RunnerTurnStatus
-          status={status}
-          startedAtMs={startedAtMs}
-          finishedAtMs={finishedAtMs}
-          continuedAfterSteering={continuedAfterSteering}
-        />
-      </div>
-      {activityUnavailable ? (
-        <div
-          className="px-1 py-1 text-xs text-muted-foreground"
-          role="status"
-          data-testid="task-chat-activity-unavailable"
-        >
-          Live runner activity is temporarily unavailable. Retrying…
-        </div>
-      ) : null}
-      {timelineRows.length > 0 ? (
-        <div
-          className="flex min-w-0 flex-col gap-2 py-1"
-          data-testid="task-chat-turn-timeline"
-        >
-          {timelineRows.map((row) => (
-            <div
-              className="min-w-0"
-              key={`${runId ?? "run"}:${row.id}`}
-              data-testid="task-chat-turn-timeline-row"
-              data-timeline-row-id={row.id}
-              data-thread-anchor={row.id}
-            >
-              {row.kind === "activity_phase" ? (
-                <TaskChatRunnerActivityGroup item={row} />
-              ) : row.kind === "plan_document" ? (
-                <TaskChatPlanPreviewCard
-                  source={{ kind: "saved", document: row.document }}
-                  testId={
-                    row.placement === "fallback"
-                      ? "task-chat-plan-preview-fallback"
-                      : "task-chat-plan-preview"
-                  }
+      {conversationMode ? (
+        <>
+          {timelineRows.length > 0 ? (
+            <div className="py-1">
+              <button
+                type="button"
+                onClick={() => setWorkerExpanded(!workerExpanded)}
+                className="flex items-center gap-1.5 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors group cursor-pointer"
+                aria-expanded={workerExpanded}
+                data-testid="task-chat-worker-toggle"
+              >
+                <ChevronRight
+                  className={cn(
+                    "size-3.5 shrink-0 transition-transform group-hover:text-foreground",
+                    workerExpanded && "rotate-90",
+                  )}
+                  aria-hidden="true"
                 />
-              ) : row.kind === "protocol" ? (
-                <TaskChatProtocolCard
-                  item={row}
-                  onRuntimeRequestDecision={onRuntimeRequestDecision}
-                />
+                <span>
+                  {stepCount} {stepCount === 1 ? "step" : "steps"}
+                </span>
+                {!terminal && !final ? (
+                  <span className="shimmer-text shimmer-text-muted ml-1">· Working…</span>
+                ) : null}
+              </button>
+              {workerExpanded ? (
+                <div
+                  className="flex min-w-0 flex-col gap-2 py-1 pl-4 border-l border-border/50"
+                  data-testid="task-chat-turn-timeline"
+                >
+                  {timelineRows.map((row) => (
+                    <div
+                      className="min-w-0"
+                      key={`${runId ?? "run"}:${row.id}`}
+                      data-testid="task-chat-turn-timeline-row"
+                      data-timeline-row-id={row.id}
+                      data-thread-anchor={row.id}
+                    >
+                      {row.kind === "activity_phase" ? (
+                        <TaskChatRunnerActivityGroup item={row} conversationMode={conversationMode} />
+                      ) : row.kind === "plan_document" ? (
+                        <TaskChatPlanPreviewCard
+                          source={{ kind: "saved", document: row.document }}
+                          testId={
+                            row.placement === "fallback"
+                              ? "task-chat-plan-preview-fallback"
+                              : "task-chat-plan-preview"
+                          }
+                        />
+                      ) : row.kind === "protocol" ? (
+                        <TaskChatProtocolCard
+                          item={row}
+                          onRuntimeRequestDecision={onRuntimeRequestDecision}
+                        />
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
               ) : null}
             </div>
-          ))}
-        </div>
-      ) : null}
+          ) : !final ? (
+            <div className="flex items-center gap-1.5 py-1 text-xs text-muted-foreground">
+              <span className="size-2 animate-pulse rounded-full bg-(--status-agent-running)" />
+              <span className="shimmer-text shimmer-text-muted">Working…</span>
+            </div>
+          ) : null}
+        </>
+      ) : (
+        <>
+          <div
+            className={cn(
+              "flex min-h-8 min-w-0 items-center gap-2",
+              status === "queued" ? "pb-1" : "pb-1 pt-2",
+            )}
+            data-testid="task-chat-runner-identity-row"
+          >
+            {agentName ? (
+              <TaskChatAgentIdentity agentName={agentName} agentIcon={agentIcon} agent={agent} />
+            ) : null}
+            <RunnerTurnStatus
+              status={status}
+              startedAtMs={startedAtMs}
+              finishedAtMs={finishedAtMs}
+              continuedAfterSteering={continuedAfterSteering}
+            />
+          </div>
+          {activityUnavailable ? (
+            <div
+              className="px-1 py-1 text-xs text-muted-foreground"
+              role="status"
+              data-testid="task-chat-activity-unavailable"
+            >
+              Live runner activity is temporarily unavailable. Retrying…
+            </div>
+          ) : null}
+          {timelineRows.length > 0 ? (
+            <div
+              className="flex min-w-0 flex-col gap-2 py-1"
+              data-testid="task-chat-turn-timeline"
+            >
+              {timelineRows.map((row) => (
+                <div
+                  className="min-w-0"
+                  key={`${runId ?? "run"}:${row.id}`}
+                  data-testid="task-chat-turn-timeline-row"
+                  data-timeline-row-id={row.id}
+                  data-thread-anchor={row.id}
+                >
+                  {row.kind === "activity_phase" ? (
+                    <TaskChatRunnerActivityGroup item={row} />
+                  ) : row.kind === "plan_document" ? (
+                    <TaskChatPlanPreviewCard
+                      source={{ kind: "saved", document: row.document }}
+                      testId={
+                        row.placement === "fallback"
+                          ? "task-chat-plan-preview-fallback"
+                          : "task-chat-plan-preview"
+                      }
+                    />
+                  ) : row.kind === "protocol" ? (
+                    <TaskChatProtocolCard
+                      item={row}
+                      onRuntimeRequestDecision={onRuntimeRequestDecision}
+                    />
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </>
+      )}
       {final ? (
         <div
           className="w-full"
@@ -275,12 +362,12 @@ export function TaskChatRunnerTurn({
           <TaskChatBubble
             item={{ ...final, authorName: agentName ?? undefined, agentIcon, agent, timestamp: final.timestamp ?? formatTaskChatTimestamp(final.atMs) }}
             animateEntry={false}
-            hideAgentIdentity={!continuedAfterSteering}
+            hideAgentIdentity={conversationMode ? false : !continuedAfterSteering}
             actions={<TaskChatBubbleActions copyText={final.text} />}
           />
         </div>
       ) : null}
-      {!final && currentActivityItems.length === 0 ? <RunnerCurrentActivityTail status={status} /> : null}
+      {!conversationMode && !final && currentActivityItems.length === 0 ? <RunnerCurrentActivityTail status={status} /> : null}
     </div>
   );
 }

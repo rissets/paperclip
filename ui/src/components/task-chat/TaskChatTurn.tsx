@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useState, useMemo, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import { useStreamlinedTaskChatPresentation } from "./presentation-mode";
 import { Check, ChevronRight, X } from "lucide-react";
@@ -25,6 +25,7 @@ interface TaskChatTurnProps {
    * stable right edge, outside the expandable fold.
    */
   leading?: ReactNode;
+  conversationMode?: boolean;
 }
 
 /** Metric segments after the label: "38s · 3 tools · +34 −3 · 12.3k tokens". */
@@ -74,15 +75,91 @@ export function TaskChatTurn({
   renderChild,
   timestampPrefix,
   leading,
+  conversationMode = false,
 }: TaskChatTurnProps) {
   const streamlined = useStreamlinedTaskChatPresentation();
   const parentRow = !item.settled && item.liveStatus != null;
+  const [standaloneExpanded, setStandaloneExpanded] = useState(false);
+  const stepCount = useMemo(() => {
+    let count = 0;
+    for (const child of item.items) {
+      if (child.kind === "activity_phase") {
+        count += Math.max(1, child.items?.length || 1);
+      } else {
+        count += 1;
+      }
+    }
+    return Math.max(1, count || item.items.length || 1);
+  }, [item.items]);
+
   // The new Paperclip Runner task surface owns one durable chronological
   // timeline. The Worked/Stopped row is its stable header, so it stays directly
   // below the preceding human bubble and above commentary, activity phases,
   // request receipts, and plan artifacts. The classic task interface continues
   // to use the run-wide fold below.
   if (item.standaloneHeader) {
+    if (conversationMode) {
+      return (
+        <div
+          data-testid="task-chat-turn"
+          data-settled={item.settled ? "true" : "false"}
+        >
+          {item.items.length > 0 ? (
+            <div className="py-1">
+              <button
+                type="button"
+                onClick={() => setStandaloneExpanded(!standaloneExpanded)}
+                aria-expanded={standaloneExpanded}
+                className="flex items-center gap-1.5 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors group cursor-pointer"
+                data-testid="task-chat-turn-summary"
+              >
+                <ChevronRight
+                  className={cn(
+                    "size-3.5 shrink-0 transition-transform group-hover:text-foreground",
+                    standaloneExpanded && "rotate-90",
+                  )}
+                  aria-hidden="true"
+                />
+                <span>
+                  {stepCount} {stepCount === 1 ? "step" : "steps"}
+                </span>
+              </button>
+              {standaloneExpanded ? (
+                <div
+                  className="flex min-w-0 flex-col gap-2 py-1 pl-4 border-l border-border/50"
+                  data-testid="task-chat-turn-timeline"
+                >
+                  {item.items.map((child) => (
+                    <div
+                      className="min-w-0"
+                      key={child.id}
+                      data-testid="task-chat-turn-timeline-row"
+                      data-timeline-row-id={child.id}
+                      data-thread-anchor={child.id}
+                    >
+                      {renderChild(child)}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          {item.finalResponse ? (
+            <div className="w-full" data-testid="task-chat-final-response">
+              <div
+                className="break-words px-1 py-2 text-sm text-foreground"
+                data-testid="task-chat-agent-bubble"
+              >
+                <MarkdownBody softBreaks linkIssueReferences>
+                  {item.finalResponse.text}
+                </MarkdownBody>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      );
+    }
+
     return (
       <div
         data-testid="task-chat-turn"
@@ -155,7 +232,7 @@ export function TaskChatTurn({
   // Parent-row live turns and settled turns start as their one-line header;
   // only the headerless legacy live turn starts expanded.
   const [open, setOpen] = useState(
-    () => !item.settled && item.liveStatus == null,
+    () => (!conversationMode && !item.settled && item.liveStatus == null),
   );
   // Historical folds can contain thousands of tool/reasoning rows. Mount them
   // on first inspection, then retain them for closing motion and child state.
