@@ -75,6 +75,12 @@ interface TaskChatThreadViewProps {
   attachments?: IssueAttachment[];
   onOpenSkill?: (skillId: string, name: string) => void;
   conversationMode?: boolean;
+  /**
+   * Renders the `commentAnnotation` plugin slot under a settled comment bubble.
+   * The live thread binds it so interactive plugin UI (e.g. Fiber Map) renders
+   * inline in the timeline; harness fixtures omit it.
+   */
+  renderCommentAnnotation?: (item: TaskChatMessageItem) => ReactNode;
 }
 
 function renderItem(
@@ -315,6 +321,7 @@ export function TaskChatThreadView({
   attachments = EMPTY_ATTACHMENTS,
   onOpenSkill,
   conversationMode = false,
+  renderCommentAnnotation,
 }: TaskChatThreadViewProps) {
   const streamlined = useStreamlinedTaskChatPresentation();
   const retryableMarkerId =
@@ -377,6 +384,9 @@ export function TaskChatThreadView({
                 }
               >
                 {content}
+                {renderCommentAnnotation && item.kind === "message"
+                  ? renderCommentAnnotation(item)
+                  : null}
               </div>
             ))
           : items.map((item, index) => (
@@ -413,6 +423,9 @@ export function TaskChatThreadView({
                   onOpenSkill,
                   conversationMode,
                 )}
+                {renderCommentAnnotation && item.kind === "message"
+                  ? renderCommentAnnotation(item)
+                  : null}
               </div>
             ))}
       </>
@@ -422,7 +435,7 @@ export function TaskChatThreadView({
     renderInteraction, renderBrief, renderMessageActions, renderQueuedAction,
     onTryAgainNoLiveExecutionPath, tryAgainNoLiveExecutionPathPending,
     retryableMarkerId, onRetryFailedRun, retryFailedRunId, attachments, onOpenSkill,
-    conversationMode,
+    conversationMode, renderCommentAnnotation,
   ]);
   const body = (
     <div

@@ -77,6 +77,7 @@ import {
   shouldHideInteractionCard,
 } from "@/lib/issue-thread-interactions";
 import { TaskChatBubbleActions } from "@/components/task-chat/TaskChatBubbleActions";
+import { PluginSlotOutlet } from "@/plugins/slots";
 import type {
   FeedbackVoteValue,
   IssueDocument,
@@ -500,6 +501,7 @@ export function TaskChatThread(props: TaskChatThreadProps) {
     composerDisabledReason,
     emptyMessage = "No messages yet.",
     companyId,
+    projectId = null,
     linkedRuns,
     liveRuns,
     activeRun,
@@ -2538,6 +2540,37 @@ export function TaskChatThread(props: TaskChatThreadProps) {
     ],
   );
 
+  // Mount the `commentAnnotation` plugin slot under each settled comment so
+  // interactive plugin UI (e.g. Fiber Map) renders inline in the timeline.
+  const renderCommentAnnotation = useCallback(
+    (item: TaskChatMessageItem) => {
+      if (
+        !companyId ||
+        item.author === "system" ||
+        item.optimistic ||
+        item.interstitial
+      ) {
+        return null;
+      }
+      return (
+        <PluginSlotOutlet
+          slotTypes={["commentAnnotation"]}
+          entityType="comment"
+          context={{
+            companyId,
+            projectId: projectId ?? null,
+            entityId: item.id,
+            entityType: "comment",
+            parentEntityId: issueId ?? null,
+          }}
+          className="mt-2 space-y-2"
+          itemClassName="rounded-lg border border-border"
+        />
+      );
+    },
+    [companyId, projectId, issueId],
+  );
+
   const renderQueuedAction = useCallback(
     (item: TaskChatMessageItem) => {
       const runId = item.queueTargetRunId;
@@ -2876,6 +2909,7 @@ export function TaskChatThread(props: TaskChatThreadProps) {
                     renderBrief={renderBrief}
                     renderMessageActions={renderMessageActions}
                     renderQueuedAction={renderQueuedAction}
+                    renderCommentAnnotation={renderCommentAnnotation}
                     onTryAgainNoLiveExecutionPath={
                       issueStatus === "blocked" &&
                       !requiresExecutionReconciliation(

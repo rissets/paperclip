@@ -31,6 +31,7 @@ import {
   type ReactNode,
 } from "react";
 import { Link, useLocation } from "@/lib/router";
+import { PluginSlotOutlet } from "@/plugins/slots";
 import type {
   Agent,
   FeedbackDataSharingPreference,
@@ -319,6 +320,10 @@ interface IssueChatMessageContext {
    * they carry a "for {user}" attribution chip (the open cross-task write design (attribution)).
    */
   issueAssigneeAgentId?: string | null;
+  /** Plugin `commentAnnotation` slot context, forwarded from the thread props. */
+  companyId?: string | null;
+  projectId?: string | null;
+  issueId?: string | null;
   successfulRunHandoff?: SuccessfulRunHandoffState | null;
   externalReferences?: MarkdownExternalReferenceMap;
   /** Linkify `PAP-C7` case chips in comment bodies (experimental Cases flag). */
@@ -4594,6 +4599,13 @@ const IssueChatMessageRow = memo(function IssueChatMessageRow({
     <IssueChatSystemMessage message={message} />
   );
 
+  // Mount the `commentAnnotation` plugin slot directly under each real comment
+  // so interactive plugin UI (e.g. Fiber Map) renders inline in the timeline.
+  // This is the active task-chat thread; the legacy `CommentThread` is not used
+  // by the current issue surfaces.
+  const { companyId, projectId, issueId } = useContext(IssueChatCtx);
+  const commentId = issueChatMessageCommentId(message);
+
   return (
     <div
       data-testid="issue-chat-message-row"
@@ -4601,6 +4613,21 @@ const IssueChatMessageRow = memo(function IssueChatMessageRow({
       data-message-kind={kind}
     >
       {renderedMessage}
+      {commentId && companyId && !deletedAt ? (
+        <PluginSlotOutlet
+          slotTypes={["commentAnnotation"]}
+          entityType="comment"
+          context={{
+            companyId,
+            projectId: projectId ?? null,
+            entityId: commentId,
+            entityType: "comment",
+            parentEntityId: issueId ?? null,
+          }}
+          className="mt-2 space-y-2"
+          itemClassName="rounded-lg border border-border"
+        />
+      ) : null}
     </div>
   );
 }, areIssueChatMessageRowPropsEqual);
@@ -6496,6 +6523,9 @@ export function IssueChatThread({
       successfulRunHandoff: successfulRunHandoffWithLiveness,
       externalReferences,
       linkCaseReferences,
+      companyId,
+      projectId,
+      issueId,
     }),
     [
       feedbackDataSharingPreference,
@@ -6526,6 +6556,9 @@ export function IssueChatThread({
       successfulRunHandoffWithLiveness,
       externalReferences,
       linkCaseReferences,
+      companyId,
+      projectId,
+      issueId,
     ],
   );
 
