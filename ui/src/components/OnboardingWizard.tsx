@@ -140,6 +140,7 @@ import {
   Check,
   Loader2,
   ChevronDown,
+  RefreshCw,
 } from "lucide-react";
 
 type Step = 0 | 1 | 2 | 3 | 4 | 5;
@@ -236,8 +237,19 @@ function OpenAiBlossom({ className }: { className?: string }) {
   );
 }
 
+function PiMark({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="currentColor" fillRule="evenodd" aria-hidden>
+      <title>Pi</title>
+      <path clipRule="evenodd" d="M1 1h16.5v11H12v5.5H6.5V23H1V1zm5.5 5.5V12H12V6.5H6.5z" />
+      <path d="M17.5 12H23v11h-5.5V12z" />
+    </svg>
+  );
+}
+
 const MODEL_SOURCE_INLINE_MARKS: Record<string, ComponentType<{ className?: string }>> = {
   codex_local: OpenAiBlossom,
+  pi_local: PiMark,
 };
 
 /**
@@ -251,6 +263,7 @@ const MODEL_SOURCE_INLINE_MARKS: Record<string, ComponentType<{ className?: stri
 const API_KEY_ENV_KEYS: Record<string, string> = {
   claude_local: ANTHROPIC_API_KEY_ENV_KEY,
   codex_local: "OPENAI_API_KEY",
+  pi_local: "PI_API_KEY",
 };
 
 function apiKeyEnvKeyFor(adapterType: string): string {
@@ -690,6 +703,15 @@ function OnboardingWizardInner({
   const [claudeOAuthStatus, setClaudeOAuthStatus] =
     useState<ClaudeOAuthTokenStatusResponse | null>(null);
 
+  // Pi custom endpoint & imported models
+  const [piEndpoint, setPiEndpoint] = useState((saved?.piEndpoint as string) ?? "");
+  const [piModels, setPiModels] = useState<Array<{ id: string; label: string }>>(
+    (saved?.piModels as Array<{ id: string; label: string }>) ?? [],
+  );
+  const [piSyncing, setPiSyncing] = useState(false);
+  const [piSyncError, setPiSyncError] = useState<string | null>(null);
+  const [piSyncSuccess, setPiSyncSuccess] = useState<string | null>(null);
+
   // Created entity IDs — pre-populate from existing company when skipping step 1
   const [createdCompanyId, setCreatedCompanyId] = useState<string | null>(
     existingCompanyId ?? (saved?.createdCompanyId as string) ?? null
@@ -709,8 +731,10 @@ function OnboardingWizardInner({
     : savedKeys.options[0]?.id;
   const selectedApiKey = savedKeys.options.find((option) => option.id === selectedApiKeyId);
   const credentialMode = credentialModeChoice ?? (
-    (savedKeys.subscriptions.length > 0 || (adapterType === "claude_local" && savedKeys.storedLogin.data))
-      ? "subscription" : savedKeys.options.length || adapterType === "opencode_local" ? "api" : "subscription"
+    adapterType === "pi_local"
+      ? "api"
+      : (savedKeys.subscriptions.length > 0 || (adapterType === "claude_local" && savedKeys.storedLogin.data))
+        ? "subscription" : savedKeys.options.length || adapterType === "opencode_local" ? "api" : "subscription"
   );
   const [createdCompanyPrefix, setCreatedCompanyPrefix] = useState<
     string | null
@@ -904,6 +928,7 @@ function OnboardingWizardInner({
     const state = {
       step, companyName,
       agentName, agentAppearance, agentRole, adapterType, cwd, model, command, args, url,
+      piEndpoint, piModels,
       // The mode, never the key: this blob is localStorage.
       credentialMode, credentialModeChoice,
       createdCompanyId, createdCompanyPrefix, createdAgentId,
@@ -913,6 +938,7 @@ function OnboardingWizardInner({
   }, [
     effectiveOnboardingOpen, step, companyName,
     agentName, agentAppearance, agentRole, adapterType, cwd, model, command, args, url,
+    piEndpoint, piModels,
     credentialMode, credentialModeChoice,
     createdCompanyId, createdCompanyPrefix, createdAgentId,
     createdCompanyGoalId, createdProjectId, createdIssueRef,
@@ -1384,7 +1410,10 @@ function OnboardingWizardInner({
                 label: "Connect",
                 icon: "arrow",
                 disabled:
-                  !connectStepReady || (credentialMode === "api" && !apiKey.trim() && !selectedApiKey),
+                  !connectStepReady ||
+                  (adapterType === "pi_local"
+                    ? !piEndpoint.trim() || !model.trim()
+                    : credentialMode === "api" && !apiKey.trim() && !selectedApiKey),
               }
           : // Nothing is chosen on arrival, and the row is what chooses. Until
             // it has been answered the button has nothing to do.
@@ -1540,7 +1569,7 @@ function OnboardingWizardInner({
     setAdapterEnvResult(null);
     adapterEnvResultAppliedStoredLoginRef.current = false;
     setAdapterEnvError(null);
-  }, [step, adapterType, model, command, args, url, credentialMode, apiKey, selectedSavedKey, selectedApiKey?.id, savedSubscription?.id]);
+  }, [step, adapterType, model, command, args, url, credentialMode, apiKey, piEndpoint, piModels, selectedSavedKey, selectedApiKey?.id, savedSubscription?.id]);
 
   /**
    * Leaving the step puts the row back to a question.
@@ -1638,6 +1667,11 @@ function OnboardingWizardInner({
     setForceUnsetAnthropicApiKey(false);
     setUnsetAnthropicLoading(false);
     setClaudeOAuthStatus(null);
+    setPiEndpoint("");
+    setPiModels([]);
+    setPiSyncing(false);
+    setPiSyncError(null);
+    setPiSyncSuccess(null);
     setCreatedCompanyId(null);
     setCreatedCompanyPrefix(null);
     setCreatedAgentId(null);
@@ -1815,6 +1849,36 @@ function OnboardingWizardInner({
     }
   }
 
+  async function handleSyncPiModels() {
+    const ep = piEndpoint.trim();
+    if (!ep) {
+      setPiSyncError("Please enter a custom API endpoint first.");
+      return;
+    }
+    if (!createdCompanyId) {
+      setPiSyncError("Organization is not ready yet.");
+      return;
+    }
+    setPiSyncing(true);
+    setPiSyncError(null);
+    setPiSyncSuccess(null);
+    try {
+      const res = await agentsApi.syncPiModels(createdCompanyId, {
+        endpoint: ep,
+        apiKey: apiKey.trim() || undefined,
+      });
+      setPiModels(res.models);
+      setPiSyncSuccess(`Successfully imported ${res.models.length} model(s).`);
+      if (res.models.length > 0 && (!model || !res.models.some((m) => m.id === model))) {
+        setModel(res.models[0].id);
+      }
+    } catch (err) {
+      setPiSyncError(err instanceof Error ? err.message : "Failed to sync models from endpoint.");
+    } finally {
+      setPiSyncing(false);
+    }
+  }
+
   function buildAdapterConfig(bindApiKey = false): Record<string, unknown> {
     const adapter = getUIAdapter(adapterType);
     const config = adapter.buildAdapterConfig({
@@ -1849,6 +1913,41 @@ function OnboardingWizardInner({
           : {};
       env.ANTHROPIC_API_KEY = { type: "plain", value: "" };
       config.env = env;
+    }
+    if (adapterType === "pi_local") {
+      const trimmedEndpoint = piEndpoint.trim();
+      const rawModel = model.trim();
+      const cleanModelId = rawModel.includes("/") ? rawModel.split("/").slice(1).join("/") : rawModel;
+      const effectiveModel = rawModel ? (rawModel.includes("/") ? rawModel : `custom/${rawModel}`) : "";
+      if (effectiveModel) {
+        config.model = effectiveModel;
+      }
+
+      if (trimmedEndpoint) {
+        const env =
+          typeof config.env === "object" && config.env !== null && !Array.isArray(config.env)
+            ? { ...(config.env as Record<string, unknown>) }
+            : {};
+
+        const modelEntries = piModels.map((m) => {
+          const id = m.id.includes("/") ? m.id.split("/").slice(1).join("/") : m.id;
+          return { id, name: m.label || id };
+        });
+        if (cleanModelId && !modelEntries.some((m) => m.id === cleanModelId)) {
+          modelEntries.unshift({ id: cleanModelId, name: cleanModelId });
+        }
+
+        const customProvider = {
+          baseUrl: trimmedEndpoint,
+          apiKey: apiKey.trim() ? "{env:PI_API_KEY}" : "",
+          api: "openai",
+          models: modelEntries.length > 0 ? modelEntries : [{ id: cleanModelId || "default", name: cleanModelId || "default" }],
+        };
+
+        env.PAPERCLIP_PI_PROVIDERS = JSON.stringify({ custom: customProvider });
+        env.PI_API_BASE_URL = trimmedEndpoint;
+        config.env = env;
+      }
     }
     // A key typed on this step is the credential the agent is being hired with,
     // so it has to reach the configuration the hire sends — and the same one the
@@ -2067,6 +2166,16 @@ function OnboardingWizardInner({
               ? "No OpenCode models discovered. Run `opencode models` and authenticate providers."
               : `Configured OpenCode model is unavailable: ${selectedModelId}`
           );
+          return;
+        }
+      }
+      if (adapterType === "pi_local") {
+        if (!piEndpoint.trim()) {
+          setError("Custom API endpoint is required for Pi.");
+          return;
+        }
+        if (!model.trim()) {
+          setError("Default model is required for Pi.");
           return;
         }
       }
@@ -2692,6 +2801,7 @@ function OnboardingWizardInner({
                         setSourcePicked(true);
                         setAdapterType(id);
                         if (id === "opencode_local") setModel(DEFAULT_OPENCODE_LOCAL_MODEL);
+                        else if (id === "pi_local") setCredentialMode("api");
                         else if (id !== "codex_local") setModel("");
                         setConnectPhase("collapsing");
                       }}
@@ -2720,7 +2830,9 @@ function OnboardingWizardInner({
                       transition={{ opacity: SOURCE_LINK_EXIT, height: MAKE_ROOM }}
                     >
                       <div className="-ml-3 mt-1">
-                        <CredentialModeLink mode={credentialMode} onChange={setCredentialMode} />
+                        {adapterType !== "pi_local" && (
+                          <CredentialModeLink mode={credentialMode} onChange={setCredentialMode} />
+                        )}
                         {savedKeys.options.length > 0 && <p className="px-3 text-sm text-muted-foreground">{savedKeys.options.length} saved API {savedKeys.options.length === 1 ? "key available" : "keys available"}.</p>}
                         {credentialMode === "subscription" && authSignalStatus === "present" && <p className="px-3 text-sm text-muted-foreground">An existing provider connection is available.</p>}
                       </div>
@@ -2768,6 +2880,133 @@ function OnboardingWizardInner({
                         <Loader2 className="size-4 animate-spin" />
                         {connectProgress}
                       </p>
+                    ) : adapterType === "pi_local" ? (
+                      <OnboardingLoginCard
+                        instruction="Configure custom API endpoint and model for Pi"
+                      >
+                        <div className="space-y-4">
+                          <div className="space-y-1.5">
+                            <Label htmlFor="pi-endpoint" className="text-xs text-muted-foreground">
+                              Custom API Endpoint
+                            </Label>
+                            <Input
+                              id="pi-endpoint"
+                              className="h-9 rounded-lg bg-background text-xs"
+                              placeholder="e.g. http://localhost:11434/v1 or https://api.openai.com/v1"
+                              value={piEndpoint}
+                              onChange={(e) => {
+                                setPiEndpoint(e.target.value);
+                                setPiSyncError(null);
+                                setPiSyncSuccess(null);
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" && piEndpoint.trim()) {
+                                  e.preventDefault();
+                                  void handleSyncPiModels();
+                                }
+                              }}
+                            />
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <Label htmlFor="pi-api-key" className="text-xs text-muted-foreground">
+                              API Token / Key (Optional for local endpoints)
+                            </Label>
+                            <Input
+                              id="pi-api-key"
+                              type="password"
+                              className="h-9 rounded-lg bg-background text-xs"
+                              placeholder="Enter API token / key"
+                              value={apiKey}
+                              onChange={(e) => {
+                                setApiKey(e.target.value);
+                                setPiSyncError(null);
+                                setPiSyncSuccess(null);
+                              }}
+                            />
+                          </div>
+
+                          <div className="flex flex-col gap-2">
+                            <div className="flex items-center gap-2">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="h-8 gap-1.5 text-xs"
+                                disabled={!piEndpoint.trim() || piSyncing}
+                                onClick={() => void handleSyncPiModels()}
+                              >
+                                <RefreshCw className={cn("size-3.5", piSyncing && "animate-spin")} />
+                                {piSyncing ? "Syncing models…" : "Import / Sync models"}
+                              </Button>
+                            </div>
+
+                            {piSyncError && (
+                              <p className="text-xs text-destructive">{piSyncError}</p>
+                            )}
+                            {piSyncSuccess && (
+                              <p className="text-xs text-muted-foreground">{piSyncSuccess}</p>
+                            )}
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <Label htmlFor="pi-default-model" className="text-xs text-muted-foreground">
+                              Default Model
+                            </Label>
+                            {piModels.length > 0 ? (
+                              <div className="space-y-2">
+                                <Select
+                                  value={model}
+                                  onValueChange={(val) => setModel(val)}
+                                >
+                                  <SelectTrigger id="pi-default-model-select" className="h-9 bg-background text-xs">
+                                    <SelectValue placeholder="Select imported model" />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    {piModels.map((m) => (
+                                      <SelectItem key={m.id} value={m.id}>
+                                        {m.label || m.id}
+                                      </SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
+                                <Input
+                                  id="pi-default-model"
+                                  className="h-8 rounded-lg bg-background text-xs"
+                                  placeholder="Or enter custom model ID..."
+                                  value={model}
+                                  onChange={(e) => setModel(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter" && piEndpoint.trim() && model.trim()) {
+                                      e.preventDefault();
+                                      handleConnectStepPrimary();
+                                    }
+                                  }}
+                                />
+                              </div>
+                            ) : (
+                              <Input
+                                id="pi-default-model"
+                                className="h-9 rounded-lg bg-background text-xs"
+                                placeholder="e.g. llama3:latest, gpt-4o, or qwen2.5-coder:7b"
+                                value={model}
+                                onChange={(e) => setModel(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter" && piEndpoint.trim() && model.trim()) {
+                                    e.preventDefault();
+                                    handleConnectStepPrimary();
+                                  }
+                                }}
+                              />
+                            )}
+                            <p className="text-(length:--text-micro) text-muted-foreground">
+                              {piModels.length > 0
+                                ? "Select an imported model above or enter custom model ID."
+                                : "Click \"Import / Sync models\" to load models from your endpoint, or enter a model ID manually."}
+                            </p>
+                          </div>
+                        </div>
+                      </OnboardingLoginCard>
                     ) : credentialMode === "api" ? (
                       <OnboardingLoginCard
                         instruction={savedKeys.options.length ? "Choose a saved API key or enter a new one" : `Provide your ${

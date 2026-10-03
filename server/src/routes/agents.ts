@@ -4,6 +4,7 @@ import { agentFileStore, agentFileTokenFromHash } from "../services/agent-file-s
 import { pipeline } from "node:stream/promises";
 import { resolveAgentAppearance, agentAvatarUrl } from "@paperclipai/shared";
 import { listOpenRouterModels } from "../services/openrouter-models.js";
+import { syncCustomPiModels } from "@paperclipai/adapter-pi-local/server";
 import { prepareManagedAiRuntime, assertManagedAiProjectAuth, stripAiAuthBindings } from "../services/ai-connection-runtime.js";
 import { ADAPTER_AUTH_MISSING_CHECK_CODE, AI_CONNECTION_CAPABILITIES, aiConnectionBindingSchema, type AiConnectionBinding } from "@paperclipai/shared";
 import { toolConnections } from "@paperclipai/db";
@@ -3303,6 +3304,24 @@ export function agentRoutes(
 
     const detected = await detectAdapterModel(type);
     res.json(detected);
+  });
+
+  router.post("/companies/:companyId/adapters/pi_local/sync-models", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const endpoint = asNonEmptyString(req.body?.endpoint);
+    if (!endpoint) {
+      res.status(400).json({ error: "Custom API endpoint is required" });
+      return;
+    }
+    const apiKey = typeof req.body?.apiKey === "string" ? req.body.apiKey.trim() : undefined;
+    try {
+      const models = await syncCustomPiModels({ endpoint, apiKey });
+      res.json({ models });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      res.status(400).json({ error: message });
+    }
   });
 
   // The environment drivers the adapter Test route accepts. A local, SSH, or

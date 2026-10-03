@@ -58,5 +58,6 @@ export {
   ensurePiModelConfiguredAndAvailable,
   normalizePiModelId,
   resetPiModelsCacheForTests,
+  syncCustomPiModels,
 } from "./models.js";
 export { parsePiJsonl, isPiUnknownSessionError } from "./parse.js";

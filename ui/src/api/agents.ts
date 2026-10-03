@@ -255,6 +255,11 @@ export const agentsApi = {
     api.get<DetectedAdapterModel | null>(
       `/companies/${encodeURIComponent(companyId)}/adapters/${encodeURIComponent(type)}/detect-model`,
     ),
+  syncPiModels: (companyId: string, payload: { endpoint: string; apiKey?: string }) =>
+    api.post<{ models: AdapterModel[] }>(
+      `/companies/${encodeURIComponent(companyId)}/adapters/pi_local/sync-models`,
+      payload,
+    ),
   testEnvironment: (
     companyId: string,
     type: string,

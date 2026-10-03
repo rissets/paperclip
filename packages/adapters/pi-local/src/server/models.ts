@@ -100,6 +100,37 @@ function pruneExpiredDiscoveryCache(now: number) {
   }
 }
 
+function extractCustomProviderModels(rawProviders: string | undefined): AdapterModel[] {
+  if (!rawProviders) return [];
+  try {
+    const parsed = JSON.parse(rawProviders);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
+    const models: AdapterModel[] = [];
+    for (const [providerName, providerConfig] of Object.entries(parsed)) {
+      if (
+        providerConfig &&
+        typeof providerConfig === "object" &&
+        Array.isArray((providerConfig as any).models)
+      ) {
+        for (const m of (providerConfig as any).models) {
+          const modelId = typeof m === "string" ? m.trim() : asString(m?.id, "").trim();
+          if (modelId) {
+            const label =
+              typeof m === "object" && m && (m.name || m.label)
+                ? asString(m.name || m.label, modelId)
+                : modelId;
+            models.push({ id: `${providerName}/${modelId}`, label: `${providerName}/${label}` });
+            models.push({ id: modelId, label });
+          }
+        }
+      }
+    }
+    return models;
+  } catch {
+    return [];
+  }
+}
+
 export async function discoverPiModels(input: {
   command?: unknown;
   cwd?: unknown;
@@ -109,31 +140,42 @@ export async function discoverPiModels(input: {
   const cwd = asString(input.cwd, process.cwd());
   const env = normalizeEnv(input.env);
   const runtimeEnv = normalizeEnv({ ...process.env, ...env });
-
-  const result = await runChildProcess(
-    `pi-models-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    command,
-    ["--list-models"],
-    {
-      cwd,
-      env: runtimeEnv,
-      timeoutSec: 20,
-      graceSec: 3,
-      onLog: async () => {},
-    },
+  const customModels = extractCustomProviderModels(
+    runtimeEnv.PAPERCLIP_PI_PROVIDERS ?? process.env.PAPERCLIP_PI_PROVIDERS,
   );
 
-  if (result.timedOut) {
-    throw new Error("`pi --list-models` timed out.");
-  }
-  if ((result.exitCode ?? 1) !== 0) {
-    const detail = firstNonEmptyLine(result.stderr) || firstNonEmptyLine(result.stdout);
-    throw new Error(detail ? `\`pi --list-models\` failed: ${detail}` : "`pi --list-models` failed.");
-  }
+  try {
+    const result = await runChildProcess(
+      `pi-models-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      command,
+      ["--list-models"],
+      {
+        cwd,
+        env: runtimeEnv,
+        timeoutSec: 20,
+        graceSec: 3,
+        onLog: async () => {},
+      },
+    );
 
-  // Pi outputs model list to stderr, but fall back to stdout for older versions
-  const output = result.stderr || result.stdout;
-  return sortModels(dedupeModels(parseModelsOutput(output)));
+    if (result.timedOut) {
+      if (customModels.length > 0) return sortModels(dedupeModels(customModels));
+      throw new Error("`pi --list-models` timed out.");
+    }
+    if ((result.exitCode ?? 1) !== 0) {
+      if (customModels.length > 0) return sortModels(dedupeModels(customModels));
+      const detail = firstNonEmptyLine(result.stderr) || firstNonEmptyLine(result.stdout);
+      throw new Error(detail ? `\`pi --list-models\` failed: ${detail}` : "`pi --list-models` failed.");
+    }
+
+    // Pi outputs model list to stderr, but fall back to stdout for older versions
+    const output = result.stderr || result.stdout;
+    const parsedCli = parseModelsOutput(output);
+    return sortModels(dedupeModels([...customModels, ...parsedCli]));
+  } catch (err) {
+    if (customModels.length > 0) return sortModels(dedupeModels(customModels));
+    throw err;
+  }
 }
 
 function normalizeEnv(input: unknown): Record<string, string> {
@@ -222,4 +264,93 @@ export async function listPiModels(): Promise<AdapterModel[]> {
 
 export function resetPiModelsCacheForTests() {
   discoveryCache.clear();
+}
+
+export async function syncCustomPiModels(input: {
+  endpoint: string;
+  apiKey?: string;
+}): Promise<AdapterModel[]> {
+  const rawEndpoint = asString(input.endpoint, "").trim();
+  if (!rawEndpoint) {
+    throw new Error("Custom API endpoint is required.");
+  }
+
+  const baseUrl = rawEndpoint.replace(/\/+$/, "");
+  const apiKey = asString(input.apiKey, "").trim();
+
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+  };
+  if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
+
+  const urlsToTry: string[] = [];
+  if (baseUrl.endsWith("/models")) {
+    urlsToTry.push(baseUrl);
+  } else {
+    urlsToTry.push(`${baseUrl}/models`);
+    if (!baseUrl.endsWith("/v1")) {
+      urlsToTry.push(`${baseUrl}/v1/models`);
+    }
+  }
+
+  let lastError: Error | null = null;
+  for (const url of urlsToTry) {
+    try {
+      const response = await fetch(url, {
+        method: "GET",
+        headers,
+        signal: AbortSignal.timeout(15000),
+      });
+
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
+          throw new Error(`Authentication failed (${response.status}): check your API token.`);
+        }
+        if (response.status === 404 && urlsToTry.indexOf(url) < urlsToTry.length - 1) {
+          continue;
+        }
+        const text = await response.text().catch(() => "");
+        throw new Error(`API endpoint returned HTTP ${response.status}: ${text.slice(0, 200)}`);
+      }
+
+      const json = await response.json();
+      const extracted: AdapterModel[] = [];
+
+      if (json && typeof json === "object" && Array.isArray((json as any).data)) {
+        for (const item of (json as any).data) {
+          const id = asString(item?.id, "").trim();
+          if (id) {
+            const label = asString(item?.name, id).trim() || id;
+            extracted.push({ id, label });
+          }
+        }
+      } else if (json && typeof json === "object" && Array.isArray((json as any).models)) {
+        for (const item of (json as any).models) {
+          const id = asString(item?.name || item?.model || item?.id, "").trim();
+          if (id) {
+            extracted.push({ id, label: id });
+          }
+        }
+      } else if (Array.isArray(json)) {
+        for (const item of json) {
+          const id = typeof item === "string" ? item.trim() : asString(item?.id || item?.name, "").trim();
+          if (id) {
+            extracted.push({ id, label: typeof item === "object" && item?.name ? item.name : id });
+          }
+        }
+      }
+
+      if (extracted.length === 0) {
+        throw new Error("No models found in endpoint response.");
+      }
+
+      return sortModels(dedupeModels(extracted));
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+    }
+  }
+
+  throw lastError ?? new Error("Failed to connect to the custom API endpoint.");
 }

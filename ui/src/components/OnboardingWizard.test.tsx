@@ -58,6 +58,7 @@ const mockGoalsApi = vi.hoisted(() => ({
 }));
 const mockAgentsApi = vi.hoisted(() => ({
   adapterModels: vi.fn(async () => [] as Array<{ id: string; label: string }>),
+  syncPiModels: vi.fn(async () => ({ models: [] as Array<{ id: string; label: string }> })),
   testEnvironment: vi.fn(
     async (): Promise<import("@paperclipai/shared").AdapterEnvironmentTestResult> => ({
       adapterType: "claude_local",
@@ -198,7 +199,7 @@ vi.mock("../adapters/adapter-display-registry", () => ({
     // then sat in the "Advanced settings" disclosure and was reachable anyway;
     // with the step down to a tile row built from this flag, it made that row
     // empty in every test and hid the surface under it.
-    recommended: type === "claude_local" || type === "codex_local",
+    recommended: type === "claude_local" || type === "codex_local" || type === "pi_local",
     label: type,
     description: "",
     icon: () => null,
@@ -3395,6 +3396,74 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
       expect(mockAgentsApi.startClaudeSetupTokenLogin).not.toHaveBeenCalled();
       expect(document.body.textContent).toContain(
         "Sign in to Claude then come back and enter authorization code",
+      );
+
+      await act(async () => root.unmount());
+    });
+
+    it("configures and connects Pi adapter with custom endpoint and models", async () => {
+      mockAdapterRegistry.list = [{ type: "claude_local" }, { type: "codex_local" }, { type: "pi_local" }];
+      mockAgentsApi.syncPiModels.mockResolvedValueOnce({
+        models: [
+          { id: "llama3:latest", label: "llama3:latest" },
+          { id: "qwen2.5-coder:7b", label: "qwen2.5-coder:7b" },
+        ],
+      });
+      const { root } = await openStep4({ adapterType: "pi_local" });
+
+      const piTile = [...document.body.querySelectorAll("button[aria-checked]")].find(
+        (t) => t.textContent?.includes("pi_local") || t.textContent?.includes("Pi"),
+      );
+      expect(piTile).toBeDefined();
+
+      await act(async () => {
+        piTile!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      for (let i = 0; i < 10; i++) await flushReact();
+
+      const endpointInput = document.querySelector("#pi-endpoint") as HTMLInputElement;
+      expect(endpointInput).not.toBeNull();
+
+      await act(async () => {
+        setControlledValue(endpointInput, "http://localhost:11434/v1");
+      });
+      await flushReact();
+
+      // Find sync button and click it
+      const syncBtn = Array.from(document.querySelectorAll("button")).find((btn) =>
+        btn.textContent?.includes("Import / Sync models") || btn.textContent?.includes("Syncing"),
+      );
+      expect(syncBtn).toBeDefined();
+
+      await act(async () => {
+        syncBtn!.click();
+      });
+      await flushReact();
+
+      expect(mockAgentsApi.syncPiModels).toHaveBeenCalledWith(
+        "company-new",
+        expect.objectContaining({ endpoint: "http://localhost:11434/v1" }),
+      );
+
+      // Model should be auto-set to first imported model
+      const connectBtn = Array.from(document.querySelectorAll("button")).find((btn) =>
+        btn.textContent?.includes("Connect"),
+      );
+      expect(connectBtn?.disabled).toBe(false);
+
+      await act(async () => {
+        connectBtn!.click();
+      });
+      for (let i = 0; i < 5; i++) await flushReact();
+
+      expect(mockAgentsApi.hire).toHaveBeenCalledWith(
+        "company-new",
+        expect.objectContaining({
+          adapterType: "pi_local",
+          adapterConfig: expect.objectContaining({
+            model: "custom/llama3:latest",
+          }),
+        }),
       );
 
       await act(async () => root.unmount());
