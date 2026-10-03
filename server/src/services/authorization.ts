@@ -2366,6 +2366,7 @@ export function authorizationService(db: Db | DbTransaction) {
       input.actor.type !== "agent" ||
       input.action === "inbox:manage" ||
       !responsibleUserId ||
+      responsibleUserId === "local-board" ||
       !agentDecision.allowed
     ) {
       return agentDecision;

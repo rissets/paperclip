@@ -388,7 +388,11 @@ async function startServerWithDatabaseTeardown(
     const companyRows = await db.select({ id: companies.id }).from(companies);
     for (const company of companyRows) {
       const membership = await db
-        .select({ id: companyMemberships.id })
+        .select({
+          id: companyMemberships.id,
+          membershipRole: companyMemberships.membershipRole,
+          status: companyMemberships.status,
+        })
         .from(companyMemberships)
         .where(
           and(
@@ -397,8 +401,16 @@ async function startServerWithDatabaseTeardown(
             eq(companyMemberships.principalId, LOCAL_BOARD_USER_ID),
           ),
         )
-        .then((rows: Array<{ id: string }>) => rows[0] ?? null);
-      if (membership) continue;
+        .then((rows: Array<{ id: string; membershipRole: string | null; status: string }>) => rows[0] ?? null);
+      if (membership) {
+        if (membership.membershipRole !== "owner" || membership.status !== "active") {
+          await db
+            .update(companyMemberships)
+            .set({ membershipRole: "owner", status: "active" })
+            .where(eq(companyMemberships.id, membership.id));
+        }
+        continue;
+      }
       await db.insert(companyMemberships).values({
         companyId: company.id,
         principalType: "user",

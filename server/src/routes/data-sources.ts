@@ -270,7 +270,7 @@ export function dataSourceRoutes(db: Db) {
       const companyId = req.params.companyId as string;
       const id = req.params.id as string;
       const tableId = req.params.tableId as string;
-      await assertCompanyAccess(req, companyId);
+      await assertCompanyAccess(req, companyId, { readOnly: true });
 
       const agentId = getRequestingAgentId(req);
       if (agentId) {
@@ -306,7 +306,7 @@ export function dataSourceRoutes(db: Db) {
     async (req: Request, res: Response) => {
       const companyId = req.params.companyId as string;
       const id = req.params.id as string;
-      await assertCompanyAccess(req, companyId);
+      await assertCompanyAccess(req, companyId, { readOnly: true });
 
       const agentId = getRequestingAgentId(req);
       if (agentId) {
@@ -368,7 +368,7 @@ export function dataSourceRoutes(db: Db) {
     "/companies/:companyId/data-sources/clickhouse/query",
     async (req: Request, res: Response) => {
       const companyId = req.params.companyId as string;
-      await assertCompanyAccess(req, companyId);
+      await assertCompanyAccess(req, companyId, { readOnly: true });
 
       const sqlQuery = req.body?.sql as string;
       if (!sqlQuery || !sqlQuery.trim()) {
@@ -530,7 +530,7 @@ export function dataSourceRoutes(db: Db) {
   // 6. Search RAG Knowledge base
   router.post("/companies/:companyId/data-sources/search-knowledge", async (req: Request, res: Response) => {
     const companyId = req.params.companyId as string;
-    await assertCompanyAccess(req, companyId);
+    await assertCompanyAccess(req, companyId, { readOnly: true });
 
     const query = req.body?.query as string;
     if (!query || !query.trim()) {
