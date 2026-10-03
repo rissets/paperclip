@@ -325,18 +325,33 @@ export function userInvitationRoutes(db: Db) {
 
     // Set Better Auth session cookie
     const cookiePrefix = deriveAuthCookiePrefix();
-    res.cookie(`${cookiePrefix}.session_token`, sessionToken, {
+    const cookieOpts = {
       httpOnly: true,
       path: "/",
       expires: sessionExpiresAt,
-      sameSite: "lax",
-    });
+      sameSite: "lax" as const,
+    };
+    res.cookie(`${cookiePrefix}.session_token`, sessionToken, cookieOpts);
+    res.cookie("paperclip.session_token", sessionToken, cookieOpts);
+    res.cookie("better-auth.session_token", sessionToken, cookieOpts);
+    res.clearCookie("paperclip_logged_out", { path: "/" });
+
+    const firstCompany = invite.companyIds[0]
+      ? await db
+          .select({ id: companies.id, issuePrefix: companies.issuePrefix })
+          .from(companies)
+          .where(eq(companies.id, invite.companyIds[0]))
+          .then((rows) => rows[0] ?? null)
+      : null;
 
     res.json({
       success: true,
       userId: targetUserId,
       email: invite.email,
       name: name.trim(),
+      firstCompanyId: firstCompany?.id ?? invite.companyIds[0] ?? null,
+      firstCompanyPrefix: firstCompany?.issuePrefix ?? null,
+      sessionToken,
     });
   });
 

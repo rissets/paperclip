@@ -428,7 +428,7 @@ export const accessApi = {
     }>(`/invitations/${token}`),
 
   acceptUserInvitation: (token: string, input: { name: string; password: string }) =>
-    api.post<{ success: true; userId: string; email: string; firstCompanyId: string | null }>(
+    api.post<{ success: true; userId: string; email: string; firstCompanyId: string | null; firstCompanyPrefix: string | null }>(
       `/invitations/${token}/accept`,
       input,
     ),

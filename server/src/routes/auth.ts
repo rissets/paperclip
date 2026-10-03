@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { randomBytes } from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import { authUsers, authAccounts, authSessions, authVerifications } from "@paperclipai/db";
@@ -10,11 +10,13 @@ import {
   forgotPasswordSchema,
   resetPasswordWithTokenSchema,
 } from "@paperclipai/shared";
-import { hashPassword } from "better-auth/crypto";
+import { hashPassword, verifyPassword } from "better-auth/crypto";
 import { badRequest, unauthorized } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import { resolveSentryDsns } from "../sentry-dsn.js";
 import { sendPasswordResetEmail } from "../services/email-service.js";
+import { deriveAuthCookiePrefix } from "../auth/better-auth.js";
+import { extractSessionTokenFromCookieHeader } from "../middleware/auth.js";
 
 async function loadCurrentUserProfile(db: Db, userId: string) {
   const user = await db
@@ -190,6 +192,131 @@ export function authRoutes(db: Db) {
       status: true,
       message: "Password has been successfully reset. You can now sign in with your new password.",
     });
+  });
+
+  router.post("/sign-in/email", async (req, res) => {
+    const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
+    const password = typeof req.body?.password === "string" ? req.body.password : "";
+
+    if (!email || !password) {
+      throw badRequest("Email and password are required.");
+    }
+
+    const user = await db
+      .select({ id: authUsers.id, name: authUsers.name, email: authUsers.email })
+      .from(authUsers)
+      .where(sql`lower(${authUsers.email}) = ${email}`)
+      .then((rows) => rows[0] ?? null);
+
+    if (!user) {
+      res.status(401).json({
+        code: "INVALID_EMAIL_OR_PASSWORD",
+        message: "Invalid email or password",
+      });
+      return;
+    }
+
+    const account = await db
+      .select({ id: authAccounts.id, password: authAccounts.password })
+      .from(authAccounts)
+      .where(
+        and(
+          eq(authAccounts.userId, user.id),
+          eq(authAccounts.providerId, "credential"),
+        ),
+      )
+      .then((rows) => rows[0] ?? null);
+
+    if (!account?.password) {
+      res.status(401).json({
+        code: "INVALID_EMAIL_OR_PASSWORD",
+        message: "Invalid email or password",
+      });
+      return;
+    }
+
+    const valid = await verifyPassword({
+      hash: account.password,
+      password,
+    });
+
+    if (!valid) {
+      res.status(401).json({
+        code: "INVALID_EMAIL_OR_PASSWORD",
+        message: "Invalid email or password",
+      });
+      return;
+    }
+
+    const now = new Date();
+    const sessionToken = randomBytes(32).toString("hex");
+    const sessionExpiresAt = new Date(Date.now() + 30 * 24 * 3600 * 1000);
+
+    const [createdSession] = await db
+      .insert(authSessions)
+      .values({
+        id: randomBytes(16).toString("hex"),
+        userId: user.id,
+        token: sessionToken,
+        expiresAt: sessionExpiresAt,
+        createdAt: now,
+        updatedAt: now,
+        ipAddress: req.ip || null,
+        userAgent: req.header("user-agent") || null,
+      })
+      .returning();
+
+    const cookiePrefix = deriveAuthCookiePrefix();
+    const cookieOpts = {
+      httpOnly: true,
+      path: "/",
+      expires: sessionExpiresAt,
+      sameSite: "lax" as const,
+    };
+    res.cookie(`${cookiePrefix}.session_token`, sessionToken, cookieOpts);
+    res.cookie("paperclip.session_token", sessionToken, cookieOpts);
+    res.cookie("better-auth.session_token", sessionToken, cookieOpts);
+    res.clearCookie("paperclip_logged_out", { path: "/" });
+
+    res.json({
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+      },
+      session: {
+        id: createdSession.id,
+        token: sessionToken,
+        userId: user.id,
+        expiresAt: sessionExpiresAt.toISOString(),
+      },
+    });
+  });
+
+  router.post("/sign-out", async (req, res) => {
+    const cookieHeader = req.headers.cookie ?? "";
+    const sessionToken = extractSessionTokenFromCookieHeader(cookieHeader);
+
+    if (sessionToken) {
+      await db.delete(authSessions).where(eq(authSessions.token, sessionToken)).catch(() => {});
+    }
+    if (req.actor?.sessionId) {
+      await db.delete(authSessions).where(eq(authSessions.id, req.actor.sessionId)).catch(() => {});
+    }
+
+    const cookiePrefix = deriveAuthCookiePrefix();
+    const clearOpts = { path: "/", httpOnly: true };
+
+    res.clearCookie(`${cookiePrefix}.session_token`, clearOpts);
+    res.clearCookie("paperclip.session_token", clearOpts);
+    res.clearCookie("better-auth.session_token", clearOpts);
+    res.cookie(`${cookiePrefix}.session_token`, "", { ...clearOpts, expires: new Date(0), maxAge: 0 });
+    res.cookie("paperclip.session_token", "", { ...clearOpts, expires: new Date(0), maxAge: 0 });
+    res.cookie("better-auth.session_token", "", { ...clearOpts, expires: new Date(0), maxAge: 0 });
+
+    res.cookie("paperclip_logged_out", "1", { path: "/", httpOnly: false, maxAge: 86400 * 30 });
+
+    res.json({ success: true, redirectTo: "/auth" });
   });
 
   return router;

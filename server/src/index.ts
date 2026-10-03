@@ -820,7 +820,11 @@ async function startServerWithDatabaseTeardown(
   if (confirmationSweep.expired > 0) {
     logger.info(confirmationSweep, "Expired pending confirmations superseded by newer agent requests");
   }
-  if (config.deploymentMode === "authenticated") {
+  const hasBetterAuthSecret = Boolean(
+    process.env.BETTER_AUTH_SECRET ||
+    process.env.PAPERCLIP_AGENT_JWT_SECRET
+  );
+  if (config.deploymentMode === "authenticated" || hasBetterAuthSecret) {
     const {
       createBetterAuthHandler,
       createBetterAuthInstance,
@@ -850,7 +854,9 @@ async function startServerWithDatabaseTeardown(
     betterAuthHandler = createBetterAuthHandler(auth);
     resolveSession = (req) => resolveBetterAuthSession(auth, req);
     resolveSessionFromHeaders = (headers) => resolveBetterAuthSessionFromHeaders(auth, headers);
-    await initializeBoardClaimChallenge(db as any, { deploymentMode: config.deploymentMode });
+    if (config.deploymentMode === "authenticated") {
+      await initializeBoardClaimChallenge(db as any, { deploymentMode: config.deploymentMode });
+    }
     authReady = true;
   }
 

@@ -46,6 +46,11 @@ if (shouldLoadWorkingDirectoryEnv({
   isPaperclipEnvFile: isSameFile,
 })) {
   loadDotenv({ path: CWD_ENV_PATH, override: false, quiet: true });
+} else if (!cwdEnvExists) {
+  const PARENT_ENV_PATH = resolve(process.cwd(), "..", ".env");
+  if (existsSync(PARENT_ENV_PATH)) {
+    loadDotenv({ path: PARENT_ENV_PATH, override: false, quiet: true });
+  }
 }
 
 maybeRepairLegacyWorktreeConfigAndEnvFiles();

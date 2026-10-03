@@ -1,7 +1,7 @@
 #!/usr/bin/env -S node --import tsx
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
@@ -54,6 +54,32 @@ if (isWorktreeSeedPending(repoRoot)) {
     "[paperclip] this worktree database is seed-pending. Run `pnpm paperclipai worktree ensure-seeded` before `pnpm dev`.",
   );
   process.exit(1);
+}
+
+const rootEnvPath = path.join(repoRoot, ".env");
+if (existsSync(rootEnvPath)) {
+  const rootEnvContents = readFileSync(rootEnvPath, "utf8");
+  for (const rawLine of rootEnvContents.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const match = rawLine.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
+    if (!match) continue;
+    const [, key, rawValue] = match;
+    let value = rawValue.trim();
+    if (!value || value.startsWith("#")) {
+      value = "";
+    } else if (
+      (value.startsWith("\"") && value.endsWith("\"")) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    } else {
+      value = value.replace(/\s+#.*$/, "").trim();
+    }
+    if (process.env[key] === undefined) {
+      process.env[key] = value;
+    }
+  }
 }
 
 const scanIntervalMs = 1500;
@@ -196,10 +222,16 @@ if (tailscaleAuth || bindMode) {
     delete env.PAPERCLIP_BIND_HOST;
   }
   if (effectiveBind === "loopback" && !tailscaleAuth) {
-    delete env.PAPERCLIP_DEPLOYMENT_MODE;
-    delete env.PAPERCLIP_DEPLOYMENT_EXPOSURE;
-    delete env.PAPERCLIP_AUTH_BASE_URL_MODE;
-    console.log("[paperclip] dev mode: local_trusted (bind=loopback)");
+    if (process.env.PAPERCLIP_DEPLOYMENT_MODE === "authenticated") {
+      env.PAPERCLIP_DEPLOYMENT_MODE = "authenticated";
+      env.PAPERCLIP_DEPLOYMENT_EXPOSURE = process.env.PAPERCLIP_DEPLOYMENT_EXPOSURE ?? "private";
+      console.log("[paperclip] dev mode: authenticated (bind=loopback)");
+    } else {
+      delete env.PAPERCLIP_DEPLOYMENT_MODE;
+      delete env.PAPERCLIP_DEPLOYMENT_EXPOSURE;
+      delete env.PAPERCLIP_AUTH_BASE_URL_MODE;
+      console.log("[paperclip] dev mode: local_trusted (bind=loopback)");
+    }
   } else {
     env.PAPERCLIP_DEPLOYMENT_MODE = "authenticated";
     env.PAPERCLIP_DEPLOYMENT_EXPOSURE = "private";
@@ -211,10 +243,16 @@ if (tailscaleAuth || bindMode) {
 } else {
   delete env.PAPERCLIP_BIND;
   delete env.PAPERCLIP_BIND_HOST;
-  delete env.PAPERCLIP_DEPLOYMENT_MODE;
-  delete env.PAPERCLIP_DEPLOYMENT_EXPOSURE;
-  delete env.PAPERCLIP_AUTH_BASE_URL_MODE;
-  console.log("[paperclip] dev mode: local_trusted (default)");
+  if (process.env.PAPERCLIP_DEPLOYMENT_MODE === "authenticated") {
+    env.PAPERCLIP_DEPLOYMENT_MODE = "authenticated";
+    env.PAPERCLIP_DEPLOYMENT_EXPOSURE = process.env.PAPERCLIP_DEPLOYMENT_EXPOSURE ?? "private";
+    console.log("[paperclip] dev mode: authenticated (default)");
+  } else {
+    delete env.PAPERCLIP_DEPLOYMENT_MODE;
+    delete env.PAPERCLIP_DEPLOYMENT_EXPOSURE;
+    delete env.PAPERCLIP_AUTH_BASE_URL_MODE;
+    console.log("[paperclip] dev mode: local_trusted (default)");
+  }
 }
 
 const serverPort = Number.parseInt(env.PORT ?? process.env.PORT ?? "3100", 10) || 3100;

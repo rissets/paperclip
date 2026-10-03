@@ -172,10 +172,16 @@ export const authApi = {
   },
 
   signInEmail: async (input: { email: string; password: string }) => {
+    if (typeof document !== "undefined") {
+      document.cookie = "paperclip_logged_out=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT";
+    }
     await authPost("/sign-in/email", input);
   },
 
   signUpEmail: async (input: { name: string; email: string; password: string }) => {
+    if (typeof document !== "undefined") {
+      document.cookie = "paperclip_logged_out=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT";
+    }
     await authPost("/sign-up/email", input);
   },
 
@@ -197,13 +203,16 @@ export const authApi = {
     authPatch("/profile", input, (payload) => currentUserProfileSchema.parse(payload)),
 
   signOut: async (): Promise<SignOutResult | null> => {
-    const payload = await authPost("/sign-out", {});
-    if (!payload || typeof payload !== "object") return null;
+    if (typeof document !== "undefined") {
+      document.cookie = "paperclip_logged_out=1; path=/; max-age=2592000";
+    }
+    const payload = await authPost("/sign-out", {}).catch(() => ({ success: true, redirectTo: "/auth" }));
+    if (!payload || typeof payload !== "object") return { success: true, redirectTo: "/auth" };
 
     const result = payload as Record<string, unknown>;
     return {
-      ...(typeof result.success === "boolean" ? { success: result.success } : {}),
-      ...(typeof result.redirectTo === "string" ? { redirectTo: result.redirectTo } : {}),
+      ...(typeof result.success === "boolean" ? { success: result.success } : { success: true }),
+      ...(typeof result.redirectTo === "string" ? { redirectTo: result.redirectTo } : { redirectTo: "/auth" }),
     };
   },
 

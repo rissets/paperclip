@@ -155,7 +155,7 @@ export function SidebarAccountMenu({
 
   const displayName = session?.user.name?.trim() || "Board";
   const secondaryLabel =
-    session?.user.email?.trim() || (deploymentMode === "authenticated" ? "Signed in" : "Local workspace board");
+    session?.user.email?.trim() || (deploymentMode === "authenticated" || Boolean(session?.user?.id) ? "Signed in" : "Local workspace board");
   const initials = deriveInitials(displayName);
   const profileHref = userProfilePath(session?.user);
 
@@ -252,7 +252,7 @@ export function SidebarAccountMenu({
                 onClick={() => setOpen(false)}
               />
               <ThemeToggle variant="compact-menu-action" onAfterToggle={() => setOpen(false)} />
-              {deploymentMode === "authenticated" ? (
+              {deploymentMode === "authenticated" || Boolean(session?.user?.id) ? (
                 <button
                   type="button"
                   className={cn(

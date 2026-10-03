@@ -1,11 +1,12 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { Request, RequestHandler } from "express";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, gt, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,
   agentApiKeys,
   agents,
+  authSessions,
   authUsers,
   companies,
   companyMemberships,
@@ -220,6 +221,35 @@ interface ActorMiddlewareOptions {
   resolveSession?: (req: Request) => Promise<BetterAuthSessionResult | null>;
 }
 
+export function extractSessionTokenFromCookieHeader(cookieHeader: string | undefined | null): string | null {
+  if (!cookieHeader) return null;
+  const cookies = cookieHeader.split(";");
+  for (const cookie of cookies) {
+    const [rawName, ...rest] = cookie.trim().split("=");
+    const name = rawName?.trim();
+    const value = rest.join("=").trim();
+    if (!name || !value) continue;
+    if (
+      name.endsWith(".session_token") ||
+      name.endsWith("-session_token") ||
+      name === "session_token" ||
+      name === "paperclip_session_token"
+    ) {
+      try {
+        const decoded = decodeURIComponent(value);
+        const token = decoded.split(".")[0];
+        if (token && token.length > 0) {
+          return token;
+        }
+      } catch {
+        const token = value.split(".")[0];
+        if (token && token.length > 0) return token;
+      }
+    }
+  }
+  return null;
+}
+
 const publicRoutineWebhookPath = /^\/api\/routine-triggers\/public\/[a-f0-9]{24}\/fire\/?$/i;
 
 const publicMcpGatewayProtocolPath = /^\/mcp\/gateways\/gw_[a-f0-9]{32}\/?$/i;
@@ -227,17 +257,7 @@ const publicMcpGatewayProtocolPath = /^\/mcp\/gateways\/gw_[a-f0-9]{32}\/?$/i;
 export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHandler {
   const boardAuth = boardAuthService(db);
   return async (req, _res, next) => {
-    req.actor =
-      opts.deploymentMode === "local_trusted"
-        ? {
-            type: "board",
-            userId: "local-board",
-            userName: "Local Board",
-            userEmail: null,
-            isInstanceAdmin: true,
-            source: "local_implicit",
-          }
-        : { type: "none", source: "none" };
+    req.actor = { type: "none", source: "none" };
 
     // Routine ingress authenticates its own bearer/signature. Never interpret
     // webhook credentials as agent keys or attach an ambient browser session.
@@ -265,7 +285,9 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
     }
 
     if (!hasBearerCredentials) {
-      if (opts.deploymentMode === "authenticated" && opts.resolveSession) {
+      let session: BetterAuthSessionResult | null = null;
+
+      if (opts.resolveSession) {
         const cloudTenantActor = await resolveCloudTenantActor(db, req);
         if (cloudTenantActor) {
           req.actor = {
@@ -276,7 +298,6 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
           return;
         }
 
-        let session: BetterAuthSessionResult | null = null;
         try {
           session = await opts.resolveSession(req);
         } catch (err) {
@@ -285,32 +306,92 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
             "Failed to resolve auth session from request headers",
           );
         }
-        if (session?.user?.id && session.session?.id) {
-          const userId = session.user.id;
-          const [roleRow, memberships] = await Promise.all([
-            db
-              .select({ id: instanceUserRoles.id })
-              .from(instanceUserRoles)
-              .where(and(eq(instanceUserRoles.userId, userId), eq(instanceUserRoles.role, "instance_admin")))
-              .then((rows) => rows[0] ?? null),
-            loadActiveUserCompanyMemberships(db, userId),
-          ]);
-          req.actor = {
-            type: "board",
-            userId,
-            sessionId: session.session.id,
-            userName: session.user.name ?? null,
-            userEmail: session.user.email ?? null,
-            companyIds: memberships.map((row) => row.companyId),
-            memberships,
-            isInstanceAdmin: Boolean(roleRow),
-            runId: runIdHeader ?? undefined,
-            source: "session",
-          };
-          next();
-          return;
+      }
+
+      // If Better Auth did not resolve a session, check directly against authSessions table
+      if (!session?.user?.id) {
+        const cookieHeader = req.headers.cookie;
+        const sessionToken = extractSessionTokenFromCookieHeader(cookieHeader);
+        if (sessionToken) {
+          try {
+            const now = new Date();
+            const sessionRows = await db
+              .select({
+                id: authSessions.id,
+                userId: authSessions.userId,
+                expiresAt: authSessions.expiresAt,
+              })
+              .from(authSessions)
+              .where(and(eq(authSessions.token, sessionToken), gt(authSessions.expiresAt, now)))
+              .limit(1);
+
+            const sessionRow = sessionRows[0] ?? null;
+            if (sessionRow?.userId) {
+              const userRow = await db
+                .select({
+                  id: authUsers.id,
+                  email: authUsers.email,
+                  name: authUsers.name,
+                })
+                .from(authUsers)
+                .where(eq(authUsers.id, sessionRow.userId))
+                .then((rows) => rows[0] ?? null);
+
+              if (userRow) {
+                session = {
+                  session: { id: sessionRow.id, userId: sessionRow.userId },
+                  user: { id: userRow.id, email: userRow.email, name: userRow.name },
+                };
+              }
+            }
+          } catch (dbErr) {
+            logger.warn({ err: dbErr }, "Failed to resolve session token from database");
+          }
         }
       }
+
+      if (session?.user?.id && session.session?.id) {
+        const userId = session.user.id;
+        const [roleRow, memberships] = await Promise.all([
+          db
+            .select({ id: instanceUserRoles.id })
+            .from(instanceUserRoles)
+            .where(and(eq(instanceUserRoles.userId, userId), eq(instanceUserRoles.role, "instance_admin")))
+            .then((rows) => rows[0] ?? null),
+          loadActiveUserCompanyMemberships(db, userId),
+        ]);
+        req.actor = {
+          type: "board",
+          userId,
+          sessionId: session.session.id,
+          userName: session.user.name ?? null,
+          userEmail: session.user.email ?? null,
+          companyIds: memberships.map((row) => row.companyId),
+          memberships,
+          isInstanceAdmin: Boolean(roleRow),
+          runId: runIdHeader ?? undefined,
+          source: "session",
+        };
+        next();
+        return;
+      }
+
+      const cookieHeader = req.headers.cookie;
+      const hasLoggedOutCookie = cookieHeader ? cookieHeader.includes("paperclip_logged_out=1") : false;
+
+      if (opts.deploymentMode === "local_trusted" && !hasLoggedOutCookie) {
+        req.actor = {
+          type: "board",
+          userId: "local-board",
+          userName: "Local Board",
+          userEmail: null,
+          isInstanceAdmin: true,
+          source: "local_implicit",
+        };
+      } else {
+        req.actor = { type: "none", source: "none" };
+      }
+
       if (runIdHeader) req.actor.runId = runIdHeader;
       next();
       return;

@@ -85,11 +85,12 @@ export function CloudAccessGate({ allowMembershipRequest = false }: { allowMembe
   });
 
   const isAuthenticatedMode = healthQuery.data?.deploymentMode === "authenticated";
+  const isExplicitlyLoggedOut = typeof document !== "undefined" && document.cookie.includes("paperclip_logged_out=1");
   const isBootstrapPending = isAuthenticatedMode && healthQuery.data?.bootstrapStatus === "bootstrap_pending";
   const sessionQuery = useQuery({
     queryKey: queryKeys.auth.session,
     queryFn: () => authApi.getSession(),
-    enabled: isAuthenticatedMode,
+    enabled: isAuthenticatedMode || isExplicitlyLoggedOut || (typeof document !== "undefined" && document.cookie.includes("session_token")),
     retry: false,
     refetchInterval: (query) => isTemporaryApiError(query.state.error) ? RECONNECT_INTERVAL_MS : false,
     refetchIntervalInBackground: true,
@@ -120,7 +121,7 @@ export function CloudAccessGate({ allowMembershipRequest = false }: { allowMembe
 
   const activeQueries = [
     healthQuery,
-    ...(isAuthenticatedMode ? [sessionQuery] : []),
+    ...(isAuthenticatedMode || isExplicitlyLoggedOut ? [sessionQuery] : []),
     ...(isAuthenticatedMode && !isBootstrapPending && sessionQuery.data ? [boardAccessQuery] : []),
   ];
   const isServerStarting = healthQuery.data?.status === "starting";
@@ -131,7 +132,7 @@ export function CloudAccessGate({ allowMembershipRequest = false }: { allowMembe
     && !(query.data !== undefined && isTemporaryApiError(query.error)))?.error;
   const isLoading =
     healthQuery.isLoading ||
-    (isAuthenticatedMode && sessionQuery.isLoading) ||
+    ((isAuthenticatedMode || isExplicitlyLoggedOut) && sessionQuery.isLoading) ||
     (isAuthenticatedMode && !isBootstrapPending && !!sessionQuery.data && boardAccessQuery.isLoading);
   const hasBoardAccess = allowMembershipRequest || !isAuthenticatedMode
     || !!boardAccessQuery.data?.isInstanceAdmin || (boardAccessQuery.data?.companyIds.length ?? 0) > 0;
@@ -199,7 +200,7 @@ export function CloudAccessGate({ allowMembershipRequest = false }: { allowMembe
     );
   }
 
-  if (isAuthenticatedMode && !sessionQuery.data) {
+  if ((isAuthenticatedMode || isExplicitlyLoggedOut) && !sessionQuery.data) {
     const next = encodeURIComponent(`${location.pathname}${location.search}`);
     return <Navigate to={`/auth?next=${next}`} replace />;
   }

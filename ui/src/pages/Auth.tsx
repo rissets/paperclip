@@ -6,6 +6,7 @@ import { healthApi } from "../api/health";
 import { CloudSignIn } from "@/components/CloudSignIn";
 import { clearCloudSignInAttempt } from "@/lib/cloud-sign-in";
 import { tenantSignInReturnPath } from "@/lib/cloudLinks";
+import { navigateTopLevel } from "@/lib/browserNavigation";
 import { queryKeys } from "../lib/queryKeys";
 import { getRememberedInvitePath } from "../lib/invite-memory";
 import { Button } from "@/components/ui/button";
@@ -43,12 +44,14 @@ export function AuthPage() {
     retry: false,
   });
 
+  const isExplicitlyLoggedOut = typeof document !== "undefined" && document.cookie.includes("paperclip_logged_out=1");
+
   useEffect(() => {
-    if (session) {
+    if (session && !isExplicitlyLoggedOut) {
       clearCloudSignInAttempt();
       navigate(nextPath, { replace: true });
     }
-  }, [session, navigate, nextPath]);
+  }, [session, navigate, nextPath, isExplicitlyLoggedOut]);
 
   const mutation = useMutation({
     mutationFn: async () => {
@@ -72,6 +75,9 @@ export function AuthPage() {
         setForgotSuccess(true);
         return;
       }
+      if (typeof document !== "undefined") {
+        document.cookie = "paperclip_logged_out=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT";
+      }
       await queryClient.invalidateQueries({ queryKey: queryKeys.auth.session });
       await queryClient.invalidateQueries({ queryKey: queryKeys.health });
       // Reset rather than invalidate: the `["companies"]` entry is shared app-wide and
@@ -79,7 +85,7 @@ export function AuthPage() {
       // readable (and any fetch for that session in flight) until the refetch lands.
       // Sign-in can change accounts, so drop the list outright.
       await queryClient.resetQueries({ queryKey: queryKeys.companies.all });
-      navigate(nextPath, { replace: true });
+      navigateTopLevel(nextPath);
     },
     onError: (err) => {
       setError(err instanceof Error ? err.message : "Authentication failed");
@@ -95,7 +101,7 @@ export function AuthPage() {
         password.trim().length > 0 &&
         (mode === "sign_in" || (name.trim().length > 0 && password.trim().length >= 8));
 
-  if (healthQuery.isLoading || isSessionLoading || session) {
+  if (healthQuery.isLoading || (isSessionLoading && !isExplicitlyLoggedOut) || (session && !isExplicitlyLoggedOut)) {
     return (
       <div className="fixed inset-0 flex items-center justify-center">
         <PaperclipLoading className="min-h-0" />

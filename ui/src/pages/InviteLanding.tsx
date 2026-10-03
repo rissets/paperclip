@@ -4,6 +4,7 @@ import { AGENT_ADAPTER_TYPES } from "@paperclipai/shared";
 import type { AgentAdapterType, JoinRequest } from "@paperclipai/shared";
 import { Button } from "@/components/ui/button";
 import { CompanyPatternIcon } from "@/components/CompanyPatternIcon";
+import { navigateTopLevel } from "@/lib/browserNavigation";
 import { useCompany } from "@/context/CompanyContext";
 import { Link, useNavigate, useParams } from "@/lib/router";
 import { accessApi } from "../api/access";
@@ -273,13 +274,20 @@ export function InviteLandingPage() {
     onSuccess: async (data) => {
       setUserInviteError(null);
       clearPendingInviteToken(token);
+      if (typeof document !== "undefined") {
+        document.cookie = "paperclip_logged_out=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT";
+      }
       await queryClient.invalidateQueries({ queryKey: queryKeys.auth.session });
       await queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
       await queryClient.resetQueries({ queryKey: queryKeys.companies.all });
       if (data.firstCompanyId) {
         setSelectedCompanyId(data.firstCompanyId, { source: "manual" });
       }
-      navigate("/", { replace: true });
+      if (data.firstCompanyPrefix) {
+        navigateTopLevel(`/${data.firstCompanyPrefix}/dashboard`);
+      } else {
+        navigateTopLevel("/");
+      }
     },
     onError: (err) => {
       setUserInviteError(err instanceof Error ? err.message : "Failed to accept invitation");
