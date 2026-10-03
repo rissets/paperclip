@@ -25,9 +25,12 @@ export function AgentConversationsSidebar() {
   const byId = new Map(roster.map(agent => [agent.id, agent]));
   for (const result of historyAgents) if (result.data) byId.set(result.data.id, result.data);
   const active = [...byId.values()].find(agent => agent.id === activeRef || (agent.status !== "terminated" && encodeURIComponent(agentRouteRef(agent)) === activeRef));
+  const seenAgentIds = new Set<string>();
   const conversations = (chats.data ?? []).flatMap(chat => {
     const agent = chat.conversationAgentId ? byId.get(chat.conversationAgentId) : undefined;
-    return agent ? [agent] : [];
+    if (!agent || seenAgentIds.has(agent.id)) return [];
+    seenAgentIds.add(agent.id);
+    return [agent];
   });
   if (active && !conversations.some(agent => agent.id === active.id)) conversations.unshift(active);
   const previews = Object.fromEntries((chats.data ?? []).filter(chat => chat.conversationState === "active")

@@ -17284,6 +17284,7 @@ export function issueRoutes(
     const userChats = await db.select().from(issueRows).where(and(
       eq(issueRows.companyId, companyId),
       eq(issueRows.conversationUserId, req.actor.userId),
+      eq(issueRows.conversationAgentId, agent.id),
       isNull(issueRows.hiddenAt),
     )).orderBy(desc(issueRows.updatedAt));
 
