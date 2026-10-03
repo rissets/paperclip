@@ -1,5 +1,12 @@
 export const queryKeys = {
+  skillSources: {
+    preview: (companyId: string, repositoryUrl: string, connectionId: string | null, commitSha: string | null, skillPath: string, filePath: string) => ['skill-sources', companyId, 'preview', repositoryUrl, connectionId, commitSha, skillPath, filePath] as const,
+    all: (companyId: string) => ["skill-sources", companyId] as const,
+    repositories: (companyId: string) => ["skill-source-repositories", companyId] as const,
+  },
   agentChats: {
+    list: (companyId: string | null, userId?: string | null) =>
+      ["agent-chats", companyId, userId] as const,
     detail: (companyId: string | null, userId: string | null, agentId: string | undefined) =>
       ["agent-chat", companyId, userId, agentId] as const,
     recents: (companyId: string | null, agentId: string | undefined) =>
@@ -218,6 +225,8 @@ export const queryKeys = {
     dataSources: (id: string) => ["agents", "data-sources", id] as const,
     instructionsBundle: (id: string) =>
       ["agents", "instructions-bundle", id] as const,
+    instructionCandidates: (id: string) =>
+      ["agents", "instruction-candidates", id] as const,
     instructionsFile: (id: string, relativePath: string) =>
       ["agents", "instructions-bundle", id, "file", relativePath] as const,
     keys: (agentId: string) => ["agents", "keys", agentId] as const,
@@ -595,7 +604,6 @@ export const queryKeys = {
     currentBoardAccess: ["access", "current-board-access"] as const,
   },
   auth: {
-    preferences: (userId: string | null) => ["auth", "preferences", userId] as const,
     session: ["auth", "session"] as const,
   },
   inboxAgentPolicy: {
@@ -618,6 +626,7 @@ export const queryKeys = {
     experimentalSettings: ["instance", "experimental-settings"] as const,
   },
   health: ["health"] as const,
+  stagingCommit: ["staging-commit"] as const,
   cloud: {
     stacks: ["cloud", "stacks"] as const,
   },

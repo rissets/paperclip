@@ -31,7 +31,7 @@ import { useNavigate, useParams, useSearchParams } from "@/lib/router";
 import { deriveInitials } from "@/components/Identity";
 import { agentRouteRef, cn } from "@/lib/utils";
 import { TaskDetailSurface } from "./IssueDetail";
-import type { Agent, Issue } from "@paperclipai/shared";
+import { isUuidLike, type Agent, type Issue } from "@paperclipai/shared";
 
 type EnrichedRecentChat = Issue & {
   latestSnippet?: string | null;
@@ -134,21 +134,15 @@ export function AgentChat() {
     sessionQuery.data?.user?.id ?? sessionQuery.data?.session?.userId ?? null;
 
   // 3. Resolve Current Active Agent
-  const currentAgent: Agent | null = useMemo(() => {
-    if (!agents.length) return null;
-    return (
-      agents.find(
-        (a) => a.id === agentRef || agentRouteRef(a) === agentRef,
-      ) ?? null
-    );
-  }, [agents, agentRef]);
-
-  // Record visit
-  useEffect(() => {
-    if (enabled && currentAgent && selectedCompanyId) {
-      recordAgentChatVisit(selectedCompanyId, userId, currentAgent.id);
-    }
-  }, [enabled, currentAgent, selectedCompanyId, userId]);
+  const rosterAgent = agents.find(
+    (a) => a.id === agentRef || agentRouteRef(a) === agentRef,
+  );
+  const historyAgent = useQuery({
+    queryKey: queryKeys.agents.detail(agentRef),
+    queryFn: () => agentsApi.get(agentRef, selectedCompanyId!),
+    enabled: enabled && !!selectedCompanyId && agentsQuery.isSuccess && !rosterAgent && isUuidLike(agentRef),
+  });
+  const currentAgent: Agent | null = rosterAgent ?? (historyAgent.data?.companyId === selectedCompanyId ? historyAgent.data : null);
 
   // 4. Fetch Recents / History list
   const recentsQueryKey = useMemo(
@@ -177,6 +171,13 @@ export function AgentChat() {
     );
     return matchingAgentChat?.id ?? recentChats[0]?.id ?? null;
   }, [activeChatIdFromUrl, recentChats, currentAgent?.id]);
+
+  // Record visit
+  useEffect(() => {
+    if (enabled && currentAgent && selectedCompanyId) {
+      recordAgentChatVisit(selectedCompanyId, userId, currentAgent.id, activeChatId ?? null);
+    }
+  }, [enabled, currentAgent, selectedCompanyId, userId, activeChatId]);
 
   // 5. Fetch Active Chat Detail
   const activeChatQueryKey = useMemo(
@@ -241,10 +242,20 @@ export function AgentChat() {
     );
   }, [recentChats, searchQuery]);
 
-  if (!loaded || agentsQuery.isPending || sessionQuery.isPending) {
+  if (!loaded || agentsQuery.isPending || sessionQuery.isPending || (historyAgent.isFetching && !currentAgent)) {
     return (
       <div className="flex h-full items-center justify-center p-8">
         <p className="text-xs text-muted-foreground animate-pulse">Loading conversation…</p>
+      </div>
+    );
+  }
+
+  if (agentsQuery.error || (!rosterAgent && historyAgent.error)) {
+    return (
+      <div className="flex h-full items-center justify-center p-8">
+        <p className="text-sm text-destructive">
+          {(agentsQuery.error ?? historyAgent.error)?.message}
+        </p>
       </div>
     );
   }
@@ -256,14 +267,6 @@ export function AgentChat() {
           Agent Chat is disabled. Enable it in Experimental settings. Existing
           history remains available through task links.
         </p>
-      </div>
-    );
-  }
-
-  if (agentsQuery.error) {
-    return (
-      <div className="flex h-full items-center justify-center p-8">
-        <p className="text-xs text-destructive">{agentsQuery.error.message}</p>
       </div>
     );
   }
