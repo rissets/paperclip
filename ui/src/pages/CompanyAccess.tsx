@@ -118,30 +118,6 @@ export function CompanyAccess() {
     await queryClient.invalidateQueries({ queryKey: queryKeys.access.joinRequests(selectedCompanyId, "pending_approval") });
   };
 
-  const updateMemberMutation = useMutation({
-    mutationFn: async (input: { memberId: string; membershipRole: CompanyMember["membershipRole"]; status: EditableMemberStatus }) => {
-      return accessApi.updateMember(selectedCompanyId!, input.memberId, {
-        membershipRole: input.membershipRole,
-        status: input.status,
-      });
-    },
-    onSuccess: async () => {
-      setEditingMemberId(null);
-      await refreshAccessData();
-      pushToast({
-        title: "Member updated",
-        tone: "success",
-      });
-    },
-    onError: (error) => {
-      pushToast({
-        title: "Failed to update member",
-        body: error instanceof Error ? error.message : "Unknown error",
-        tone: "error",
-      });
-    },
-  });
-
   const approveJoinRequestMutation = useMutation({
     mutationFn: (requestId: string) => accessApi.approveJoinRequest(selectedCompanyId!, requestId),
     onSuccess: async () => {
@@ -186,6 +162,54 @@ export function CompanyAccess() {
     () => membersQuery.data?.members.find((member) => member.id === removingMemberId) ?? null,
     [removingMemberId, membersQuery.data?.members],
   );
+
+  const [draftAssignedAgentIds, setDraftAssignedAgentIds] = useState<string[]>([]);
+
+  const userAssignmentsQuery = useQuery({
+    queryKey: ["user-agent-assignments", selectedCompanyId, editingMember?.principalId],
+    queryFn: () =>
+      selectedCompanyId && editingMember?.principalId && typeof accessApi.getUserAgentAssignments === "function"
+        ? accessApi.getUserAgentAssignments(selectedCompanyId, editingMember.principalId)
+        : Promise.resolve({ assignedAgentIds: [] }),
+    enabled: Boolean(selectedCompanyId && editingMember?.principalId),
+  });
+
+  useEffect(() => {
+    if (userAssignmentsQuery.data?.assignedAgentIds) {
+      setDraftAssignedAgentIds(userAssignmentsQuery.data.assignedAgentIds);
+    } else {
+      setDraftAssignedAgentIds([]);
+    }
+  }, [userAssignmentsQuery.data, editingMemberId]);
+
+  const updateMemberMutation = useMutation({
+    mutationFn: async (input: { memberId: string; membershipRole: CompanyMember["membershipRole"]; status: EditableMemberStatus }) => {
+      const res = await accessApi.updateMember(selectedCompanyId!, input.memberId, {
+        membershipRole: input.membershipRole,
+        status: input.status,
+      });
+      if (editingMember?.principalId && typeof accessApi.assignAgentsToUser === "function") {
+        await accessApi.assignAgentsToUser(selectedCompanyId!, editingMember.principalId, draftAssignedAgentIds);
+      }
+      return res;
+    },
+    onSuccess: async () => {
+      setEditingMemberId(null);
+      await refreshAccessData();
+      await queryClient.invalidateQueries({ queryKey: ["user-agent-assignments"] });
+      pushToast({
+        title: "Member updated",
+        tone: "success",
+      });
+    },
+    onError: (error) => {
+      pushToast({
+        title: "Failed to update member",
+        body: error instanceof Error ? error.message : "Unknown error",
+        tone: "error",
+      });
+    },
+  });
 
   const assignedIssuesQuery = useQuery({
     queryKey: ["access", "member-assigned-issues", selectedCompanyId ?? "", removingMember?.principalId ?? ""],
@@ -476,6 +500,35 @@ export function CompanyAccess() {
                   </select>
                 </label>
               </div>
+
+              {agentsQuery.data && agentsQuery.data.length > 0 && (
+                <div className="space-y-2">
+                  <span className="font-medium text-sm">Assigned Agents</span>
+                  <p className="text-xs text-muted-foreground">
+                    Non-admin members can only view and edit agents assigned to them.
+                  </p>
+                  <div className="max-h-40 overflow-y-auto space-y-1.5 rounded-md border border-border p-3">
+                    {agentsQuery.data.map((agent) => (
+                      <label key={agent.id} className="flex items-center gap-2 text-sm cursor-pointer hover:bg-muted/50 p-1 rounded">
+                        <input
+                          type="checkbox"
+                          checked={draftAssignedAgentIds.includes(agent.id)}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setDraftAssignedAgentIds([...draftAssignedAgentIds, agent.id]);
+                            } else {
+                              setDraftAssignedAgentIds(draftAssignedAgentIds.filter((id) => id !== agent.id));
+                            }
+                          }}
+                          className="rounded border-border text-primary focus:ring-ring"
+                        />
+                        <span className="font-medium">{agent.name}</span>
+                        <span className="text-xs text-muted-foreground">({agent.role})</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
           <DialogFooter>

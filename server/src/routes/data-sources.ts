@@ -11,6 +11,7 @@ import { EnterpriseOrchestratorService } from "../services/enterprise-orchestrat
 import { DatabaseIntegrationService } from "../services/database-integration.js";
 import { ClickhouseService } from "../services/clickhouse.js";
 import { badRequest, forbidden, notFound } from "../errors.js";
+import { userRbacService } from "../services/user-rbac-service.js";
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -27,6 +28,21 @@ export function dataSourceRoutes(db: Db) {
   const dbIntegration = new DatabaseIntegrationService();
   const clickhouse = new ClickhouseService();
   const orchestrator = new EnterpriseOrchestratorService(db);
+  const rbac = userRbacService(db);
+
+  async function assertCanManageDataSources(req: Request, companyId: string) {
+    await assertCompanyAccess(req, companyId);
+    if (req.actor.type === "board") {
+      const canManage = await rbac.canUserAddDataSource(
+        companyId,
+        req.actor.userId || "local-board",
+        req.actor.isInstanceAdmin,
+      );
+      if (!canManage) {
+        throw forbidden("Akses ditolak: Hanya Owner atau Admin yang dapat menambahkan atau mengelola data source");
+      }
+    }
+  }
 
   const getRequestingAgentId = (req: Request): string | null => {
     if (req.actor.type === "agent" && req.actor.agentId) {
@@ -68,7 +84,7 @@ export function dataSourceRoutes(db: Db) {
     upload.any(),
     async (req: Request, res: Response) => {
       const companyId = req.params.companyId as string;
-      await assertCompanyAccess(req, companyId);
+      await assertCanManageDataSources(req, companyId);
 
       const files: Express.Multer.File[] = [];
       if (req.file) {
@@ -132,7 +148,7 @@ export function dataSourceRoutes(db: Db) {
     "/companies/:companyId/data-sources/test-connection",
     async (req: Request, res: Response) => {
       const companyId = req.params.companyId as string;
-      await assertCompanyAccess(req, companyId);
+      await assertCanManageDataSources(req, companyId);
 
       const config = req.body;
       if (!config || !config.host || !config.database || !config.username || !config.type) {
@@ -149,7 +165,7 @@ export function dataSourceRoutes(db: Db) {
     "/companies/:companyId/data-sources/connect-database",
     async (req: Request, res: Response) => {
       const companyId = req.params.companyId as string;
-      await assertCompanyAccess(req, companyId);
+      await assertCanManageDataSources(req, companyId);
 
       const { config, name, description } = req.body || {};
       if (!config || !config.host || !config.database || !config.username || !config.type) {
@@ -171,7 +187,7 @@ export function dataSourceRoutes(db: Db) {
     "/companies/:companyId/data-sources/connect-api",
     async (req: Request, res: Response) => {
       const companyId = req.params.companyId as string;
-      await assertCompanyAccess(req, companyId);
+      await assertCanManageDataSources(req, companyId);
 
       const { config, name, description } = req.body || {};
       if (!config || !config.baseUrl) {
@@ -188,7 +204,7 @@ export function dataSourceRoutes(db: Db) {
     "/companies/:companyId/data-sources/connect-iot",
     async (req: Request, res: Response) => {
       const companyId = req.params.companyId as string;
-      await assertCompanyAccess(req, companyId);
+      await assertCanManageDataSources(req, companyId);
 
       const { config, name, description } = req.body || {};
       if (!config || !config.brokerUrl || !config.topics) {
@@ -205,7 +221,7 @@ export function dataSourceRoutes(db: Db) {
     "/companies/:companyId/data-sources/connect-cctv",
     async (req: Request, res: Response) => {
       const companyId = req.params.companyId as string;
-      await assertCompanyAccess(req, companyId);
+      await assertCanManageDataSources(req, companyId);
 
       const { config, name, description } = req.body || {};
       if (!config || !config.streamUrl || !config.cameraName) {
@@ -222,7 +238,7 @@ export function dataSourceRoutes(db: Db) {
     "/companies/:companyId/data-sources/backfill-profiles",
     async (req: Request, res: Response) => {
       const companyId = req.params.companyId as string;
-      await assertCompanyAccess(req, companyId);
+      await assertCanManageDataSources(req, companyId);
 
       const force = req.query?.force === "true" || req.body?.force === true;
       const count = await dsService.backfillSemanticProfiles(companyId, force);
@@ -257,7 +273,7 @@ export function dataSourceRoutes(db: Db) {
   router.delete("/companies/:companyId/data-sources/:id", async (req: Request, res: Response) => {
     const companyId = req.params.companyId as string;
     const id = req.params.id as string;
-    await assertCompanyAccess(req, companyId);
+    await assertCanManageDataSources(req, companyId);
     const ok = await dsService.delete(companyId, id);
     if (!ok) throw notFound(`Data source not found: ${id}`);
     res.json({ success: true, id });
@@ -619,7 +635,7 @@ export function dataSourceRoutes(db: Db) {
   // Create a new collection
   router.post("/companies/:companyId/data-source-collections", async (req: Request, res: Response) => {
     const companyId = req.params.companyId as string;
-    await assertCompanyAccess(req, companyId);
+    await assertCanManageDataSources(req, companyId);
     const { name, description, color, icon } = req.body || {};
     if (!name || typeof name !== "string" || !name.trim()) {
       throw badRequest("Collection name is required");
@@ -651,7 +667,7 @@ export function dataSourceRoutes(db: Db) {
   router.patch("/companies/:companyId/data-source-collections/:id", async (req: Request, res: Response) => {
     const companyId = req.params.companyId as string;
     const id = req.params.id as string;
-    await assertCompanyAccess(req, companyId);
+    await assertCanManageDataSources(req, companyId);
     const { name, description, color, icon } = req.body || {};
     const updated = await collectionsService.update(companyId, id, {
       name,
@@ -667,7 +683,7 @@ export function dataSourceRoutes(db: Db) {
   router.delete("/companies/:companyId/data-source-collections/:id", async (req: Request, res: Response) => {
     const companyId = req.params.companyId as string;
     const id = req.params.id as string;
-    await assertCompanyAccess(req, companyId);
+    await assertCanManageDataSources(req, companyId);
     const success = await collectionsService.delete(companyId, id);
     if (!success) throw notFound("Collection not found");
     res.json({ success: true });
@@ -677,7 +693,7 @@ export function dataSourceRoutes(db: Db) {
   router.post("/companies/:companyId/data-source-collections/:id/correlate", async (req: Request, res: Response) => {
     const companyId = req.params.companyId as string;
     const id = req.params.id as string;
-    await assertCompanyAccess(req, companyId);
+    await assertCanManageDataSources(req, companyId);
     const profile = await collectionsService.correlateCollection(companyId, id);
     res.json(profile);
   });
@@ -686,7 +702,7 @@ export function dataSourceRoutes(db: Db) {
   router.post("/companies/:companyId/data-source-collections/:id/add-sources", async (req: Request, res: Response) => {
     const companyId = req.params.companyId as string;
     const id = req.params.id as string;
-    await assertCompanyAccess(req, companyId);
+    await assertCanManageDataSources(req, companyId);
     const { dataSourceIds } = req.body || {};
     if (!Array.isArray(dataSourceIds) || dataSourceIds.length === 0) {
       throw badRequest("dataSourceIds array is required");
@@ -700,7 +716,7 @@ export function dataSourceRoutes(db: Db) {
   router.post("/companies/:companyId/data-source-collections/:id/remove-source", async (req: Request, res: Response) => {
     const companyId = req.params.companyId as string;
     const id = req.params.id as string;
-    await assertCompanyAccess(req, companyId);
+    await assertCanManageDataSources(req, companyId);
     const { dataSourceId } = req.body || {};
     if (!dataSourceId || typeof dataSourceId !== "string") {
       throw badRequest("dataSourceId string is required");
@@ -717,7 +733,7 @@ export function dataSourceRoutes(db: Db) {
     async (req: Request, res: Response) => {
       const companyId = req.params.companyId as string;
       const collectionId = req.params.id as string;
-      await assertCompanyAccess(req, companyId);
+      await assertCanManageDataSources(req, companyId);
 
       const collection = await collectionsService.getById(companyId, collectionId);
       if (!collection) throw notFound("Collection not found");

@@ -14,6 +14,9 @@ import { getAdapterLabel } from "../adapters/adapter-display-registry";
 import { clearPendingInviteToken, rememberPendingInviteToken } from "../lib/invite-memory";
 import { queryKeys } from "../lib/queryKeys";
 import { formatDate } from "../lib/utils";
+import { PaperclipLockup } from "../components/PaperclipLockup";
+import { AsciiArtAnimation } from "@/components/AsciiArtAnimation";
+import { ThemeToggle } from "@/components/ThemeToggle";
 
 type AuthMode = "sign_in" | "sign_up";
 type AuthFeedback = { tone: "error" | "info"; message: string };
@@ -242,6 +245,47 @@ export function InviteLandingPage() {
     retry: false,
   });
 
+  const userInviteQuery = useQuery({
+    queryKey: ["user-invitation", token],
+    queryFn: () => accessApi.getUserInvitation(token),
+    enabled: token.length > 0,
+    retry: false,
+  });
+
+  const [userInviteName, setUserInviteName] = useState("");
+  const [userInvitePassword, setUserInvitePassword] = useState("");
+  const [userInviteConfirmPassword, setUserInviteConfirmPassword] = useState("");
+  const [userInviteError, setUserInviteError] = useState<string | null>(null);
+
+  const userInviteAcceptMutation = useMutation({
+    mutationFn: async () => {
+      if (userInvitePassword.length < 8) {
+        throw new Error("Password must be at least 8 characters.");
+      }
+      if (userInvitePassword !== userInviteConfirmPassword) {
+        throw new Error("Passwords do not match.");
+      }
+      return accessApi.acceptUserInvitation(token, {
+        name: userInviteName.trim() || userInviteQuery.data?.name || userInviteQuery.data?.email || "User",
+        password: userInvitePassword,
+      });
+    },
+    onSuccess: async (data) => {
+      setUserInviteError(null);
+      clearPendingInviteToken(token);
+      await queryClient.invalidateQueries({ queryKey: queryKeys.auth.session });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
+      await queryClient.resetQueries({ queryKey: queryKeys.companies.all });
+      if (data.firstCompanyId) {
+        setSelectedCompanyId(data.firstCompanyId, { source: "manual" });
+      }
+      navigate("/", { replace: true });
+    },
+    onError: (err) => {
+      setUserInviteError(err instanceof Error ? err.message : "Failed to accept invitation");
+    },
+  });
+
   // Whose list this is, is no longer this page's problem: the entry is keyed by
   // account, so another account's list is unreachable rather than merely
   // distrusted. What is left for the gate below is narrower and still real — do
@@ -439,7 +483,131 @@ export function InviteLandingPage() {
     return <div className="mx-auto max-w-xl py-10 text-sm text-destructive">Invalid invite token.</div>;
   }
 
-  if (inviteQuery.isLoading || healthQuery.isLoading || sessionQuery.isLoading) {
+  if (userInviteQuery.data) {
+    const uInvite = userInviteQuery.data;
+    return (
+      <div className="fixed inset-0 flex bg-background">
+        <div className="absolute top-4 right-4 z-10">
+          <ThemeToggle />
+        </div>
+        <div className="w-full md:w-1/2 flex flex-col overflow-y-auto">
+          <div className="w-full max-w-md mx-auto my-auto px-8 py-12">
+            <div className="mb-8">
+              <PaperclipLockup className="h-5 w-auto" />
+            </div>
+
+            <h1 className="text-xl font-semibold">Join Paperclip</h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              You&apos;ve been invited to join Paperclip with access to the following workspace(s). Set your password to activate your account.
+            </p>
+
+            <div className="mt-6 rounded-md border border-border bg-card p-4 space-y-3">
+              <div>
+                <span className="text-xs text-muted-foreground uppercase tracking-wider block">Email</span>
+                <span className="text-sm font-medium text-foreground">{uInvite.email}</span>
+              </div>
+              <div>
+                <span className="text-xs text-muted-foreground uppercase tracking-wider block">Role</span>
+                <span className="text-sm font-medium text-foreground capitalize">{uInvite.role}</span>
+              </div>
+              <div>
+                <span className="text-xs text-muted-foreground uppercase tracking-wider block mb-1.5">Assigned Workspaces</span>
+                <div className="flex flex-wrap gap-1.5">
+                  {uInvite.companyNames.map((cName, i) => (
+                    <span key={i} className="inline-flex items-center rounded-md bg-secondary px-2.5 py-1 text-xs font-medium text-secondary-foreground">
+                      {cName}
+                    </span>
+                  ))}
+                </div>
+              </div>
+              {uInvite.agentNames && uInvite.agentNames.length > 0 && (
+                <div>
+                  <span className="text-xs text-muted-foreground uppercase tracking-wider block mb-1.5">Assigned Agents</span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {uInvite.agentNames.map((aName, i) => (
+                      <span key={i} className="inline-flex items-center rounded-md bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary">
+                        {aName}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                userInviteAcceptMutation.mutate();
+              }}
+              className="mt-6 space-y-4"
+            >
+              <div>
+                <label htmlFor="user-invite-name" className="text-xs text-muted-foreground mb-1 block">Full Name</label>
+                <input
+                  id="user-invite-name"
+                  type="text"
+                  className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring placeholder:text-muted-foreground/50"
+                  defaultValue={uInvite.name || ""}
+                  value={userInviteName || uInvite.name || ""}
+                  onChange={(e) => setUserInviteName(e.target.value)}
+                  placeholder="Your full name"
+                  required
+                />
+              </div>
+
+              <div>
+                <label htmlFor="user-invite-password" className="text-xs text-muted-foreground mb-1 block">Create Password</label>
+                <input
+                  id="user-invite-password"
+                  type="password"
+                  className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring placeholder:text-muted-foreground/50"
+                  value={userInvitePassword}
+                  onChange={(e) => setUserInvitePassword(e.target.value)}
+                  autoComplete="new-password"
+                  placeholder="At least 8 characters"
+                  required
+                />
+              </div>
+
+              <div>
+                <label htmlFor="user-invite-confirm" className="text-xs text-muted-foreground mb-1 block">Confirm Password</label>
+                <input
+                  id="user-invite-confirm"
+                  type="password"
+                  className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring placeholder:text-muted-foreground/50"
+                  value={userInviteConfirmPassword}
+                  onChange={(e) => setUserInviteConfirmPassword(e.target.value)}
+                  autoComplete="new-password"
+                  placeholder="Re-type password"
+                  required
+                />
+              </div>
+
+              {userInviteError && (
+                <p role="alert" className="text-xs text-destructive">
+                  {userInviteError}
+                </p>
+              )}
+
+              <Button
+                type="submit"
+                disabled={userInviteAcceptMutation.isPending || !userInvitePassword || userInvitePassword.length < 8}
+                className="w-full"
+              >
+                {userInviteAcceptMutation.isPending ? "Setting up account…" : "Accept Invitation & Join"}
+              </Button>
+            </form>
+          </div>
+        </div>
+
+        <div className="hidden md:block w-1/2 overflow-hidden">
+          <AsciiArtAnimation />
+        </div>
+      </div>
+    );
+  }
+
+  if (inviteQuery.isLoading || userInviteQuery.isLoading || healthQuery.isLoading || sessionQuery.isLoading) {
     return <div className="mx-auto max-w-xl py-10 text-sm text-muted-foreground">Loading invite...</div>;
   }
 

@@ -206,4 +206,12 @@ export const authApi = {
       ...(typeof result.redirectTo === "string" ? { redirectTo: result.redirectTo } : {}),
     };
   },
+
+  forgotPassword: async (email: string) => {
+    return authPost("/forgot-password", { email });
+  },
+
+  resetPassword: async (input: { token: string; newPassword: string }) => {
+    return authPost("/reset-password", input);
+  },
 };

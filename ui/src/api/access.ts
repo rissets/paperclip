@@ -415,4 +415,68 @@ export const accessApi = {
 
   getCurrentBoardAccess: () =>
     api.get<CurrentBoardAccess>("/cli-auth/me"),
+
+  getUserInvitation: (token: string) =>
+    api.get<{
+      email: string;
+      name: string | null;
+      role: HumanCompanyRole;
+      companyNames: string[];
+      companies: Array<{ id: string; name: string; issuePrefix: string }>;
+      agentNames: string[];
+      expiresAt: string;
+    }>(`/invitations/${token}`),
+
+  acceptUserInvitation: (token: string, input: { name: string; password: string }) =>
+    api.post<{ success: true; userId: string; email: string; firstCompanyId: string | null }>(
+      `/invitations/${token}/accept`,
+      input,
+    ),
+
+  listUserInvitations: () =>
+    api.get<Array<{
+      id: string;
+      email: string;
+      name: string | null;
+      role: HumanCompanyRole;
+      companyIds: string[];
+      agentIds: string[];
+      companyNames: string[];
+      agentNames: string[];
+      status: "pending" | "accepted" | "revoked" | "expired";
+      expiresAt: string;
+      createdAt: string;
+    }>>("/invitations"),
+
+  createUserInvitation: (input: {
+    email: string;
+    name?: string;
+    role?: HumanCompanyRole;
+    companyIds: string[];
+    agentIds?: string[];
+  }) =>
+    api.post<{
+      id: string;
+      email: string;
+      name: string | null;
+      role: HumanCompanyRole;
+      companyIds: string[];
+      agentIds: string[];
+      token: string;
+      inviteUrl: string;
+      expiresAt: string;
+      status: string;
+    }>("/invitations", input),
+
+  revokeUserInvitation: (id: string) =>
+    api.delete<{ success: true }>(`/invitations/${id}`),
+
+  getUserAgentAssignments: (companyId: string, userId: string) =>
+    api.get<{ assignedAgentIds: string[] }>(`/companies/${companyId}/users/${userId}/assigned-agents`),
+
+  assignAgentsToUser: (companyId: string, userId: string, agentIds: string[]) =>
+    api.put<{ success: true; assignedAgentIds: string[] }>(
+      `/companies/${companyId}/users/${userId}/assigned-agents`,
+      { agentIds },
+    ),
 };

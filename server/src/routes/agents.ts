@@ -23,6 +23,7 @@ import { readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import type { Db } from "@paperclipai/db";
 import type { ChatChannelService } from "../services/chat-channels.js";
+import { userRbacService } from "../services/user-rbac-service.js";
 import { activityLog, agents as agentsTable, chatConversations, companies, heartbeatRuns, issues as issuesTable, projects as projectsTable } from "@paperclipai/db";
 import { and, desc, eq, inArray, not, sql } from "drizzle-orm";
 import { sha256Digest } from "../services/feedback-redaction.js";
@@ -541,6 +542,7 @@ export function agentRoutes(
   const router = Router();
   const svc = agentService(db);
   const access = accessService(db);
+  const rbac = userRbacService(db);
   const approvalsSvc = approvalService(db);
   const budgets = budgetService(db);
   const environmentsSvc = environmentService(db);
@@ -1751,6 +1753,16 @@ export function agentRoutes(
 
   async function assertCanCreateAgentsForCompany(req: Request, companyId: string) {
     assertCompanyAccess(req, companyId);
+    if (req.actor.type === "board") {
+      const canCreate = await rbac.canUserAddAgent(
+        companyId,
+        req.actor.userId || "local-board",
+        req.actor.isInstanceAdmin,
+      );
+      if (!canCreate) {
+        throw forbidden("Akses ditolak: Hanya Owner atau Admin yang dapat menambahkan agent");
+      }
+    }
     const decision = await access.decide({
       actor: req.actor,
       action: "agents:create",
@@ -2130,6 +2142,17 @@ export function agentRoutes(
       throw notFound("Agent not found");
     }
     assertCompanyAccess(req, targetAgent.companyId);
+    if (req.actor.type === "board") {
+      const canEdit = await rbac.canUserEditAgent(
+        targetAgent.companyId,
+        req.actor.userId || "local-board",
+        targetAgent.id,
+        req.actor.isInstanceAdmin,
+      );
+      if (!canEdit) {
+        throw forbidden("Akses ditolak: Anda hanya dapat mengedit agent yang ditugaskan kepada Anda oleh admin atau owner");
+      }
+    }
     const decision = await access.decide({
       actor: req.actor,
       action: "agent_config:update",
@@ -5421,6 +5444,18 @@ export function agentRoutes(
     const id = req.params.id as string;
     const existing = await getAccessibleResource(req, res, svc.getById(id), "Agent not found");
     if (!existing) return;
+
+    if (req.actor.type === "board") {
+      const canEdit = await rbac.canUserEditAgent(
+        existing.companyId,
+        req.actor.userId || "local-board",
+        existing.id,
+        req.actor.isInstanceAdmin,
+      );
+      if (!canEdit) {
+        throw forbidden("Akses ditolak: Anda hanya dapat mengedit agent yang ditugaskan kepada Anda oleh admin atau owner");
+      }
+    }
 
     if (hasOwn(req.body as object, "permissions")) {
       res.status(422).json({ error: "Use /api/agents/:id/permissions for permission changes" });

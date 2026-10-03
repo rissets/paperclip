@@ -168,3 +168,37 @@ export interface UserCompanyAccessResponse {
   }) | null;
   companyAccess: UserCompanyAccessEntry[];
 }
+
+export interface UserAgentAssignment {
+  id: string;
+  userId: string;
+  agentId: string;
+  companyId: string;
+  assignedByUserId: string | null;
+  createdAt: Date;
+}
+
+export interface UserInvitation {
+  id: string;
+  email: string;
+  name: string | null;
+  role: string;
+  companyIds: string[];
+  agentIds: string[];
+  token: string;
+  invitedByUserId: string | null;
+  status: "pending" | "accepted" | "revoked" | "expired";
+  expiresAt: Date;
+  acceptedAt: Date | null;
+  createdAt: Date;
+}
+
+export interface UserRbacStatus {
+  userId: string;
+  companyId: string;
+  role: "owner" | "admin" | "operator" | "viewer";
+  isOwnerOrAdmin: boolean;
+  canAddDataSource: boolean;
+  canAddAgent: boolean;
+  assignedAgentIds: string[];
+}

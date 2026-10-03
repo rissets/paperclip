@@ -220,3 +220,45 @@ export const updateCurrentUserProfileSchema = z.object({
 });
 
 export type UpdateCurrentUserProfile = z.infer<typeof updateCurrentUserProfileSchema>;
+
+export const createUserInvitationSchema = z.object({
+  email: z.string().email(),
+  name: z.string().max(120).optional().nullable(),
+  role: z.enum(["owner", "admin", "operator", "viewer"]).default("operator"),
+  companyIds: z.array(z.string().uuid()).min(1),
+  agentIds: z.array(z.string().uuid()).optional().default([]),
+});
+
+export type CreateUserInvitation = z.infer<typeof createUserInvitationSchema>;
+
+export const acceptUserInvitationSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  password: z.string().min(8).max(128),
+});
+
+export type AcceptUserInvitation = z.infer<typeof acceptUserInvitationSchema>;
+
+export const forgotPasswordSchema = z.object({
+  email: z.string().email(),
+});
+
+export type ForgotPassword = z.infer<typeof forgotPasswordSchema>;
+
+export const resetPasswordWithTokenSchema = z.object({
+  token: z.string().min(1),
+  newPassword: z.string().min(8).max(128),
+});
+
+export type ResetPasswordWithToken = z.infer<typeof resetPasswordWithTokenSchema>;
+
+export const assignUsersToAgentSchema = z.object({
+  userIds: z.array(z.string()),
+});
+
+export type AssignUsersToAgent = z.infer<typeof assignUsersToAgentSchema>;
+
+export const assignAgentsToUserSchema = z.object({
+  agentIds: z.array(z.string().uuid()),
+});
+
+export type AssignAgentsToUser = z.infer<typeof assignAgentsToUserSchema>;

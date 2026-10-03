@@ -225,3 +225,5 @@ export { chatTaskHandoffs, chatCompletionDeliveries } from "./chat_completion_de
 export { agentInstructionRevisions, agentInstructionHeads, agentInstructionWorkingCopies } from "./agent_instruction_revisions.js";
 export { browserUseSettings, browserUseSessions, browserUseRuns, browserUseBrowsers } from "./browser_use.js";
 export * from "./company_skill_sources.js";
+export { userAgentAssignments } from "./user_agent_assignments.js";
+export { userInvitations } from "./user_invitations.js";

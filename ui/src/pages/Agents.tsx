@@ -36,6 +36,7 @@ import {
   useResourceMemberships,
 } from "../hooks/useResourceMemberships";
 import { usePublishSharedQueryData, useSharedPollingQuery } from "../hooks/useSharedPolling";
+import { useUserRbac } from "@/hooks/useUserRbac";
 
 import { getAdapterLabel } from "../adapters/adapter-display-registry";
 
@@ -198,6 +199,7 @@ export type AgentsView = "list" | "org";
 export function Agents({ initialView = "list" }: { initialView?: AgentsView } = {}) {
   const agentChat = useAgentChatEnabled();
   const { selectedCompanyId } = useCompany();
+  const { canAddAgent } = useUserRbac();
   const { openNewAgent } = useDialogActions();
   const { setBreadcrumbs } = useBreadcrumbs();
   const navigate = useNavigate();
@@ -520,10 +522,12 @@ export function Agents({ initialView = "list" }: { initialView?: AgentsView } = 
                 <Network className="h-3.5 w-3.5" />
               </Button>
           </div> : null}
-          <Button size="sm" variant="outline" onClick={openNewAgent}>
-            <Plus className="h-3.5 w-3.5 mr-1.5" />
-            New Agent
-          </Button>
+          {canAddAgent && (
+            <Button size="sm" variant="outline" onClick={openNewAgent}>
+              <Plus className="h-3.5 w-3.5 mr-1.5" />
+              New Agent
+            </Button>
+          )}
         </div>
       </div>
 
@@ -537,8 +541,8 @@ export function Agents({ initialView = "list" }: { initialView?: AgentsView } = 
         <EmptyState
           icon={Bot}
           message="Create your first agent to get started."
-          action="New Agent"
-          onAction={openNewAgent}
+          action={canAddAgent ? "New Agent" : undefined}
+          onAction={canAddAgent ? openNewAgent : undefined}
         />
       )}
 

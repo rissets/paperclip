@@ -37,6 +37,7 @@ import {
   FileText,
 } from "lucide-react";
 import { useCompany } from "@/context/CompanyContext";
+import { useUserRbac } from "@/hooks/useUserRbac";
 import { dataSourcesApi } from "@/api/data-sources";
 import type {
   DataSourceCollection,
@@ -53,6 +54,7 @@ import type {
 export function DataSourceCollectionDetail() {
   const { id } = useParams<{ id: string }>();
   const { selectedCompanyId } = useCompany();
+  const { canAddDataSource } = useUserRbac();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
 
@@ -224,13 +226,15 @@ export function DataSourceCollectionDetail() {
             <RefreshCw className={`h-3.5 w-3.5 ${correlateMutation.isPending ? "animate-spin" : ""}`} />
             {correlateMutation.isPending ? "Re-Analyzing..." : "Re-Analyze & Correlate"}
           </button>
-          <button
-            onClick={() => setIsUploadOpen(true)}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 transition-colors shadow-sm"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            Upload to Collection
-          </button>
+          {canAddDataSource && (
+            <button
+              onClick={() => setIsUploadOpen(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 transition-colors shadow-sm"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              Upload to Collection
+            </button>
+          )}
         </div>
       </div>
 

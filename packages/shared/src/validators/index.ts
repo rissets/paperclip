@@ -773,6 +773,12 @@ export {
   updateMemberPermissionsSchema,
   searchAdminUsersQuerySchema,
   updateUserCompanyAccessSchema,
+  createUserInvitationSchema,
+  acceptUserInvitationSchema,
+  forgotPasswordSchema,
+  resetPasswordWithTokenSchema,
+  assignUsersToAgentSchema,
+  assignAgentsToUserSchema,
   type CreateCompanyInvite,
   type CreateOpenClawInvitePrompt,
   type AcceptInvite,
@@ -792,6 +798,12 @@ export {
   type UpdateMemberPermissions,
   type SearchAdminUsersQuery,
   type UpdateUserCompanyAccess,
+  type CreateUserInvitation,
+  type AcceptUserInvitation,
+  type ForgotPassword,
+  type ResetPasswordWithToken,
+  type AssignUsersToAgent,
+  type AssignAgentsToUser,
 } from "./access.js";
 
 export {

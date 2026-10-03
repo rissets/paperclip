@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Check, Copy } from "lucide-react";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Check, Copy, Mail } from "lucide-react";
 import { accessApi } from "@/api/access";
+import { agentsApi } from "@/api/agents";
+import { useCompanyListQuery } from "@/api/companies-query";
 import { ApiError } from "@/api/client";
 import { Button } from "@/components/ui/button";
 import { useCompany } from "@/context/CompanyContext";
@@ -54,6 +56,89 @@ export function InvitesSection() {
   const [latestInviteUrl, setLatestInviteUrl] = useState<string | null>(null);
   const [latestInviteCopied, setLatestInviteCopied] = useState(false);
   const latestInviteInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteName, setInviteName] = useState("");
+  const [selectedCompanyIds, setSelectedCompanyIds] = useState<string[]>(() =>
+    selectedCompanyId ? [selectedCompanyId] : [],
+  );
+  const [selectedAgentIds, setSelectedAgentIds] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (selectedCompanyId && !selectedCompanyIds.includes(selectedCompanyId)) {
+      setSelectedCompanyIds((prev) => [...prev, selectedCompanyId]);
+    }
+  }, [selectedCompanyId]);
+
+  const companyListQuery = useCompanyListQuery();
+  const availableCompanies = companyListQuery.data?.companies ?? [];
+
+  const agentsQuery = useQuery({
+    queryKey: queryKeys.agents.list(selectedCompanyId ?? ""),
+    queryFn: () => (typeof agentsApi.list === "function" ? agentsApi.list(selectedCompanyId!) : Promise.resolve([])),
+    enabled: Boolean(selectedCompanyId),
+  });
+
+  const userInvitationsQuery = useQuery({
+    queryKey: ["user-invitations"],
+    queryFn: () => (typeof accessApi.listUserInvitations === "function" ? accessApi.listUserInvitations() : Promise.resolve([])),
+  });
+
+  const sendUserInviteMutation = useMutation({
+    mutationFn: async () => {
+      if (!inviteEmail.trim()) {
+        throw new Error("Recipient email is required.");
+      }
+      if (selectedCompanyIds.length === 0) {
+        throw new Error("Select at least one workspace to grant access to.");
+      }
+      return accessApi.createUserInvitation({
+        email: inviteEmail.trim(),
+        name: inviteName.trim() || undefined,
+        role: humanRole,
+        companyIds: selectedCompanyIds,
+        agentIds: selectedAgentIds,
+      });
+    },
+    onSuccess: async (invite) => {
+      setLatestInviteUrl(invite.inviteUrl);
+      setLatestInviteCopied(false);
+      setInviteEmail("");
+      setInviteName("");
+      setSelectedAgentIds([]);
+      await queryClient.invalidateQueries({ queryKey: ["user-invitations"] });
+      const copied = await copyText(invite.inviteUrl, "Copy the invite URL manually from the field below.");
+      pushToast({
+        title: "Invitation sent",
+        body: copied
+          ? `Invitation email sent to ${invite.email} and link copied to clipboard.`
+          : `Invitation email sent to ${invite.email}.`,
+        tone: "success",
+      });
+    },
+    onError: (err) => {
+      pushToast({
+        title: "Failed to send invitation",
+        body: err instanceof Error ? err.message : "Unknown error",
+        tone: "error",
+      });
+    },
+  });
+
+  const revokeUserInviteMutation = useMutation({
+    mutationFn: (id: string) => accessApi.revokeUserInvitation(id),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["user-invitations"] });
+      pushToast({ title: "Invitation revoked", tone: "success" });
+    },
+    onError: (err) => {
+      pushToast({
+        title: "Failed to revoke invitation",
+        body: err instanceof Error ? err.message : "Unknown error",
+        tone: "error",
+      });
+    },
+  });
 
   useEffect(() => {
     if (!latestInviteCopied) return;
@@ -179,8 +264,33 @@ export function InvitesSection() {
         <div className="space-y-1">
           <h2 className="text-sm font-semibold">Invite a person</h2>
           <p className="text-sm text-muted-foreground">
-            Generate a human invite link and choose the default access it should request.
+            Send an invitation email with multi-workspace access and assigned agents, or generate an invite link.
           </p>
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div>
+            <label htmlFor="invite-email-input" className="text-xs text-muted-foreground block mb-1">Recipient Email</label>
+            <input
+              id="invite-email-input"
+              type="email"
+              placeholder="colleague@example.com"
+              value={inviteEmail}
+              onChange={(e) => setInviteEmail(e.target.value)}
+              className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring placeholder:text-muted-foreground/50"
+            />
+          </div>
+          <div>
+            <label htmlFor="invite-name-input" className="text-xs text-muted-foreground block mb-1">Recipient Name (optional)</label>
+            <input
+              id="invite-name-input"
+              type="text"
+              placeholder="Jane Doe"
+              value={inviteName}
+              onChange={(e) => setInviteName(e.target.value)}
+              className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring placeholder:text-muted-foreground/50"
+            />
+          </div>
         </div>
 
         <fieldset className="space-y-3">
@@ -219,11 +329,94 @@ export function InvitesSection() {
           </div>
         </fieldset>
 
+        {availableCompanies.length > 1 && (
+          <div className="space-y-2">
+            <span className="text-sm font-medium block">Grant access to workspaces</span>
+            <div className="flex flex-wrap gap-2">
+              {availableCompanies.map((c) => {
+                const isChecked = selectedCompanyIds.includes(c.id);
+                return (
+                  <label
+                    key={c.id}
+                    className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-md border text-xs cursor-pointer transition-colors ${
+                      isChecked
+                        ? "border-primary bg-primary/10 text-primary font-medium"
+                        : "border-border text-muted-foreground hover:bg-muted/50"
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={isChecked}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setSelectedCompanyIds([...selectedCompanyIds, c.id]);
+                        } else {
+                          setSelectedCompanyIds(selectedCompanyIds.filter((id) => id !== c.id));
+                        }
+                      }}
+                      className="rounded border-border text-primary focus:ring-ring"
+                    />
+                    {c.name}
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {agentsQuery.data && agentsQuery.data.length > 0 && (
+          <div className="space-y-2">
+            <span className="text-sm font-medium block">Assign agents (optional)</span>
+            <p className="text-xs text-muted-foreground">
+              Non-admin members can only view and edit agents assigned to them.
+            </p>
+            <div className="flex flex-wrap gap-2 max-h-36 overflow-y-auto">
+              {agentsQuery.data.map((agent) => {
+                const isChecked = selectedAgentIds.includes(agent.id);
+                return (
+                  <label
+                    key={agent.id}
+                    className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-md border text-xs cursor-pointer transition-colors ${
+                      isChecked
+                        ? "border-primary bg-primary/10 text-primary font-medium"
+                        : "border-border text-muted-foreground hover:bg-muted/50"
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={isChecked}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setSelectedAgentIds([...selectedAgentIds, agent.id]);
+                        } else {
+                          setSelectedAgentIds(selectedAgentIds.filter((id) => id !== agent.id));
+                        }
+                      }}
+                      className="rounded border-border text-primary focus:ring-ring"
+                    />
+                    <span>{agent.name}</span>
+                    <span className="text-muted-foreground">({agent.role})</span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         <div className="rounded-lg border border-border px-4 py-3 text-sm text-muted-foreground">
           Each invite link is single-use. Human invitees get the selected role immediately after sign-in; agent invites still create a join request for approval.
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
+          {inviteEmail.trim() ? (
+            <Button
+              onClick={() => sendUserInviteMutation.mutate()}
+              disabled={sendUserInviteMutation.isPending}
+            >
+              <Mail className="h-3.5 w-3.5 mr-1.5" />
+              {sendUserInviteMutation.isPending ? "Sending…" : "Send Email Invitation"}
+            </Button>
+          ) : null}
           <Button onClick={() => createInviteMutation.mutate()} disabled={createInviteMutation.isPending}>
             {createInviteMutation.isPending ? "Creating…" : "Create invite"}
           </Button>
@@ -275,6 +468,90 @@ export function InvitesSection() {
           </div>
         ) : null}
       </section>
+
+      {userInvitationsQuery.data && userInvitationsQuery.data.length > 0 && (
+        <section className="rounded-xl border border-border">
+          <div className="px-5 py-4 border-b border-border">
+            <h2 className="text-sm font-semibold">Email Invitations</h2>
+            <p className="text-sm text-muted-foreground">
+              Invitations sent via email with multi-workspace access and assigned agents.
+            </p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-left text-sm">
+              <thead>
+                <tr className="border-b border-border">
+                  <th className="px-5 py-3 font-medium text-muted-foreground">Recipient</th>
+                  <th className="px-5 py-3 font-medium text-muted-foreground">Role</th>
+                  <th className="px-5 py-3 font-medium text-muted-foreground">Workspaces</th>
+                  <th className="px-5 py-3 font-medium text-muted-foreground">Agents</th>
+                  <th className="px-5 py-3 font-medium text-muted-foreground">Status</th>
+                  <th className="px-5 py-3 font-medium text-muted-foreground">Sent</th>
+                  <th className="px-5 py-3 text-right font-medium text-muted-foreground">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {userInvitationsQuery.data.map((inv) => (
+                  <tr key={inv.id} className="border-b border-border last:border-b-0">
+                    <td className="px-5 py-3 align-top">
+                      <div className="font-medium text-foreground">{inv.email}</div>
+                      {inv.name ? <div className="text-xs text-muted-foreground">{inv.name}</div> : null}
+                    </td>
+                    <td className="px-5 py-3 align-top capitalize text-muted-foreground">
+                      {inv.role}
+                    </td>
+                    <td className="px-5 py-3 align-top">
+                      <div className="flex flex-wrap gap-1">
+                        {inv.companyNames.map((cName, idx) => (
+                          <Badge key={idx} variant="outline" className="text-xs">
+                            {cName}
+                          </Badge>
+                        ))}
+                      </div>
+                    </td>
+                    <td className="px-5 py-3 align-top">
+                      {inv.agentNames.length > 0 ? (
+                        <div className="flex flex-wrap gap-1">
+                          {inv.agentNames.map((aName, idx) => (
+                            <Badge key={idx} variant="secondary" className="text-xs">
+                              {aName}
+                            </Badge>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="text-muted-foreground text-xs">—</span>
+                      )}
+                    </td>
+                    <td className="px-5 py-3 align-top">
+                      <Badge
+                        variant={inv.status === "accepted" ? "default" : inv.status === "pending" ? "outline" : "secondary"}
+                        className="capitalize"
+                      >
+                        {inv.status}
+                      </Badge>
+                    </td>
+                    <td className="px-5 py-3 align-top text-xs text-muted-foreground">
+                      {new Date(inv.createdAt).toLocaleDateString()}
+                    </td>
+                    <td className="px-5 py-3 text-right align-top">
+                      {inv.status === "pending" ? (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => revokeUserInviteMutation.mutate(inv.id)}
+                          disabled={revokeUserInviteMutation.isPending}
+                        >
+                          Revoke
+                        </Button>
+                      ) : null}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
 
       <section className="rounded-xl border border-border">
         <div className="flex flex-wrap items-center justify-between gap-4 px-5 py-4">

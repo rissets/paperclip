@@ -25,6 +25,7 @@ import {
   Network,
 } from "lucide-react";
 import { useCompany } from "@/context/CompanyContext";
+import { useUserRbac } from "@/hooks/useUserRbac";
 import { dataSourcesApi } from "@/api/data-sources";
 import type {
   DataSource,
@@ -39,6 +40,7 @@ import type {
 
 export function DataSources() {
   const { selectedCompanyId } = useCompany();
+  const { canAddDataSource } = useUserRbac();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
 
@@ -429,52 +431,56 @@ export function DataSources() {
             <Sparkles className="h-3.5 w-3.5 text-amber-500" />
             {backfillMutation.isPending ? "Syncing JEV..." : "Sync JEV Profiles"}
           </button>
-          <button
-            onClick={() => setIsConnectApiOpen(true)}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-xs font-medium text-foreground shadow-sm transition-colors hover:bg-muted"
-          >
-            <Globe className="h-3.5 w-3.5 text-blue-500" />
-            Connect API
-          </button>
-          <button
-            onClick={() => setIsConnectIotOpen(true)}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-xs font-medium text-foreground shadow-sm transition-colors hover:bg-muted"
-          >
-            <Radio className="h-3.5 w-3.5 text-emerald-500" />
-            Connect IoT
-          </button>
-          <button
-            onClick={() => setIsConnectCctvOpen(true)}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-xs font-medium text-foreground shadow-sm transition-colors hover:bg-muted"
-          >
-            <Video className="h-3.5 w-3.5 text-purple-500" />
-            Connect CCTV
-          </button>
-          <button
-            onClick={() => {
-              setIsConnectDbOpen(true);
-              setDbTestResult(null);
-              setDbConnectError(null);
-            }}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-xs font-medium text-foreground shadow-sm transition-colors hover:bg-muted"
-          >
-            <Server className="h-3.5 w-3.5 text-primary" />
-            Connect DB
-          </button>
-          <button
-            onClick={() => setIsCreateCollectionOpen(true)}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-xs font-medium text-foreground shadow-sm transition-colors hover:bg-muted"
-          >
-            <Folder className="h-3.5 w-3.5 text-primary" />
-            New Collection
-          </button>
-          <button
-            onClick={() => setIsUploadOpen(true)}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-xs font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            Upload File
-          </button>
+          {canAddDataSource && (
+            <>
+              <button
+                onClick={() => setIsConnectApiOpen(true)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-xs font-medium text-foreground shadow-sm transition-colors hover:bg-muted"
+              >
+                <Globe className="h-3.5 w-3.5 text-blue-500" />
+                Connect API
+              </button>
+              <button
+                onClick={() => setIsConnectIotOpen(true)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-xs font-medium text-foreground shadow-sm transition-colors hover:bg-muted"
+              >
+                <Radio className="h-3.5 w-3.5 text-emerald-500" />
+                Connect IoT
+              </button>
+              <button
+                onClick={() => setIsConnectCctvOpen(true)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-xs font-medium text-foreground shadow-sm transition-colors hover:bg-muted"
+              >
+                <Video className="h-3.5 w-3.5 text-purple-500" />
+                Connect CCTV
+              </button>
+              <button
+                onClick={() => {
+                  setIsConnectDbOpen(true);
+                  setDbTestResult(null);
+                  setDbConnectError(null);
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-xs font-medium text-foreground shadow-sm transition-colors hover:bg-muted"
+              >
+                <Server className="h-3.5 w-3.5 text-primary" />
+                Connect DB
+              </button>
+              <button
+                onClick={() => setIsCreateCollectionOpen(true)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-xs font-medium text-foreground shadow-sm transition-colors hover:bg-muted"
+              >
+                <Folder className="h-3.5 w-3.5 text-primary" />
+                New Collection
+              </button>
+              <button
+                onClick={() => setIsUploadOpen(true)}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-xs font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Upload File
+              </button>
+            </>
+          )}
         </div>
       </div>
 

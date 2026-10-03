@@ -38,10 +38,13 @@ import {
   formatDatabaseBackupResult,
   runDatabaseBackup,
   authUsers,
+  authAccounts,
   companies,
   companyMemberships,
   instanceUserRoles,
 } from "@paperclipai/db";
+import { randomBytes } from "node:crypto";
+import { hashPassword } from "better-auth/crypto";
 import detectPort from "detect-port";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
@@ -354,6 +357,9 @@ async function startServerWithDatabaseTeardown(
   const LOCAL_BOARD_USER_NAME = "Board";
   
   async function ensureLocalTrustedBoardPrincipal(db: any): Promise<void> {
+    if (!db || typeof db.insert !== "function" || typeof db.select !== "function") {
+      return;
+    }
     const now = new Date();
     const existingUser = await db
       .select({ id: authUsers.id })
@@ -415,6 +421,96 @@ async function startServerWithDatabaseTeardown(
         companyId: company.id,
         principalType: "user",
         principalId: LOCAL_BOARD_USER_ID,
+        status: "active",
+        membershipRole: "owner",
+      });
+    }
+  }
+
+  async function ensureBootstrapAdminUser(db: any): Promise<void> {
+    if (!db || typeof db.insert !== "function" || typeof db.select !== "function") {
+      return;
+    }
+    const adminEmail = (process.env.ADMIN_EMAIL || process.env.EMAIL_HOST_USER || "memories.risset@gmail.com").trim().toLowerCase();
+    const now = new Date();
+    let adminUser = await db
+      .select({ id: authUsers.id })
+      .from(authUsers)
+      .where(eq(authUsers.email, adminEmail))
+      .then((rows: Array<{ id: string }>) => rows[0] ?? null);
+
+    if (!adminUser) {
+      const newId = randomBytes(16).toString("hex");
+      const [created] = await db
+        .insert(authUsers)
+        .values({
+          id: newId,
+          name: "Admin",
+          email: adminEmail,
+          emailVerified: true,
+          image: null,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      adminUser = created;
+
+      const defaultPassword = process.env.ADMIN_INITIAL_PASSWORD || "Admin@Lokakara2026!";
+      const hashedPassword = await hashPassword(defaultPassword);
+      await db.insert(authAccounts).values({
+        id: randomBytes(16).toString("hex"),
+        userId: adminUser.id,
+        accountId: adminEmail,
+        providerId: "credential",
+        issuer: "local:credential",
+        password: hashedPassword,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    const role = await db
+      .select({ id: instanceUserRoles.id })
+      .from(instanceUserRoles)
+      .where(and(eq(instanceUserRoles.userId, adminUser.id), eq(instanceUserRoles.role, "instance_admin")))
+      .then((rows: Array<{ id: string }>) => rows[0] ?? null);
+    if (!role) {
+      await db.insert(instanceUserRoles).values({
+        userId: adminUser.id,
+        role: "instance_admin",
+      });
+    }
+
+    const companyRows = await db.select({ id: companies.id }).from(companies);
+    for (const company of companyRows) {
+      const membership = await db
+        .select({
+          id: companyMemberships.id,
+          membershipRole: companyMemberships.membershipRole,
+          status: companyMemberships.status,
+        })
+        .from(companyMemberships)
+        .where(
+          and(
+            eq(companyMemberships.companyId, company.id),
+            eq(companyMemberships.principalType, "user"),
+            eq(companyMemberships.principalId, adminUser.id),
+          ),
+        )
+        .then((rows: Array<{ id: string; membershipRole: string | null; status: string }>) => rows[0] ?? null);
+      if (membership) {
+        if (membership.membershipRole !== "owner" || membership.status !== "active") {
+          await db
+            .update(companyMemberships)
+            .set({ membershipRole: "owner", status: "active" })
+            .where(eq(companyMemberships.id, membership.id));
+        }
+        continue;
+      }
+      await db.insert(companyMemberships).values({
+        companyId: company.id,
+        principalType: "user",
+        principalId: adminUser.id,
         status: "active",
         membershipRole: "owner",
       });
@@ -710,6 +806,7 @@ async function startServerWithDatabaseTeardown(
   if (config.deploymentMode === "local_trusted") {
     await ensureLocalTrustedBoardPrincipal(db as any);
   }
+  await ensureBootstrapAdminUser(db as any);
   const accessBackfill = await backfillPrincipalAccessCompatibility(db as any);
   if (accessBackfill.agentMembershipsInserted > 0 || accessBackfill.humanGrantsInserted > 0) {
     logger.info(accessBackfill, "Backfilled principal access compatibility records");

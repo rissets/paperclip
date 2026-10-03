@@ -1,15 +1,20 @@
 import { Router } from "express";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
+import { randomBytes } from "node:crypto";
 import type { Db } from "@paperclipai/db";
-import { authUsers } from "@paperclipai/db";
+import { authUsers, authAccounts, authSessions, authVerifications } from "@paperclipai/db";
 import {
   authSessionSchema,
   currentUserProfileSchema,
   updateCurrentUserProfileSchema,
+  forgotPasswordSchema,
+  resetPasswordWithTokenSchema,
 } from "@paperclipai/shared";
-import { unauthorized } from "../errors.js";
+import { hashPassword } from "better-auth/crypto";
+import { badRequest, unauthorized } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import { resolveSentryDsns } from "../sentry-dsn.js";
+import { sendPasswordResetEmail } from "../services/email-service.js";
 
 async function loadCurrentUserProfile(db: Db, userId: string) {
   const user = await db
@@ -102,6 +107,89 @@ export function authRoutes(db: Db) {
       name: updated.name ?? null,
       image: updated.image ?? null,
     }));
+  });
+
+  router.post("/forgot-password", validate(forgotPasswordSchema), async (req, res) => {
+    const email = req.body.email.trim().toLowerCase();
+    const user = await db
+      .select({ id: authUsers.id, name: authUsers.name, email: authUsers.email })
+      .from(authUsers)
+      .where(eq(authUsers.email, email))
+      .then((rows) => rows[0] ?? null);
+
+    if (user) {
+      const resetToken = randomBytes(24).toString("hex");
+      const expiresAt = new Date(Date.now() + 3600 * 1000); // 1 hour
+
+      await db
+        .insert(authVerifications)
+        .values({
+          id: randomBytes(16).toString("hex"),
+          identifier: `reset-password:${resetToken}`,
+          value: user.id,
+          expiresAt,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .onConflictDoNothing();
+
+      const origin = process.env.PAPERCLIP_PUBLIC_URL || "http://localhost:3100";
+      const resetUrl = `${origin}/auth/reset-password?token=${encodeURIComponent(resetToken)}`;
+
+      await sendPasswordResetEmail({
+        email: user.email,
+        name: user.name,
+        resetUrl,
+      });
+    }
+
+    res.json({
+      status: true,
+      message: "If this email is registered, a password reset link has been sent.",
+    });
+  });
+
+  router.post("/reset-password", validate(resetPasswordWithTokenSchema), async (req, res) => {
+    const { token, newPassword } = req.body;
+    const verificationId = `reset-password:${token}`;
+
+    const verification = await db
+      .select()
+      .from(authVerifications)
+      .where(eq(authVerifications.identifier, verificationId))
+      .then((rows) => rows[0] ?? null);
+
+    if (!verification || verification.expiresAt.getTime() <= Date.now()) {
+      throw badRequest("Password reset token is invalid or has expired.");
+    }
+
+    const userId = verification.value;
+    const hashedPassword = await hashPassword(newPassword);
+
+    await db.transaction(async (tx) => {
+      await tx
+        .update(authAccounts)
+        .set({ password: hashedPassword, updatedAt: new Date() })
+        .where(
+          and(
+            eq(authAccounts.userId, userId),
+            eq(authAccounts.providerId, "credential"),
+          ),
+        );
+
+      await tx
+        .delete(authVerifications)
+        .where(eq(authVerifications.id, verification.id));
+
+      await tx
+        .delete(authSessions)
+        .where(eq(authSessions.userId, userId));
+    });
+
+    res.json({
+      status: true,
+      message: "Password has been successfully reset. You can now sign in with your new password.",
+    });
   });
 
   return router;

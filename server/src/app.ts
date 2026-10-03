@@ -111,6 +111,7 @@ import { llmRoutes } from "./routes/llms.js";
 import { authRoutes } from "./routes/auth.js";
 import { assetRoutes } from "./routes/assets.js";
 import { accessRoutes } from "./routes/access.js";
+import { userInvitationRoutes } from "./routes/user-invitations.js";
 import { pluginRoutes } from "./routes/plugins.js";
 import {
   mcpGatewayProtocolRoutes,
@@ -961,6 +962,7 @@ export async function createApp(
       authPublicBaseUrl: opts.authPublicBaseUrl,
     }),
   );
+  api.use(userInvitationRoutes(db));
   app.use("/api", api);
   app.use("/api", (_req, res) => {
     res.status(404).json({ error: "API route not found" });

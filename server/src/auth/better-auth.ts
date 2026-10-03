@@ -22,6 +22,7 @@ import {
   resolveWorkspaceHandoffLocalKey,
   resolveWorkspaceHandoffLocalWorkspaceId,
 } from "./workspace-login-handoff.js";
+import { sendPasswordResetEmail } from "../services/email-service.js";
 
 export type BetterAuthSessionUser = {
   id: string;
@@ -273,7 +274,16 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
     emailAndPassword: {
       enabled: true,
       requireEmailVerification: false,
-      disableSignUp: config.authDisableSignUp,
+      disableSignUp: true,
+      sendResetPassword: async ({ user, url, token }: { user: { email: string; name?: string | null }; url: string; token: string }) => {
+        const origin = publicUrl || baseUrl || "http://localhost:3100";
+        const resetUrl = `${origin}/auth/reset-password?token=${encodeURIComponent(token)}`;
+        await sendPasswordResetEmail({
+          email: user.email,
+          name: user.name,
+          resetUrl,
+        });
+      },
     },
     rateLimit: buildBetterAuthRateLimitOptions({
       deploymentMode: config.deploymentMode,
