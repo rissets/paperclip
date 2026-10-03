@@ -1996,6 +1996,13 @@
       "when": 1790793517652,
       "tag": "0286_stale_mulholland_black",
       "breakpoints": true
+    },
+    {
+      "idx": 287,
+      "version": "7",
+      "when": 1790932726652,
+      "tag": "0287_curly_impossible_man",
+      "breakpoints": true
     }
   ]
 }

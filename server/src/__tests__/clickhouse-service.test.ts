@@ -56,4 +56,34 @@ describe("ClickhouseService", () => {
     // Clean up test table
     await clickhouse.execute(`DROP TABLE IF EXISTS \`${tableName}\``, expectedDb);
   });
+
+  it("auto-heals and auto-casts String timestamp columns when Date/DateTime functions like toHour are used", async () => {
+    const tableName = "test_string_timestamps";
+    const ddl = `CREATE TABLE IF NOT EXISTS \`${tableName}\` (
+      \`id\` String,
+      \`timestamp\` String,
+      \`scenario_note\` String
+    ) ENGINE = MergeTree() ORDER BY (\`id\`);`;
+
+    const sampleRows = [
+      { id: "row-1", timestamp: "2026-09-01 14:00:00", scenario_note: "congestion peak" },
+      { id: "row-2", timestamp: "2026-09-01 14:30:00", scenario_note: "congestion normal" },
+      { id: "row-3", timestamp: "2026-09-01 15:00:00", scenario_note: "recovered" },
+    ];
+
+    await clickhouse.syncTable(tableName, ddl, sampleRows, testCompanyId);
+
+    // This query calls `toHour(timestamp)` directly on a String column, which ClickHouse natively rejects with Code 43.
+    // Our ClickhouseService automatically recovers with parseDateTimeBestEffortOrNull(timestamp) and succeeds.
+    const queryRes = await clickhouse.query<{ hour: number; total: number }>(
+      `SELECT toHour(timestamp) AS hour, count(*) AS total FROM \`${tableName}\` WHERE scenario_note LIKE '%congestion%' GROUP BY hour ORDER BY hour ASC`,
+      expectedDb,
+    );
+
+    expect(queryRes.rows.length).toBe(1);
+    expect(Number(queryRes.rows[0].hour)).toBe(14);
+    expect(Number(queryRes.rows[0].total)).toBe(2);
+
+    await clickhouse.execute(`DROP TABLE IF EXISTS \`${tableName}\``, expectedDb);
+  });
 });

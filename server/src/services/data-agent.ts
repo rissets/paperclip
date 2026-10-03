@@ -18,16 +18,29 @@ export class DataAgentService {
   /**
    * Execute structured data reasoning, database entity profiling, and analytical queries
    */
-  async answer(companyId: string, query: string): Promise<SpecialistExecution> {
-    const allSources = await this.db
+  async answer(
+    companyId: string,
+    query: string,
+    options?: { collectionId?: string; agentId?: string },
+  ): Promise<SpecialistExecution> {
+    let allSources = await this.db
       .select()
       .from(dataSources)
       .where(and(eq(dataSources.companyId, companyId), eq(dataSources.status, "ready")));
 
-    const tables = await this.db
+    let tables = await this.db
       .select()
       .from(dataSourceTables)
       .where(eq(dataSourceTables.companyId, companyId));
+
+    if (options?.collectionId) {
+      const colSources = allSources.filter((s) => s.collectionId === options.collectionId);
+      if (colSources.length > 0) {
+        allSources = colSources;
+        const sourceIds = new Set(colSources.map((s) => s.id));
+        tables = tables.filter((t) => sourceIds.has(t.dataSourceId));
+      }
+    }
 
     if (allSources.length === 0 && tables.length === 0) {
       return {
@@ -113,13 +126,30 @@ export class DataAgentService {
             return weightB - weightA;
           });
 
+          // Prune tables: prioritize tables whose entities or table name match query terms
+          const relevantTables = sortedTables.filter((tbl) => {
+            const semModel = (tbl.semanticModel as any) || {};
+            const tableEntities: string[] = (semModel.entities || []).concat(
+              tbl.tableName.replace(/^(tbl_|table_|tb_|m_|t_)/i, "").split(/[\s_\-]+/)
+            ).filter((e: string) => e && e.length > 1);
+
+            const matchesEntity = tableEntities.some(
+              (ent) => queryLower.includes(ent.toLowerCase()) || cleanQuery.toLowerCase().includes(ent.toLowerCase())
+            );
+            const matchesTableName = queryLower.includes(tbl.tableName.toLowerCase());
+            return matchesEntity || matchesTableName;
+          });
+
+          // Focus search on matching tables, or at most the top 2 sorted tables
+          const targetTables = relevantTables.length > 0 ? relevantTables : sortedTables.slice(0, 2);
+
           const isNumericTerm = /^\d+$/.test(cleanQuery);
 
-          for (const tbl of sortedTables) {
+          for (const tbl of targetTables) {
             const cols = (tbl.schemaDefinition as any[]) || [];
             const semModel = (tbl.semanticModel as any) || {};
 
-            // Dynamic searchable columns: from semanticModel or columns flagged as identifier/identity/isSearchable
+            // Dynamic searchable columns: prioritize primary text/identity columns, limit to top 3
             const searchableCols = cols.filter((c: any) => {
               // Type matching guard: prevent MySQL string-to-zero type coercion bug on numeric columns!
               if (!isNumericTerm && (c.dataType === "number" || c.dataType === "integer" || c.dataType === "float")) {
@@ -128,8 +158,13 @@ export class DataAgentService {
               if (semModel.searchableColumns && semModel.searchableColumns.includes(c.name)) {
                 return true;
               }
-              return c.isSearchable || c.role === "identifier" || c.semanticCategory === "identity" || /^(nama_|nama$|name$|_name|title|judul|kode_|code|label)/i.test(c.name);
-            });
+              return (
+                c.isSearchable ||
+                c.role === "identifier" ||
+                c.semanticCategory === "identity" ||
+                /^(nama_|nama$|name$|_name|title|judul|kode_|code|label)/i.test(c.name)
+              );
+            }).slice(0, 3);
             const searchableColNames: string[] = searchableCols.map((c: any) => c.name);
 
             // Dynamic candidate search terms:

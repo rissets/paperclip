@@ -1,10 +1,11 @@
 import { Router, type Request, type Response } from "express";
 import multer from "multer";
-import { eq } from "drizzle-orm";
+import { eq, and, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents } from "@paperclipai/db";
+import { agents, dataSourceTables, dataSourceCollections } from "@paperclipai/db";
 import { assertCompanyAccess } from "./authz.js";
 import { DataSourcesService } from "../services/data-sources.js";
+import { DataSourceCollectionsService } from "../services/data-source-collections.js";
 import { OnboardingOrchestratorService } from "../services/onboarding-orchestrator.js";
 import { EnterpriseOrchestratorService } from "../services/enterprise-orchestrator.js";
 import { DatabaseIntegrationService } from "../services/database-integration.js";
@@ -21,6 +22,7 @@ const upload = multer({
 export function dataSourceRoutes(db: Db) {
   const router = Router();
   const dsService = new DataSourcesService(db);
+  const collectionsService = new DataSourceCollectionsService(db);
   const onboardingOrchestrator = new OnboardingOrchestratorService(db);
   const dbIntegration = new DatabaseIntegrationService();
   const clickhouse = new ClickhouseService();
@@ -43,7 +45,8 @@ export function dataSourceRoutes(db: Db) {
   router.get("/companies/:companyId/data-sources", async (req: Request, res: Response) => {
     const companyId = req.params.companyId as string;
     await assertCompanyAccess(req, companyId);
-    let list = await dsService.list(companyId);
+    const collectionId = typeof req.query.collectionId === "string" ? req.query.collectionId : undefined;
+    let list = await dsService.list(companyId, collectionId);
 
     const agentId = getRequestingAgentId(req);
     if (agentId) {
@@ -52,14 +55,14 @@ export function dataSourceRoutes(db: Db) {
         return res.json([]);
       }
       if (access.mode === "selected") {
-        const allowed = new Set(access.dataSourceIds);
+        const allowed = new Set(access.effectiveDataSourceIds || access.dataSourceIds || []);
         list = list.filter((ds: any) => allowed.has(ds.id));
       }
     }
     res.json(list);
   });
 
-  // 2. Upload file(s) & trigger Onboarding Orchestrator (supports single and batch uploads)
+  // 2. Upload file(s) & trigger Onboarding Orchestrator (supports single and batch uploads, plus ZIP archives)
   router.post(
     "/companies/:companyId/data-sources/upload",
     upload.any(),
@@ -85,6 +88,7 @@ export function dataSourceRoutes(db: Db) {
 
       const name = req.body?.name as string | undefined;
       const description = req.body?.description as string | undefined;
+      const collectionId = req.body?.collectionId as string | undefined;
 
       const results = [];
       for (const file of files) {
@@ -99,6 +103,7 @@ export function dataSourceRoutes(db: Db) {
           {
             name: files.length === 1 ? name : undefined,
             description,
+            collectionId,
             async: true,
           },
         );
@@ -237,7 +242,8 @@ export function dataSourceRoutes(db: Db) {
       if (access.mode === "none") {
         throw forbidden("Akses ditolak: Agen ini tidak memiliki izin akses ke data source apa pun");
       }
-      if (access.mode === "selected" && !access.dataSourceIds.includes(id)) {
+      const allowedIds = access.effectiveDataSourceIds || access.dataSourceIds || [];
+      if (access.mode === "selected" && !allowedIds.includes(id)) {
         throw forbidden(`Akses ditolak: Data source '${id}' tidak ditugaskan ke agen ini`);
       }
     }
@@ -272,7 +278,8 @@ export function dataSourceRoutes(db: Db) {
         if (access.mode === "none") {
           throw forbidden("Akses ditolak: Agen ini tidak memiliki izin akses ke data source apa pun");
         }
-        if (access.mode === "selected" && !access.dataSourceIds.includes(id)) {
+        const allowedIds = access.effectiveDataSourceIds || access.dataSourceIds || [];
+        if (access.mode === "selected" && !allowedIds.includes(id)) {
           throw forbidden(`Akses ditolak: Data source '${id}' tidak ditugaskan ke agen ini`);
         }
       }
@@ -307,7 +314,8 @@ export function dataSourceRoutes(db: Db) {
         if (access.mode === "none") {
           throw forbidden("Akses ditolak: Agen ini tidak memiliki izin akses ke database apa pun");
         }
-        if (access.mode === "selected" && !access.dataSourceIds.includes(id)) {
+        const allowedIds = access.effectiveDataSourceIds || access.dataSourceIds || [];
+        if (access.mode === "selected" && !allowedIds.includes(id)) {
           throw forbidden(`Akses ditolak: Database '${id}' tidak ditugaskan ke agen ini`);
         }
       }
@@ -367,6 +375,115 @@ export function dataSourceRoutes(db: Db) {
         throw badRequest("SQL query is required");
       }
 
+      const agentId = getRequestingAgentId(req);
+      if (agentId) {
+        const access = await dsService.getAgentDataSources(companyId, agentId);
+        if (access.mode === "none") {
+          throw forbidden("Akses ditolak: Agen ini tidak memiliki izin akses ke data analitik apa pun");
+        }
+        if (access.mode === "selected") {
+          const effectiveIds = access.effectiveDataSourceIds || access.dataSourceIds || [];
+          if (effectiveIds.length === 0) {
+            throw forbidden("Akses ditolak: Agen ini tidak memiliki data source yang ditugaskan");
+          }
+
+          // Fetch allowed tables for assigned data sources
+          const allowedTablesResult = await db
+            .select({ tableName: dataSourceTables.tableName })
+            .from(dataSourceTables)
+            .where(
+              and(
+                eq(dataSourceTables.companyId, companyId),
+                inArray(dataSourceTables.dataSourceId, effectiveIds),
+              ),
+            );
+
+          const allowedTableNames = new Set<string>();
+          for (const t of allowedTablesResult) {
+            allowedTableNames.add(t.tableName.toLowerCase());
+            allowedTableNames.add(t.tableName.toLowerCase().replace(/[^a-z0-9_]/g, "_"));
+          }
+
+          // Also allow collection unified ClickHouse views
+          if (access.collectionIds && access.collectionIds.length > 0) {
+            const collections = await db
+              .select({ semanticProfile: dataSourceCollections.semanticProfile })
+              .from(dataSourceCollections)
+              .where(
+                and(
+                  eq(dataSourceCollections.companyId, companyId),
+                  inArray(dataSourceCollections.id, access.collectionIds),
+                ),
+              );
+            for (const col of collections) {
+              const views = (col.semanticProfile as any)?.unifiedClickhouseViews || [];
+              for (const v of views) {
+                if (v.viewName) {
+                  allowedTableNames.add(v.viewName.toLowerCase());
+                }
+              }
+            }
+          }
+
+          const reservedKeywords = new Set([
+            "select", "from", "where", "group", "order", "by", "limit", "offset", "having",
+            "union", "join", "inner", "left", "right", "full", "cross", "outer", "on", "as",
+            "and", "or", "not", "case", "when", "then", "else", "end", "window", "qualify",
+          ]);
+
+          // Extract CTE names defined in WITH clauses (e.g. "WITH aggregation AS (...)")
+          const cteNames = new Set<string>();
+          const withMatches = Array.from(
+            sqlQuery.matchAll(/(?:with|,)\s*[`"']?([a-zA-Z0-9_]+)[`"']?\s+as\s*\(/gi),
+          );
+          for (const m of withMatches) {
+            const name = m[1].toLowerCase();
+            if (!reservedKeywords.has(name)) {
+              cteNames.add(name);
+            }
+          }
+
+          // Extract subquery aliases from FROM or JOIN (e.g. "FROM (...) AS subq")
+          const fromSubqueryMatches = Array.from(
+            sqlQuery.matchAll(/(?:from|join)\s*\((?:[^)(]+|\((?:[^)(]+|\([^)(]*\))*\))*\)\s+(?:as\s+)?([a-zA-Z0-9_]+)/gi),
+          );
+          for (const m of fromSubqueryMatches) {
+            const name = m[1].toLowerCase();
+            if (!reservedKeywords.has(name)) {
+              cteNames.add(name);
+            }
+          }
+
+          const builtInClickhouseNames = new Set([
+            "system",
+            "numbers",
+            "numbers_mt",
+            "zeros",
+            "zeros_mt",
+            "view",
+            "null",
+            "file",
+            "url",
+            "s3",
+            "merge",
+            "generate_series",
+          ]);
+
+          // Extract table names referenced in FROM or JOIN clauses (ignoring database prefix if present, e.g. "FROM default.tbl" -> tbl)
+          const referencedTables = Array.from(
+            sqlQuery.matchAll(/(?:from|join)\s+(?:[`"']?([a-zA-Z0-9_]+)[`"']?\.)?[`"']?([a-zA-Z0-9_]+)[`"']?/gi),
+          ).map((m) => m[2].toLowerCase());
+
+          for (const tbl of referencedTables) {
+            if (builtInClickhouseNames.has(tbl)) continue;
+            if (cteNames.has(tbl)) continue;
+            if (!allowedTableNames.has(tbl)) {
+              throw forbidden(`Akses ditolak: Tabel '${tbl}' tidak termasuk dalam data source yang ditugaskan ke agen ini`);
+            }
+          }
+        }
+      }
+
       const limit = req.body?.limit ? Number(req.body.limit) : undefined;
       try {
         const result = await dsService.queryClickhouse(companyId, sqlQuery, limit);
@@ -422,6 +539,7 @@ export function dataSourceRoutes(db: Db) {
 
     const dataSourceId = req.body?.dataSourceId as string | undefined;
     const dataSourceIds = Array.isArray(req.body?.dataSourceIds) ? req.body.dataSourceIds : undefined;
+    const collectionId = (req.body?.collectionId as string | undefined) || (req.body?.collection as string | undefined);
     const rawAgentId = (req.body?.agentId as string | undefined) || (req.headers["x-paperclip-agent-id"] as string | undefined);
     const agentId = rawAgentId || getRequestingAgentId(req);
     const limit = req.body?.limit ? Number(req.body.limit) : undefined;
@@ -429,6 +547,7 @@ export function dataSourceRoutes(db: Db) {
     const results = await dsService.searchKnowledge(companyId, query, {
       dataSourceId,
       dataSourceIds,
+      collectionId,
       agentId: agentId || undefined,
       limit,
     });
@@ -452,9 +571,11 @@ export function dataSourceRoutes(db: Db) {
     await assertCompanyAccess(req, companyId);
     const mode = req.body?.mode || "all";
     const dataSourceIds = Array.isArray(req.body?.dataSourceIds) ? req.body.dataSourceIds : [];
+    const collectionIds = Array.isArray(req.body?.collectionIds) ? req.body.collectionIds : [];
     const result = await dsService.updateAgentDataSources(companyId, agentId, {
       mode,
       dataSourceIds,
+      collectionIds,
     });
     res.json(result);
   });
@@ -476,12 +597,192 @@ export function dataSourceRoutes(db: Db) {
     await assertCompanyAccess(req, agent.companyId);
     const mode = req.body?.mode || "all";
     const dataSourceIds = Array.isArray(req.body?.dataSourceIds) ? req.body.dataSourceIds : [];
+    const collectionIds = Array.isArray(req.body?.collectionIds) ? req.body.collectionIds : [];
     const result = await dsService.updateAgentDataSources(agent.companyId, agentId, {
       mode,
       dataSourceIds,
+      collectionIds,
     });
     res.json(result);
   });
+
+  // --- Data Source Collections Routes ---
+
+  // List all collections for company
+  router.get("/companies/:companyId/data-source-collections", async (req: Request, res: Response) => {
+    const companyId = req.params.companyId as string;
+    await assertCompanyAccess(req, companyId);
+    const collections = await collectionsService.list(companyId);
+    res.json(collections);
+  });
+
+  // Create a new collection
+  router.post("/companies/:companyId/data-source-collections", async (req: Request, res: Response) => {
+    const companyId = req.params.companyId as string;
+    await assertCompanyAccess(req, companyId);
+    const { name, description, color, icon } = req.body || {};
+    if (!name || typeof name !== "string" || !name.trim()) {
+      throw badRequest("Collection name is required");
+    }
+    const collection = await collectionsService.create(companyId, {
+      name: name.trim(),
+      description,
+      color,
+      icon,
+    });
+    res.status(201).json(collection);
+  });
+
+  // Get a collection by ID or slug
+  router.get("/companies/:companyId/data-source-collections/:id", async (req: Request, res: Response) => {
+    const companyId = req.params.companyId as string;
+    const id = req.params.id as string;
+    await assertCompanyAccess(req, companyId);
+
+    let collection = await collectionsService.getById(companyId, id);
+    if (!collection) {
+      collection = await collectionsService.getBySlug(companyId, id);
+    }
+    if (!collection) throw notFound("Collection not found");
+    res.json(collection);
+  });
+
+  // Update collection metadata
+  router.patch("/companies/:companyId/data-source-collections/:id", async (req: Request, res: Response) => {
+    const companyId = req.params.companyId as string;
+    const id = req.params.id as string;
+    await assertCompanyAccess(req, companyId);
+    const { name, description, color, icon } = req.body || {};
+    const updated = await collectionsService.update(companyId, id, {
+      name,
+      description,
+      color,
+      icon,
+    });
+    if (!updated) throw notFound("Collection not found");
+    res.json(updated);
+  });
+
+  // Delete collection
+  router.delete("/companies/:companyId/data-source-collections/:id", async (req: Request, res: Response) => {
+    const companyId = req.params.companyId as string;
+    const id = req.params.id as string;
+    await assertCompanyAccess(req, companyId);
+    const success = await collectionsService.delete(companyId, id);
+    if (!success) throw notFound("Collection not found");
+    res.json({ success: true });
+  });
+
+  // Re-correlate collection (cross-table FKs, cross-document topics, clickhouse views)
+  router.post("/companies/:companyId/data-source-collections/:id/correlate", async (req: Request, res: Response) => {
+    const companyId = req.params.companyId as string;
+    const id = req.params.id as string;
+    await assertCompanyAccess(req, companyId);
+    const profile = await collectionsService.correlateCollection(companyId, id);
+    res.json(profile);
+  });
+
+  // Add existing data sources into collection
+  router.post("/companies/:companyId/data-source-collections/:id/add-sources", async (req: Request, res: Response) => {
+    const companyId = req.params.companyId as string;
+    const id = req.params.id as string;
+    await assertCompanyAccess(req, companyId);
+    const { dataSourceIds } = req.body || {};
+    if (!Array.isArray(dataSourceIds) || dataSourceIds.length === 0) {
+      throw badRequest("dataSourceIds array is required");
+    }
+    await collectionsService.addSourcesToCollection(companyId, id, dataSourceIds);
+    const updated = await collectionsService.getById(companyId, id);
+    res.json(updated);
+  });
+
+  // Remove a data source from collection
+  router.post("/companies/:companyId/data-source-collections/:id/remove-source", async (req: Request, res: Response) => {
+    const companyId = req.params.companyId as string;
+    const id = req.params.id as string;
+    await assertCompanyAccess(req, companyId);
+    const { dataSourceId } = req.body || {};
+    if (!dataSourceId || typeof dataSourceId !== "string") {
+      throw badRequest("dataSourceId string is required");
+    }
+    await collectionsService.removeSourceFromCollection(companyId, id, dataSourceId);
+    const updated = await collectionsService.getById(companyId, id);
+    res.json(updated);
+  });
+
+  // Upload file(s) or ZIP directly into a collection
+  router.post(
+    "/companies/:companyId/data-source-collections/:id/upload",
+    upload.any(),
+    async (req: Request, res: Response) => {
+      const companyId = req.params.companyId as string;
+      const collectionId = req.params.id as string;
+      await assertCompanyAccess(req, companyId);
+
+      const collection = await collectionsService.getById(companyId, collectionId);
+      if (!collection) throw notFound("Collection not found");
+
+      const files: Express.Multer.File[] = [];
+      if (req.file) files.push(req.file);
+      if (Array.isArray(req.files)) files.push(...req.files);
+      else if (req.files && typeof req.files === "object") {
+        for (const list of Object.values(req.files)) {
+          if (Array.isArray(list)) files.push(...list);
+        }
+      }
+
+      if (files.length === 0) throw badRequest("No file provided in request");
+
+      const description = req.body?.description as string | undefined;
+      const results = [];
+
+      for (const file of files) {
+        const isZip =
+          file.mimetype === "application/zip" ||
+          file.mimetype === "application/x-zip-compressed" ||
+          file.originalname.toLowerCase().endsWith(".zip");
+
+        if (isZip) {
+          const extracted = collectionsService.extractZipEntries(file.buffer);
+          for (const item of extracted) {
+            const result = await onboardingOrchestrator.onboardSource(
+              companyId,
+              item,
+              {
+                description,
+                collectionId,
+                async: true,
+              },
+            );
+            results.push(result);
+          }
+        } else {
+          const result = await onboardingOrchestrator.onboardSource(
+            companyId,
+            {
+              buffer: file.buffer,
+              originalname: file.originalname,
+              mimetype: file.mimetype,
+              size: file.size,
+            },
+            {
+              description,
+              collectionId,
+              async: true,
+            },
+          );
+          results.push(result);
+        }
+      }
+
+      res.status(202).json({
+        collectionId,
+        count: results.length,
+        dataSources: results,
+        message: `${results.length} file(s) queued for onboarding into collection ${collection.name}`,
+      });
+    },
+  );
 
   // 7. Orchestrator: List sessions
   router.get("/companies/:companyId/orchestrator/sessions", async (req: Request, res: Response) => {

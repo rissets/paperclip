@@ -1,5 +1,7 @@
 import type {
   DataSource,
+  DataSourceCollection,
+  CollectionSemanticProfile,
   DatabaseConnectionConfig,
   DatabaseConnectionTestResult,
   KnowledgeSearchResult,
@@ -14,11 +16,14 @@ export interface UploadDataSourceResponse extends DataSource {
   dataSources?: DataSource[];
   count?: number;
   message?: string;
+  collectionId?: string;
 }
 
 export const dataSourcesApi = {
-  list: (companyId: string) =>
-    api.get<DataSource[]>(`/companies/${encodeURIComponent(companyId)}/data-sources`),
+  list: (companyId: string, collectionId?: string) =>
+    api.get<DataSource[]>(
+      `/companies/${encodeURIComponent(companyId)}/data-sources${collectionId ? `?collectionId=${encodeURIComponent(collectionId)}` : ""}`,
+    ),
 
   get: (companyId: string, id: string) =>
     api.get<DataSource>(`/companies/${encodeURIComponent(companyId)}/data-sources/${encodeURIComponent(id)}`),
@@ -26,7 +31,7 @@ export const dataSourcesApi = {
   upload: (
     companyId: string,
     file: File | File[],
-    options: { name?: string; description?: string } = {},
+    options: { name?: string; description?: string; collectionId?: string } = {},
   ) => {
     const formData = new FormData();
     if (Array.isArray(file)) {
@@ -38,6 +43,7 @@ export const dataSourcesApi = {
     }
     if (options.name) formData.append("name", options.name);
     if (options.description) formData.append("description", options.description);
+    if (options.collectionId) formData.append("collectionId", options.collectionId);
 
     return api.postForm<UploadDataSourceResponse>(
       `/companies/${encodeURIComponent(companyId)}/data-sources/upload`,
@@ -193,5 +199,78 @@ export const dataSourcesApi = {
       totalRows: number;
       companyDatabase: string;
     }>(`/companies/${encodeURIComponent(companyId)}/data-sources/clickhouse/sync-all`, {}),
+
+  // Collections API
+  listCollections: (companyId: string) =>
+    api.get<DataSourceCollection[]>(
+      `/companies/${encodeURIComponent(companyId)}/data-source-collections`,
+    ),
+
+  getCollection: (companyId: string, id: string) =>
+    api.get<DataSourceCollection>(
+      `/companies/${encodeURIComponent(companyId)}/data-source-collections/${encodeURIComponent(id)}`,
+    ),
+
+  createCollection: (
+    companyId: string,
+    data: { name: string; description?: string; color?: string; icon?: string },
+  ) =>
+    api.post<DataSourceCollection>(
+      `/companies/${encodeURIComponent(companyId)}/data-source-collections`,
+      data,
+    ),
+
+  updateCollection: (
+    companyId: string,
+    id: string,
+    data: { name?: string; description?: string; color?: string; icon?: string },
+  ) =>
+    api.patch<DataSourceCollection>(
+      `/companies/${encodeURIComponent(companyId)}/data-source-collections/${encodeURIComponent(id)}`,
+      data,
+    ),
+
+  deleteCollection: (companyId: string, id: string) =>
+    api.delete<{ success: boolean }>(
+      `/companies/${encodeURIComponent(companyId)}/data-source-collections/${encodeURIComponent(id)}`,
+    ),
+
+  correlateCollection: (companyId: string, id: string) =>
+    api.post<CollectionSemanticProfile>(
+      `/companies/${encodeURIComponent(companyId)}/data-source-collections/${encodeURIComponent(id)}/correlate`,
+      {},
+    ),
+
+  addSourcesToCollection: (companyId: string, id: string, dataSourceIds: string[]) =>
+    api.post<DataSourceCollection>(
+      `/companies/${encodeURIComponent(companyId)}/data-source-collections/${encodeURIComponent(id)}/add-sources`,
+      { dataSourceIds },
+    ),
+
+  removeSourceFromCollection: (companyId: string, id: string, dataSourceId: string) =>
+    api.post<DataSourceCollection>(
+      `/companies/${encodeURIComponent(companyId)}/data-source-collections/${encodeURIComponent(id)}/remove-source`,
+      { dataSourceId },
+    ),
+
+  uploadToCollection: (
+    companyId: string,
+    collectionId: string,
+    files: File | File[],
+    description?: string,
+  ) => {
+    const formData = new FormData();
+    if (Array.isArray(files)) {
+      for (const f of files) formData.append("files", f);
+    } else {
+      formData.append("file", files);
+    }
+    if (description) formData.append("description", description);
+
+    return api.postForm<UploadDataSourceResponse>(
+      `/companies/${encodeURIComponent(companyId)}/data-source-collections/${encodeURIComponent(collectionId)}/upload`,
+      formData,
+    );
+  },
 };
 

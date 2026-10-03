@@ -228,9 +228,70 @@ export interface TableSemanticModel {
   jsonStructures?: Record<string, JsonColumnStructure>;
 }
 
+export interface CrossDocumentCorrelation {
+  sourceDocId: string;
+  sourceDocTitle: string;
+  targetDocId: string;
+  targetDocTitle: string;
+  sharedEntities: string[];
+  semanticSimilarity: number;
+  correlationSummary: string;
+}
+
+export interface CrossModalCorrelation {
+  documentId: string;
+  documentTitle: string;
+  tableId: string;
+  tableName: string;
+  sharedEntities: string[];
+  correlationDescription: string;
+}
+
+export interface UnifiedClickhouseView {
+  viewName: string;
+  description: string;
+  joinSql: string;
+  sourceTables: string[];
+}
+
+export interface CollectionSemanticProfile {
+  domain: string;
+  primaryTopics: string[];
+  entities: string[];
+  crossTableRelationships: TableRelation[];
+  crossDocumentCorrelations: CrossDocumentCorrelation[];
+  crossModalCorrelations: CrossModalCorrelation[];
+  unifiedClickhouseViews?: UnifiedClickhouseView[];
+  suggestedQueries: SuggestedQueryTemplate[];
+  summary: string;
+  lastCorrelatedAt: string;
+}
+
+export interface DataSourceCollection {
+  id: string;
+  companyId: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  color: string | null;
+  icon: string | null;
+  semanticProfile?: CollectionSemanticProfile | null;
+  metadata: Record<string, unknown> | null;
+  dataSources?: DataSource[];
+  dataSourceCount?: number;
+  tableCount?: number;
+  documentCount?: number;
+  totalRows?: number;
+  totalChunks?: number;
+  createdAt: string | Date;
+  updatedAt: string | Date;
+}
+
 export interface DataSource {
   id: string;
   companyId: string;
+  collectionId?: string | null;
+  collectionName?: string | null;
   name: string;
   description: string | null;
   sourceType: DataSourceType;

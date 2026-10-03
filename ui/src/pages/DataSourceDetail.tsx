@@ -31,6 +31,7 @@ import {
   CornerDownRight,
   FileCode,
   Check,
+  Folder,
 } from "lucide-react";
 import { useCompany } from "@/context/CompanyContext";
 import { dataSourcesApi } from "@/api/data-sources";
@@ -221,6 +222,15 @@ export function DataSourceDetail() {
                 <span className="inline-flex items-center rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-foreground uppercase tracking-wide">
                   {ds.sourceType}
                 </span>
+                {ds.collectionId && (
+                  <Link
+                    to={`/data-sources/collections/${ds.collectionId}`}
+                    className="inline-flex items-center gap-1 rounded-md bg-primary/10 hover:bg-primary/20 transition-colors px-2 py-0.5 text-xs font-medium text-primary border border-primary/20"
+                  >
+                    <Folder className="h-3 w-3" />
+                    Collection: {ds.collectionName || "Collection"}
+                  </Link>
+                )}
               </div>
               <p className="text-xs text-muted-foreground mt-0.5">
                 {isDatabase ? (

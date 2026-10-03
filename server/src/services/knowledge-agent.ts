@@ -19,10 +19,11 @@ export class KnowledgeAgentService {
   async answer(
     companyId: string,
     query: string,
-    options?: { dataSourceId?: string },
+    options?: { dataSourceId?: string; collectionId?: string },
   ): Promise<SpecialistExecution> {
     const searchResults = await this.dataSourcesService.searchKnowledge(companyId, query, {
       dataSourceId: options?.dataSourceId,
+      collectionId: options?.collectionId,
       limit: 6,
     });
 

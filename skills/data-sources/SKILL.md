@@ -13,17 +13,26 @@ This skill equips Paperclip agents to discover, inspect, and route queries acros
 
 ## 1. Primary Action Tool: `data_sources.py`
 
-Run the Python CLI tool to inspect and list all data sources:
+Run the Python CLI tool to inspect collections and list data sources:
 
 ```bash
-# List all active data sources
+# 1. Discover Collections (Fastest way to understand company datasets and domains):
+python3 skills/data-sources/scripts/data_sources.py --list-collections
+
+# 2. Inspect a specific Collection (see cross-table relations, correlated docs, and unified ClickHouse view):
+python3 skills/data-sources/scripts/data_sources.py --collection timurtelecom
+
+# 3. List data sources scoped to a Collection:
+python3 skills/data-sources/scripts/data_sources.py --list --collection timurtelecom
+
+# 4. List all active data sources in company:
 python3 skills/data-sources/scripts/data_sources.py --list
 
-# Filter by type (rag_document, database, csv, excel)
+# 5. Filter by type (rag_document, database, csv, excel):
 python3 skills/data-sources/scripts/data_sources.py --type rag_document
 python3 skills/data-sources/scripts/data_sources.py --type database
 
-# Inspect a specific data source in detail
+# 6. Inspect a specific data source in detail:
 python3 skills/data-sources/scripts/data_sources.py --id "<data_source_id>"
 ```
 

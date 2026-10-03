@@ -114,15 +114,20 @@ export type AgentDataSourceAccessMode = "all" | "selected" | "none";
 export interface AgentDataSourceAccessConfig {
   mode: AgentDataSourceAccessMode;
   dataSourceIds: string[];
+  collectionIds?: string[];
 }
 
 export interface AgentDataSourcesResponse {
   agentId: string;
   companyId: string;
+  agentName?: string;
   mode: AgentDataSourceAccessMode;
   dataSourceIds: string[];
+  collectionIds?: string[];
+  effectiveDataSourceIds?: string[];
   assignedDataSources: any[];
   availableDataSources: any[];
+  availableCollections?: any[];
 }
 
 export type ClearAgentErrorResponse = Agent;

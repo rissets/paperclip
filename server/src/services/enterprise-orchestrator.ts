@@ -5,6 +5,7 @@ import {
   orchestratorMessages,
   dataSources,
   dataSourceTables,
+  dataSourceCollections,
 } from "@paperclipai/db";
 import type {
   OrchestrationPlan,
@@ -80,7 +81,7 @@ export class EnterpriseOrchestratorService {
    * Driven by live agents & live data source semantic profiles.
    */
   async chat(companyId: string, sessionId: string, userQuery: string): Promise<OrchestratorMessage> {
-    // 0. Ensure enterprise agent roster
+    // 0. Ensure enterprise agent roster (cached per company)
     await this.rosterService.ensureEnterpriseRoster(companyId);
 
     // 1. Save user query message
@@ -99,6 +100,7 @@ export class EnterpriseOrchestratorService {
         type: dataSources.sourceType,
         status: dataSources.status,
         metadata: dataSources.metadata,
+        collectionId: dataSources.collectionId,
       })
       .from(dataSources)
       .where(and(eq(dataSources.companyId, companyId), eq(dataSources.status, "ready")));
@@ -129,17 +131,39 @@ export class EnterpriseOrchestratorService {
     let confidence = jevDecision.confidence;
     let reasoning = jevDecision.reasoning;
 
+    // Resolve target collection if any
+    const targetSource = availableSources.find((s) => s.id === jevDecision.targetSourceId);
+    let matchedCollectionId = targetSource?.collectionId || undefined;
+
+    if (!matchedCollectionId) {
+      const collections = await this.db
+        .select({ id: dataSourceCollections.id, name: dataSourceCollections.name, slug: dataSourceCollections.slug })
+        .from(dataSourceCollections)
+        .where(eq(dataSourceCollections.companyId, companyId));
+
+      const qLower = userQuery.toLowerCase();
+      const colMatch = collections.find(
+        (c) => qLower.includes(c.name.toLowerCase()) || qLower.includes(c.slug.toLowerCase())
+      );
+      if (colMatch) {
+        matchedCollectionId = colMatch.id;
+      }
+    }
+
     // 5. Delegate to Specialist Agents
     const specialistExecutions: SpecialistExecution[] = [];
 
     if (route === "data_agent" || route === "analytics_engineer_agent" || route === "prediction_agent" || route === "hybrid") {
-      const dataResult = await this.dataAgent.answer(companyId, userQuery);
+      const dataResult = await this.dataAgent.answer(companyId, userQuery, {
+        collectionId: matchedCollectionId,
+      });
       specialistExecutions.push(dataResult);
     }
 
     if (route === "knowledge_agent" || route === "research_agent" || route === "hybrid") {
       const knowledgeResult = await this.knowledgeAgent.answer(companyId, userQuery, {
         dataSourceId: jevDecision.targetSourceId,
+        collectionId: matchedCollectionId,
       });
       specialistExecutions.push(knowledgeResult);
     }

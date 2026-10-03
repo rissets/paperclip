@@ -3141,8 +3141,13 @@ export function buildPaperclipEnv(agent: {
   const dsAccess = (agent.metadata as any)?.dataSourceAccess;
   if (dsAccess) {
     vars.PAPERCLIP_DATA_SOURCES_MODE = dsAccess.mode || "none";
-    if (dsAccess.mode === "selected" && Array.isArray(dsAccess.dataSourceIds)) {
-      vars.PAPERCLIP_ASSIGNED_DATA_SOURCES = dsAccess.dataSourceIds.join(",");
+    if (dsAccess.mode === "selected") {
+      if (Array.isArray(dsAccess.dataSourceIds)) {
+        vars.PAPERCLIP_ASSIGNED_DATA_SOURCES = dsAccess.dataSourceIds.join(",");
+      }
+      if (Array.isArray(dsAccess.collectionIds)) {
+        vars.PAPERCLIP_ASSIGNED_COLLECTIONS = dsAccess.collectionIds.join(",");
+      }
     }
   }
   const runtimeHost = resolveHostForUrl(

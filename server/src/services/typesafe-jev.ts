@@ -38,6 +38,7 @@ export interface SourceRosterEntry {
 }
 
 export class TypeSafeJevService {
+  private static lastFailureTime = 0;
   private baseUrl: string;
   private apiKey: string;
   private defaultModel: string;
@@ -68,12 +69,19 @@ export class TypeSafeJevService {
     const start = Date.now();
     const model = options?.model || this.defaultModel;
 
+    // Fast-path circuit breaker: if remote endpoint recently timed out or failed, use instant fallback
+    if (Date.now() - TypeSafeJevService.lastFailureTime < 30000) {
+      return this.fallbackDecision(state, questions);
+    }
+
     try {
       const controller = new AbortController();
       const defaultTimeout =
         typeof process !== "undefined" && (process.env.NODE_ENV === "test" || process.env.VITEST)
           ? 300
-          : 8000;
+          : process.env.TYPESAFE_TIMEOUT_MS
+            ? parseInt(process.env.TYPESAFE_TIMEOUT_MS, 10)
+            : 1800;
       const timeout = setTimeout(() => controller.abort(), options?.timeoutMs || defaultTimeout);
 
       const res = await fetch(this.baseUrl, {
@@ -107,6 +115,7 @@ export class TypeSafeJevService {
         latencyMs,
       };
     } catch (err: any) {
+      TypeSafeJevService.lastFailureTime = Date.now();
       console.warn(`[TypeSafe Jev] System One call failed: ${err.message}. Using dynamic fallback.`);
       return this.fallbackDecision(state, questions);
     }
@@ -1563,6 +1572,13 @@ export class TypeSafeJevService {
     }
 
     // Helper to get core semantic tokens excluding generic database prefixes/suffixes
+    const stemWord = (w: string): string => {
+      if (w.endsWith("ies") && w.length > 4) return w.slice(0, -3) + "y";
+      if (w.endsWith("es") && w.length > 3) return w.slice(0, -2);
+      if (w.endsWith("s") && !w.endsWith("ss") && w.length > 3) return w.slice(0, -1);
+      return w;
+    };
+
     const getCoreTokens = (str: string): string[] => {
       const parts = str
         .replace(/([a-z])([A-Z])/g, "$1 $2")
@@ -1584,23 +1600,24 @@ export class TypeSafeJevService {
     // 3. Source column core stem matches target table name, and target col is primary key / id
     const isTgtPrimaryKey = tColLower === "id" || tColNorm === "id" || targetRole === "identifier" || tColLower === `${targetTable.toLowerCase()}_id`;
     if (isTgtPrimaryKey && sColCore.length > 0 && tTblCore.length > 0) {
-      if (sColCore.some((st) => tTblCore.some((tt) => tt === st))) {
+      if (sColCore.some((st) => tTblCore.some((tt) => tt === st || stemWord(tt) === stemWord(st)))) {
         return 9.2;
       }
     }
 
     // 4. Source column core stem matches target column core stem (both are key-like)
     if (isSrcKey && isTgtKey && sColCore.length > 0 && tColCore.length > 0) {
-      if (sColCore.some((st) => tColCore.some((tc) => tc === st))) {
+      if (sColCore.some((st) => tColCore.some((tc) => tc === st || stemWord(tc) === stemWord(st)))) {
         return 8.8;
       }
     }
 
-    // 5. Transitive prefix/suffix table pattern (e.g. customer_id -> tbl_customer.id)
+    // 5. Transitive prefix/suffix table pattern (e.g. customer_id -> tbl_customers.id)
     const cleanTgtTable = targetTable.toLowerCase().replace(/^(tbl_|mst_|dim_|fact_|trx_|sys_|ref_|t_|m_|f_|v_)/, "");
+    const cleanTgtTableStem = stemWord(cleanTgtTable);
     if (
-      (sColLower === `${cleanTgtTable}_id` || sColLower === `id_${cleanTgtTable}`) &&
-      (tColLower === "id" || tColLower === `${cleanTgtTable}_id`)
+      (sColLower === `${cleanTgtTable}_id` || sColLower === `${cleanTgtTableStem}_id` || sColLower === `id_${cleanTgtTable}` || sColLower === `id_${cleanTgtTableStem}`) &&
+      (tColLower === "id" || tColLower === `${cleanTgtTable}_id` || tColLower === `${cleanTgtTableStem}_id`)
     ) {
       return 9.0;
     }

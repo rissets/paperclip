@@ -2899,8 +2899,13 @@ function buildWorkspaceCommandEnv(input: {
   const dsAccess = (input.agent.metadata as any)?.dataSourceAccess;
   if (dsAccess) {
     env.PAPERCLIP_DATA_SOURCES_MODE = dsAccess.mode || "none";
-    if (dsAccess.mode === "selected" && Array.isArray(dsAccess.dataSourceIds)) {
-      env.PAPERCLIP_ASSIGNED_DATA_SOURCES = dsAccess.dataSourceIds.join(",");
+    if (dsAccess.mode === "selected") {
+      if (Array.isArray(dsAccess.dataSourceIds)) {
+        env.PAPERCLIP_ASSIGNED_DATA_SOURCES = dsAccess.dataSourceIds.join(",");
+      }
+      if (Array.isArray(dsAccess.collectionIds)) {
+        env.PAPERCLIP_ASSIGNED_COLLECTIONS = dsAccess.collectionIds.join(",");
+      }
     }
   }
   env.PAPERCLIP_ISSUE_ID = input.issue?.id ?? "";

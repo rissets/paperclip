@@ -20,11 +20,15 @@ import {
   Radio,
   Video,
   Bot,
+  Folder,
+  FolderPlus,
+  Network,
 } from "lucide-react";
 import { useCompany } from "@/context/CompanyContext";
 import { dataSourcesApi } from "@/api/data-sources";
 import type {
   DataSource,
+  DataSourceCollection,
   DataSourceType,
   DatabaseConnectionConfig,
   DatabaseConnectionTestResult,
@@ -38,7 +42,13 @@ export function DataSources() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
 
-  const [activeTab, setActiveTab] = useState<"all" | "databases" | "structured" | "knowledge" | "streams">("all");
+  const [activeTab, setActiveTab] = useState<"collections" | "all" | "databases" | "structured" | "knowledge" | "streams">("collections");
+
+  // Collections state
+  const [isCreateCollectionOpen, setIsCreateCollectionOpen] = useState(false);
+  const [collectionName, setCollectionName] = useState("");
+  const [collectionDescription, setCollectionDescription] = useState("");
+  const [createCollectionError, setCreateCollectionError] = useState<string | null>(null);
 
   // File Upload modal state
   const [isUploadOpen, setIsUploadOpen] = useState(false);
@@ -46,6 +56,7 @@ export function DataSources() {
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [customName, setCustomName] = useState("");
   const [customDescription, setCustomDescription] = useState("");
+  const [uploadCollectionId, setUploadCollectionId] = useState<string>("");
   const [uploadError, setUploadError] = useState<string | null>(null);
 
   // Connect Database modal state
@@ -103,23 +114,61 @@ export function DataSources() {
     enabled: !!selectedCompanyId,
   });
 
+  const {
+    data: collections = [],
+    isLoading: isLoadingCollections,
+  } = useQuery({
+    queryKey: ["data-source-collections", selectedCompanyId],
+    queryFn: () => dataSourcesApi.listCollections(selectedCompanyId!),
+    enabled: !!selectedCompanyId,
+  });
+
+  const createCollectionMutation = useMutation({
+    mutationFn: (data: { name: string; description?: string }) =>
+      dataSourcesApi.createCollection(selectedCompanyId!, data),
+    onSuccess: (newCol) => {
+      queryClient.invalidateQueries({ queryKey: ["data-source-collections", selectedCompanyId] });
+      setIsCreateCollectionOpen(false);
+      setCollectionName("");
+      setCollectionDescription("");
+      setCreateCollectionError(null);
+      navigate(`/data-sources/collections/${newCol.id}`);
+    },
+    onError: (err: any) => {
+      setCreateCollectionError(err?.message || "Failed to create collection.");
+    },
+  });
+
+  const deleteCollectionMutation = useMutation({
+    mutationFn: (id: string) => dataSourcesApi.deleteCollection(selectedCompanyId!, id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["data-source-collections", selectedCompanyId] });
+      queryClient.invalidateQueries({ queryKey: ["data-sources", selectedCompanyId] });
+    },
+  });
+
   const uploadMutation = useMutation({
     mutationFn: (files: File[]) =>
       dataSourcesApi.upload(selectedCompanyId!, files, {
         name: files.length === 1 ? customName || undefined : undefined,
         description: customDescription || undefined,
+        collectionId: uploadCollectionId || undefined,
       }),
     onSuccess: (res) => {
       queryClient.invalidateQueries({ queryKey: ["data-sources", selectedCompanyId] });
+      queryClient.invalidateQueries({ queryKey: ["data-source-collections", selectedCompanyId] });
       setIsUploadOpen(false);
       setSelectedFile(null);
       setSelectedFiles([]);
       setCustomName("");
       setCustomDescription("");
+      setUploadCollectionId("");
       setUploadError(null);
       if (res.count && res.count > 1) {
         setBackfillStatus(`${res.count} data sources queued for autonomous onboarding. Track progress below.`);
         setTimeout(() => setBackfillStatus(null), 8000);
+      } else if (res.collectionId) {
+        navigate(`/data-sources/collections/${res.collectionId}`);
       } else if (res.id) {
         navigate(`/data-sources/${res.id}`);
       }
@@ -413,6 +462,13 @@ export function DataSources() {
             Connect DB
           </button>
           <button
+            onClick={() => setIsCreateCollectionOpen(true)}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-xs font-medium text-foreground shadow-sm transition-colors hover:bg-muted"
+          >
+            <Folder className="h-3.5 w-3.5 text-primary" />
+            New Collection
+          </button>
+          <button
             onClick={() => setIsUploadOpen(true)}
             className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-xs font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
           >
@@ -458,6 +514,17 @@ export function DataSources() {
       {/* Filter Tabs */}
       <div className="flex items-center gap-2 border-b border-border pb-2 overflow-x-auto">
         <button
+          onClick={() => setActiveTab("collections")}
+          className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors whitespace-nowrap flex items-center gap-1.5 ${
+            activeTab === "collections"
+              ? "bg-primary text-primary-foreground"
+              : "text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          <Folder className="h-3.5 w-3.5" />
+          Collections ({collections.length})
+        </button>
+        <button
           onClick={() => setActiveTab("all")}
           className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors whitespace-nowrap ${
             activeTab === "all"
@@ -465,7 +532,7 @@ export function DataSources() {
               : "text-muted-foreground hover:text-foreground"
           }`}
         >
-          All ({dataSources.length})
+          All Data Sources ({dataSources.length})
         </button>
         <button
           onClick={() => setActiveTab("databases")}
@@ -525,227 +592,367 @@ export function DataSources() {
         </button>
       </div>
 
-      {/* Loading & Error States */}
-      {isLoading && (
-        <div className="flex items-center justify-center p-12 text-muted-foreground">
-          <Loader2 className="h-6 w-6 animate-spin mr-2" />
-          Loading data sources...
-        </div>
-      )}
+      {/* Collections Tab Content */}
+      {activeTab === "collections" && (
+        <div className="space-y-4">
+          {isLoadingCollections && (
+            <div className="flex items-center justify-center p-12 text-muted-foreground">
+              <Loader2 className="h-6 w-6 animate-spin mr-2" />
+              Loading collections...
+            </div>
+          )}
 
-      {error && (
-        <div className="rounded-lg border border-destructive/20 bg-destructive/10 p-4 text-sm text-destructive flex items-center gap-2">
-          <AlertCircle className="h-4 w-4" />
-          Failed to load data sources.
-        </div>
-      )}
-
-      {/* Empty State */}
-      {!isLoading && filteredSources.length === 0 && (
-        <div className="rounded-xl border border-dashed border-border p-12 text-center">
-          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-muted">
-            <UploadCloud className="h-6 w-6 text-muted-foreground" />
-          </div>
-          <h3 className="mt-4 text-base font-semibold text-foreground">No data sources found</h3>
-          <p className="mt-1 text-sm text-muted-foreground max-w-sm mx-auto">
-            Connect an external database (PostgreSQL, MariaDB, MySQL), upload spreadsheets, or import policy documents.
-          </p>
-          <div className="mt-6 flex items-center justify-center gap-3">
-            <button
-              onClick={() => setIsConnectDbOpen(true)}
-              className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3.5 py-2 text-sm font-medium text-foreground shadow-sm hover:bg-muted"
-            >
-              <Server className="h-4 w-4 text-primary" />
-              Connect Database
-            </button>
-            <button
-              onClick={() => setIsUploadOpen(true)}
-              className="inline-flex items-center gap-2 rounded-lg bg-primary px-3.5 py-2 text-sm font-medium text-primary-foreground shadow-sm hover:bg-primary/90"
-            >
-              <Plus className="h-4 w-4" />
-              Upload File
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Sources Grid */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {filteredSources.map((ds) => {
-          const isDatabase =
-            ds.sourceType === "postgres" || ds.sourceType === "mariadb" || ds.sourceType === "mysql";
-          const isStructured = ds.sourceType === "csv" || ds.sourceType === "excel";
-          const tableCount = ds.tables?.length || (ds.metadata as any)?.tableCount || 0;
-          const totalRows = (ds.metadata as any)?.totalRows ?? (ds.tables?.[0]?.rowCount || 0);
-          const chunkCount = (ds.metadata as any)?.chunkCount || 0;
-          const serverVersion = (ds.metadata as any)?.serverVersion || "";
-
-          let badgeColor = "bg-primary/10 text-primary";
-          let icon = <Database className="h-5 w-5" />;
-          let typeLabel = "Database";
-
-          if (ds.sourceType === "postgres") {
-            badgeColor = "bg-primary/10 text-primary";
-            icon = <Database className="h-5 w-5" />;
-            typeLabel = "PostgreSQL";
-          } else if (ds.sourceType === "mariadb") {
-            badgeColor = "bg-amber-500/10 text-amber-600";
-            icon = <Server className="h-5 w-5" />;
-            typeLabel = "MariaDB";
-          } else if (ds.sourceType === "mysql") {
-            badgeColor = "bg-blue-500/10 text-blue-600";
-            icon = <Server className="h-5 w-5" />;
-            typeLabel = "MySQL";
-          } else if (ds.sourceType === "csv") {
-            badgeColor = "bg-emerald-500/10 text-emerald-600";
-            icon = <FileSpreadsheet className="h-5 w-5" />;
-            typeLabel = "CSV File";
-          } else if (ds.sourceType === "excel") {
-            badgeColor = "bg-emerald-500/10 text-emerald-600";
-            icon = <FileSpreadsheet className="h-5 w-5" />;
-            typeLabel = "Excel Workbook";
-          } else if (ds.sourceType === "api_rest") {
-            badgeColor = "bg-blue-500/10 text-blue-600";
-            icon = <Globe className="h-5 w-5" />;
-            typeLabel = "REST API";
-          } else if (ds.sourceType === "mqtt_iot") {
-            badgeColor = "bg-emerald-500/10 text-emerald-600";
-            icon = <Radio className="h-5 w-5" />;
-            typeLabel = "MQTT IoT";
-          } else if (ds.sourceType === "cctv_feed") {
-            badgeColor = "bg-purple-500/10 text-purple-600";
-            icon = <Video className="h-5 w-5" />;
-            typeLabel = "CCTV Vision";
-          } else {
-            badgeColor = "bg-sky-500/10 text-sky-600";
-            icon = <FileText className="h-5 w-5" />;
-            typeLabel = "RAG Document";
-          }
-
-          return (
-            <div
-              key={ds.id}
-              className="group relative flex flex-col justify-between rounded-xl border border-border bg-card p-5 shadow-sm transition-all hover:border-primary/50 hover:shadow-md"
-            >
-              <div>
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex items-center gap-3">
-                    <div
-                      className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${badgeColor}`}
-                    >
-                      {icon}
-                    </div>
-                    <div>
-                      <h4 className="font-semibold text-foreground truncate max-w-xs">{ds.name}</h4>
-                      <p className="text-xs text-muted-foreground uppercase tracking-wider mt-0.5">
-                        {typeLabel}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    {ds.status === "ready" && (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-xs font-medium text-emerald-600">
-                        <CheckCircle2 className="h-3 w-3" />
-                        Ready
-                      </span>
-                    )}
-                    {ds.status === "processing" && (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-sky-500/10 px-2 py-0.5 text-xs font-medium text-sky-600 animate-pulse">
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                        Onboarding
-                      </span>
-                    )}
-                    {ds.status === "error" && (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive">
-                        <AlertCircle className="h-3 w-3" />
-                        Error
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                {ds.description && (
-                  <p className="mt-3 text-xs text-muted-foreground line-clamp-2">{ds.description}</p>
-                )}
-
-                {/* JEV Semantic Profile Badge */}
-                {ds.semanticProfile && (
-                  <div className="mt-3 rounded-lg border border-primary/20 bg-primary/5 p-2.5 space-y-1.5 text-xs">
-                    <div className="flex items-center justify-between">
-                      <span className="inline-flex items-center gap-1 font-semibold text-primary">
-                        <Bot className="h-3.5 w-3.5" />
-                        {ds.semanticProfile.onboardedBy || "Onboarding Orchestrator"}
-                      </span>
-                      {ds.semanticProfile.domain && (
-                        <span className="rounded bg-background px-1.5 py-0.5 text-xs font-mono uppercase text-muted-foreground border border-border">
-                          {ds.semanticProfile.domain}
-                        </span>
-                      )}
-                    </div>
-                    {ds.semanticProfile.entities && ds.semanticProfile.entities.length > 0 && (
-                      <div className="flex flex-wrap gap-1 pt-0.5">
-                        {ds.semanticProfile.entities.slice(0, 3).map((ent) => (
-                          <span
-                            key={ent}
-                            className="rounded bg-background border border-border px-1.5 py-0.5 text-xs text-foreground font-medium truncate max-w-xs"
-                          >
-                            {ent}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                <div className="mt-4 grid grid-cols-2 gap-2 border-t border-border pt-3 text-xs">
-                  <div>
-                    <span className="text-muted-foreground">Volume:</span>
-                    <span className="ml-1 font-medium text-foreground">
-                      {isDatabase || isStructured
-                        ? `${tableCount} table(s) • ${totalRows.toLocaleString()} rows`
-                        : ds.sourceType === "rag_document"
-                        ? `${chunkCount} chunks`
-                        : "Live Stream"}
-                    </span>
-                  </div>
-                  <div className="text-right truncate">
-                    <span className="text-muted-foreground">Type:</span>
-                    <span className="ml-1 font-medium text-foreground truncate">
-                      {isDatabase
-                        ? serverVersion
-                          ? serverVersion.split(" ")[0]
-                          : "Live DB"
-                        : ds.fileSize
-                        ? `${Math.round(ds.fileSize / 1024)} KB`
-                        : typeLabel}
-                    </span>
-                  </div>
-                </div>
+          {!isLoadingCollections && collections.length === 0 && (
+            <div className="rounded-xl border border-dashed border-border p-12 text-center">
+              <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-primary/10 text-primary">
+                <Folder className="h-6 w-6" />
               </div>
-
-              <div className="mt-4 flex items-center justify-between border-t border-border pt-3">
+              <h3 className="mt-4 text-base font-semibold text-foreground">No collections created yet</h3>
+              <p className="mt-1 text-sm text-muted-foreground max-w-md mx-auto">
+                Collections group multiple data sources (CSVs, Excel, RAG documents, databases, IoT, CCTV) under a single domain boundary with automatic cross-table foreign key mapping, cross-document topic synthesis, and unified ClickHouse views.
+              </p>
+              <div className="mt-6 flex items-center justify-center gap-3">
                 <button
-                  onClick={() => {
-                    if (confirm(`Delete data source '${ds.name}'?`)) {
-                      deleteMutation.mutate(ds.id);
-                    }
-                  }}
-                  className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-destructive transition-colors"
-                  title="Delete data source"
+                  onClick={() => setIsCreateCollectionOpen(true)}
+                  className="inline-flex items-center gap-2 rounded-lg bg-primary px-3.5 py-2 text-sm font-medium text-primary-foreground shadow-sm hover:bg-primary/90"
                 >
-                  <Trash2 className="h-4 w-4" />
+                  <FolderPlus className="h-4 w-4" />
+                  Create First Collection
                 </button>
-                <Link
-                  to={`/data-sources/${ds.id}`}
-                  className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
-                >
-                  Inspect & Query <ArrowRight className="h-3 w-3" />
-                </Link>
               </div>
             </div>
-          );
-        })}
-      </div>
+          )}
+
+          {!isLoadingCollections && collections.length > 0 && (
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {collections.map((col) => {
+                const tableRelationsCount = col.semanticProfile?.crossTableRelationships?.length || 0;
+                const clickhouseViewsCount = col.semanticProfile?.unifiedClickhouseViews?.length || 0;
+                const documentCorrelationsCount = col.semanticProfile?.crossDocumentCorrelations?.length || 0;
+
+                return (
+                  <div
+                    key={col.id}
+                    className="group relative flex flex-col justify-between rounded-xl border border-border bg-card p-5 shadow-sm transition-all hover:border-primary/50 hover:shadow-md"
+                  >
+                    <div>
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex items-center gap-3">
+                          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                            <Folder className="h-5 w-5" />
+                          </div>
+                          <div>
+                            <h4 className="font-semibold text-foreground truncate max-w-xs">{col.name}</h4>
+                            <p className="text-xs text-muted-foreground font-mono mt-0.5">
+                              /{col.slug}
+                            </p>
+                          </div>
+                        </div>
+                        <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
+                          <Database className="h-3 w-3" />
+                          {col.dataSourceCount ?? col.dataSources?.length ?? 0} sources
+                        </span>
+                      </div>
+
+                      {col.description && (
+                        <p className="mt-3 text-xs text-muted-foreground line-clamp-2">{col.description}</p>
+                      )}
+
+                      <div className="mt-3 rounded-lg border border-primary/20 bg-primary/5 p-2.5 space-y-1.5 text-xs">
+                        <div className="flex items-center justify-between">
+                          <span className="inline-flex items-center gap-1 font-semibold text-primary">
+                            <Sparkles className="h-3.5 w-3.5" />
+                            Cross-Source Intelligence
+                          </span>
+                          {col.semanticProfile?.domain && (
+                            <span className="rounded bg-background px-1.5 py-0.5 text-xs font-mono uppercase text-muted-foreground border border-border">
+                              {col.semanticProfile.domain}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex flex-wrap gap-1.5 pt-0.5 text-xs">
+                          <span className="inline-flex items-center gap-1 rounded bg-background border border-border px-1.5 py-0.5 text-xs text-foreground font-medium">
+                            <Network className="h-3 w-3 text-primary" />
+                            {tableRelationsCount} Relations
+                          </span>
+                          <span className="inline-flex items-center gap-1 rounded bg-background border border-border px-1.5 py-0.5 text-xs text-foreground font-medium">
+                            <FileText className="h-3 w-3 text-sky-600" />
+                            {documentCorrelationsCount} Doc Topics
+                          </span>
+                          <span className="inline-flex items-center gap-1 rounded bg-background border border-border px-1.5 py-0.5 text-xs text-foreground font-medium">
+                            <Zap className="h-3 w-3 text-amber-500" />
+                            {clickhouseViewsCount} OLAP Views
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="mt-4 flex items-center justify-between border-t border-border pt-3">
+                      <button
+                        onClick={() => {
+                          if (confirm(`Delete collection '${col.name}'? Data sources inside will remain as standalone sources.`)) {
+                            deleteCollectionMutation.mutate(col.id);
+                          }
+                        }}
+                        className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-destructive transition-colors"
+                        title="Delete collection"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                      <Link
+                        to={`/data-sources/collections/${col.id}`}
+                        className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+                      >
+                        Open Collection <ArrowRight className="h-3 w-3" />
+                      </Link>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Individual Data Sources Tabs Content */}
+      {activeTab !== "collections" && (
+        <>
+          {/* Loading & Error States */}
+          {isLoading && (
+            <div className="flex items-center justify-center p-12 text-muted-foreground">
+              <Loader2 className="h-6 w-6 animate-spin mr-2" />
+              Loading data sources...
+            </div>
+          )}
+
+          {error && (
+            <div className="rounded-lg border border-destructive/20 bg-destructive/10 p-4 text-sm text-destructive flex items-center gap-2">
+              <AlertCircle className="h-4 w-4" />
+              Failed to load data sources.
+            </div>
+          )}
+
+          {/* Empty State */}
+          {!isLoading && filteredSources.length === 0 && (
+            <div className="rounded-xl border border-dashed border-border p-12 text-center">
+              <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-muted">
+                <UploadCloud className="h-6 w-6 text-muted-foreground" />
+              </div>
+              <h3 className="mt-4 text-base font-semibold text-foreground">No data sources found</h3>
+              <p className="mt-1 text-sm text-muted-foreground max-w-sm mx-auto">
+                Connect an external database (PostgreSQL, MariaDB, MySQL), upload spreadsheets, or import policy documents.
+              </p>
+              <div className="mt-6 flex items-center justify-center gap-3">
+                <button
+                  onClick={() => setIsConnectDbOpen(true)}
+                  className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3.5 py-2 text-sm font-medium text-foreground shadow-sm hover:bg-muted"
+                >
+                  <Server className="h-4 w-4 text-primary" />
+                  Connect Database
+                </button>
+                <button
+                  onClick={() => setIsUploadOpen(true)}
+                  className="inline-flex items-center gap-2 rounded-lg bg-primary px-3.5 py-2 text-sm font-medium text-primary-foreground shadow-sm hover:bg-primary/90"
+                >
+                  <Plus className="h-4 w-4" />
+                  Upload File
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Sources Grid */}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {filteredSources.map((ds) => {
+              const isDatabase =
+                ds.sourceType === "postgres" || ds.sourceType === "mariadb" || ds.sourceType === "mysql";
+              const isStructured = ds.sourceType === "csv" || ds.sourceType === "excel";
+              const tableCount = ds.tables?.length || (ds.metadata as any)?.tableCount || 0;
+              const totalRows = (ds.metadata as any)?.totalRows ?? (ds.tables?.[0]?.rowCount || 0);
+              const chunkCount = (ds.metadata as any)?.chunkCount || 0;
+              const serverVersion = (ds.metadata as any)?.serverVersion || "";
+
+              let badgeColor = "bg-primary/10 text-primary";
+              let icon = <Database className="h-5 w-5" />;
+              let typeLabel = "Database";
+
+              if (ds.sourceType === "postgres") {
+                badgeColor = "bg-primary/10 text-primary";
+                icon = <Database className="h-5 w-5" />;
+                typeLabel = "PostgreSQL";
+              } else if (ds.sourceType === "mariadb") {
+                badgeColor = "bg-amber-500/10 text-amber-600";
+                icon = <Server className="h-5 w-5" />;
+                typeLabel = "MariaDB";
+              } else if (ds.sourceType === "mysql") {
+                badgeColor = "bg-blue-500/10 text-blue-600";
+                icon = <Server className="h-5 w-5" />;
+                typeLabel = "MySQL";
+              } else if (ds.sourceType === "csv") {
+                badgeColor = "bg-emerald-500/10 text-emerald-600";
+                icon = <FileSpreadsheet className="h-5 w-5" />;
+                typeLabel = "CSV File";
+              } else if (ds.sourceType === "excel") {
+                badgeColor = "bg-emerald-500/10 text-emerald-600";
+                icon = <FileSpreadsheet className="h-5 w-5" />;
+                typeLabel = "Excel Workbook";
+              } else if (ds.sourceType === "api_rest") {
+                badgeColor = "bg-blue-500/10 text-blue-600";
+                icon = <Globe className="h-5 w-5" />;
+                typeLabel = "REST API";
+              } else if (ds.sourceType === "mqtt_iot") {
+                badgeColor = "bg-emerald-500/10 text-emerald-600";
+                icon = <Radio className="h-5 w-5" />;
+                typeLabel = "MQTT IoT";
+              } else if (ds.sourceType === "cctv_feed") {
+                badgeColor = "bg-purple-500/10 text-purple-600";
+                icon = <Video className="h-5 w-5" />;
+                typeLabel = "CCTV Vision";
+              } else {
+                badgeColor = "bg-sky-500/10 text-sky-600";
+                icon = <FileText className="h-5 w-5" />;
+                typeLabel = "RAG Document";
+              }
+
+              return (
+                <div
+                  key={ds.id}
+                  className="group relative flex flex-col justify-between rounded-xl border border-border bg-card p-5 shadow-sm transition-all hover:border-primary/50 hover:shadow-md"
+                >
+                  <div>
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-3">
+                        <div
+                          className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${badgeColor}`}
+                        >
+                          {icon}
+                        </div>
+                        <div>
+                          <h4 className="font-semibold text-foreground truncate max-w-xs">{ds.name}</h4>
+                          <div className="flex items-center gap-2 mt-0.5">
+                            <p className="text-xs text-muted-foreground uppercase tracking-wider">
+                              {typeLabel}
+                            </p>
+                            {ds.collectionName && (
+                              <Link
+                                to={`/data-sources/collections/${ds.collectionId}`}
+                                onClick={(e) => e.stopPropagation()}
+                                className="inline-flex items-center gap-1 rounded bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary hover:underline"
+                                title={`Part of collection: ${ds.collectionName}`}
+                              >
+                                <Folder className="h-2.5 w-2.5" />
+                                {ds.collectionName}
+                              </Link>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        {ds.status === "ready" && (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-xs font-medium text-emerald-600">
+                            <CheckCircle2 className="h-3 w-3" />
+                            Ready
+                          </span>
+                        )}
+                        {ds.status === "processing" && (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-sky-500/10 px-2 py-0.5 text-xs font-medium text-sky-600 animate-pulse">
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                            Onboarding
+                          </span>
+                        )}
+                        {ds.status === "error" && (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive">
+                            <AlertCircle className="h-3 w-3" />
+                            Error
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {ds.description && (
+                      <p className="mt-3 text-xs text-muted-foreground line-clamp-2">{ds.description}</p>
+                    )}
+
+                    {/* JEV Semantic Profile Badge */}
+                    {ds.semanticProfile && (
+                      <div className="mt-3 rounded-lg border border-primary/20 bg-primary/5 p-2.5 space-y-1.5 text-xs">
+                        <div className="flex items-center justify-between">
+                          <span className="inline-flex items-center gap-1 font-semibold text-primary">
+                            <Bot className="h-3.5 w-3.5" />
+                            {ds.semanticProfile.onboardedBy || "Onboarding Orchestrator"}
+                          </span>
+                          {ds.semanticProfile.domain && (
+                            <span className="rounded bg-background px-1.5 py-0.5 text-xs font-mono uppercase text-muted-foreground border border-border">
+                              {ds.semanticProfile.domain}
+                            </span>
+                          )}
+                        </div>
+                        {ds.semanticProfile.entities && ds.semanticProfile.entities.length > 0 && (
+                          <div className="flex flex-wrap gap-1 pt-0.5">
+                            {ds.semanticProfile.entities.slice(0, 3).map((ent) => (
+                              <span
+                                key={ent}
+                                className="rounded bg-background border border-border px-1.5 py-0.5 text-xs text-foreground font-medium truncate max-w-xs"
+                              >
+                                {ent}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    <div className="mt-4 grid grid-cols-2 gap-2 border-t border-border pt-3 text-xs">
+                      <div>
+                        <span className="text-muted-foreground">Volume:</span>
+                        <span className="ml-1 font-medium text-foreground">
+                          {isDatabase || isStructured
+                            ? `${tableCount} table(s) • ${totalRows.toLocaleString()} rows`
+                            : ds.sourceType === "rag_document"
+                            ? `${chunkCount} chunks`
+                            : "Live Stream"}
+                        </span>
+                      </div>
+                      <div className="text-right truncate">
+                        <span className="text-muted-foreground">Type:</span>
+                        <span className="ml-1 font-medium text-foreground truncate">
+                          {isDatabase
+                            ? serverVersion
+                              ? serverVersion.split(" ")[0]
+                              : "Live DB"
+                            : ds.fileSize
+                            ? `${Math.round(ds.fileSize / 1024)} KB`
+                            : typeLabel}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 flex items-center justify-between border-t border-border pt-3">
+                    <button
+                      onClick={() => {
+                        if (confirm(`Delete data source '${ds.name}'?`)) {
+                          deleteMutation.mutate(ds.id);
+                        }
+                      }}
+                      className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-destructive transition-colors"
+                      title="Delete data source"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                    <Link
+                      to={`/data-sources/${ds.id}`}
+                      className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+                    >
+                      Inspect & Query <ArrowRight className="h-3 w-3" />
+                    </Link>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
 
       {/* Connect Database Modal */}
       {isConnectDbOpen && (
@@ -1000,12 +1207,12 @@ export function DataSources() {
             <form onSubmit={handleUploadSubmit} className="mt-4 space-y-4">
               <div>
                 <label className="block text-xs font-medium text-foreground mb-1">
-                  Source File(s) (.csv, .xlsx, .xls, .pdf, .docx, .md, .txt)
+                  Source File(s) (.csv, .xlsx, .xls, .pdf, .docx, .md, .txt, .zip)
                 </label>
                 <input
                   type="file"
                   multiple
-                  accept=".csv,.tsv,.xlsx,.xls,.pdf,.docx,.txt,.md"
+                  accept=".csv,.tsv,.xlsx,.xls,.pdf,.docx,.txt,.md,.zip"
                   onChange={handleFileChange}
                   className="block w-full text-xs text-muted-foreground file:mr-3 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:text-xs file:font-medium file:bg-muted file:text-foreground hover:file:bg-muted/80 cursor-pointer border border-border rounded-md p-1"
                   required
@@ -1028,6 +1235,27 @@ export function DataSources() {
                     </div>
                   </div>
                 )}
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-foreground mb-1">
+                  Assign to Collection (Optional)
+                </label>
+                <select
+                  value={uploadCollectionId}
+                  onChange={(e) => setUploadCollectionId(e.target.value)}
+                  className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                >
+                  <option value="">None (Standalone Data Source)</option>
+                  {collections.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Files uploaded to a collection are automatically analyzed for cross-source foreign keys and semantic correlations.
+                </p>
               </div>
 
               <div>
@@ -1422,6 +1650,91 @@ export function DataSources() {
                 >
                   {connectCctvMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
                   {connectCctvMutation.isPending ? "Connecting..." : "Connect Vision Stream"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Create Collection Modal */}
+      {isCreateCollectionOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm p-4">
+          <div className="relative w-full max-w-md rounded-xl border border-border bg-card p-6 shadow-xl">
+            <h3 className="text-lg font-bold text-foreground flex items-center gap-2">
+              <Folder className="h-5 w-5 text-primary" />
+              Create Collection
+            </h3>
+            <p className="text-xs text-muted-foreground mt-1">
+              Group data sources (CSVs, Excel, RAG documents, databases, IoT, CCTV) under a single domain boundary with automatic cross-table foreign key mapping and unified ClickHouse views.
+            </p>
+
+            {createCollectionError && (
+              <div className="mt-4 rounded-lg bg-destructive/10 p-3 text-xs text-destructive flex items-center gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                {createCollectionError}
+              </div>
+            )}
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (!collectionName.trim()) return;
+                createCollectionMutation.mutate({
+                  name: collectionName.trim(),
+                  description: collectionDescription.trim() || undefined,
+                });
+              }}
+              className="mt-4 space-y-4"
+            >
+              <div>
+                <label className="block text-xs font-medium text-foreground mb-1">
+                  Collection Name
+                </label>
+                <input
+                  type="text"
+                  value={collectionName}
+                  onChange={(e) => setCollectionName(e.target.value)}
+                  placeholder="e.g. Timur Telecom"
+                  required
+                  className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-foreground mb-1">
+                  Description (Optional)
+                </label>
+                <textarea
+                  value={collectionDescription}
+                  onChange={(e) => setCollectionDescription(e.target.value)}
+                  placeholder="Operational context for autonomous correlation..."
+                  rows={3}
+                  className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                />
+              </div>
+
+              <div className="flex items-center justify-between border-t border-border pt-4">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsCreateCollectionOpen(false);
+                    setCollectionName("");
+                    setCollectionDescription("");
+                    setCreateCollectionError(null);
+                  }}
+                  disabled={createCollectionMutation.isPending}
+                  className="rounded-lg border border-border px-4 py-2 text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={!collectionName.trim() || createCollectionMutation.isPending}
+                  className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors shadow-sm"
+                >
+                  {createCollectionMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+                  {createCollectionMutation.isPending ? "Creating..." : "Create Collection"}
                 </button>
               </div>
             </form>

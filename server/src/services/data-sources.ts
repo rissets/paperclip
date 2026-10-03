@@ -2,6 +2,7 @@ import { eq, ne, and, or, ilike, desc, sql, isNull, inArray } from "drizzle-orm"
 import type { Db } from "@paperclipai/db";
 import {
   dataSources,
+  dataSourceCollections,
   dataSourceTables,
   dataSourceRecords,
   dataSourceChunks,
@@ -22,19 +23,37 @@ import { KnowledgeIngestionService } from "./knowledge-ingestion.js";
 import { DatabaseIntegrationService } from "./database-integration.js";
 import { ClickhouseService } from "./clickhouse.js";
 import { readBuiltInAgentMarker } from "./built-in-agent-metadata.js";
+import { DataSourceCollectionsService } from "./data-source-collections.js";
 
 export class DataSourcesService {
-  constructor(private db: Db) {}
+  private collectionsService: DataSourceCollectionsService;
+
+  constructor(private db: Db) {
+    this.collectionsService = new DataSourceCollectionsService(db);
+  }
 
   /**
-   * List all data sources for a company
+   * List all data sources for a company, with optional collection filtering
    */
-  async list(companyId: string): Promise<DataSource[]> {
+  async list(companyId: string, collectionId?: string): Promise<DataSource[]> {
+    const whereConditions = [eq(dataSources.companyId, companyId)];
+    if (collectionId) {
+      whereConditions.push(eq(dataSources.collectionId, collectionId));
+    }
+
     const list = await this.db
       .select()
       .from(dataSources)
-      .where(eq(dataSources.companyId, companyId))
+      .where(and(...whereConditions))
       .orderBy(desc(dataSources.createdAt));
+
+    // Fetch collections map for names
+    const collections = await this.db
+      .select({ id: dataSourceCollections.id, name: dataSourceCollections.name })
+      .from(dataSourceCollections)
+      .where(eq(dataSourceCollections.companyId, companyId));
+
+    const colNameMap = new Map(collections.map((c) => [c.id, c.name]));
 
     // Attach tables summary
     const results: DataSource[] = [];
@@ -46,6 +65,8 @@ export class DataSourcesService {
 
       results.push({
         ...ds,
+        collectionId: ds.collectionId || null,
+        collectionName: ds.collectionId ? colNameMap.get(ds.collectionId) || null : null,
         sourceType: ds.sourceType as any,
         status: ds.status as any,
         semanticProfile: (ds.metadata as any)?.semanticProfile || null,
@@ -67,6 +88,15 @@ export class DataSourcesService {
 
     if (!ds) return null;
 
+    let collectionName: string | null = null;
+    if (ds.collectionId) {
+      const [col] = await this.db
+        .select({ name: dataSourceCollections.name })
+        .from(dataSourceCollections)
+        .where(and(eq(dataSourceCollections.id, ds.collectionId), eq(dataSourceCollections.companyId, companyId)));
+      collectionName = col?.name || null;
+    }
+
     const tables = await this.db
       .select()
       .from(dataSourceTables)
@@ -81,12 +111,29 @@ export class DataSourcesService {
 
     return {
       ...ds,
+      collectionId: ds.collectionId || null,
+      collectionName,
       sourceType: ds.sourceType as any,
       status: ds.status as any,
       semanticProfile: (ds.metadata as any)?.semanticProfile || null,
       tables: tables as any[],
       chunks: chunks as any[],
     };
+  }
+
+  /**
+   * Move or assign data source to a collection
+   */
+  async assignCollection(companyId: string, id: string, collectionId: string | null): Promise<DataSource | null> {
+    await this.db
+      .update(dataSources)
+      .set({
+        collectionId,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(dataSources.id, id), eq(dataSources.companyId, companyId)));
+
+    return this.getById(companyId, id);
   }
 
   /**
@@ -678,27 +725,66 @@ export class DataSourcesService {
   async searchKnowledge(
     companyId: string,
     query: string,
-    options: { dataSourceId?: string; dataSourceIds?: string[]; agentId?: string; limit?: number } = {},
+    options: {
+      dataSourceId?: string;
+      dataSourceIds?: string[];
+      collectionId?: string;
+      agentId?: string;
+      limit?: number;
+    } = {},
   ): Promise<KnowledgeSearchResult[]> {
     const limit = options.limit || 5;
     const queryEmbedding = KnowledgeIngestionService.generateEmbedding(query);
 
     let allowedDataSourceIds: string[] | null = null;
     if (options.agentId) {
-      const [agent] = await this.db
-        .select({ metadata: agents.metadata })
-        .from(agents)
-        .where(and(eq(agents.id, options.agentId), eq(agents.companyId, companyId)))
-        .limit(1);
-      const access = (agent?.metadata as any)?.dataSourceAccess;
-      if (access && access.mode === "none") {
+      const access = await this.getAgentDataSources(companyId, options.agentId);
+      if (access.mode === "none") {
         return [];
       }
-      if (access && access.mode === "selected") {
-        const ids = Array.isArray(access.dataSourceIds) ? access.dataSourceIds : [];
-        if (ids.length === 0) return [];
-        allowedDataSourceIds = ids;
+      if (access.mode === "selected") {
+        if (!access.effectiveDataSourceIds || access.effectiveDataSourceIds.length === 0) return [];
+        allowedDataSourceIds = access.effectiveDataSourceIds;
       }
+    }
+
+    if (options.collectionId) {
+      // Find collection by id or slug
+      let colId = options.collectionId;
+      const [col] = await this.db
+        .select({ id: dataSourceCollections.id })
+        .from(dataSourceCollections)
+        .where(
+          and(
+            eq(dataSourceCollections.companyId, companyId),
+            or(eq(dataSourceCollections.id, options.collectionId), eq(dataSourceCollections.slug, options.collectionId)),
+          ),
+        )
+        .limit(1);
+      if (col) {
+        colId = col.id;
+      }
+
+      const colSources = await this.db
+        .select({ id: dataSources.id })
+        .from(dataSources)
+        .where(and(eq(dataSources.companyId, companyId), eq(dataSources.collectionId, colId)));
+      const colSourceIds = colSources.map((s) => s.id);
+      if (colSourceIds.length === 0) return [];
+
+      if (allowedDataSourceIds) {
+        allowedDataSourceIds = allowedDataSourceIds.filter((id) => colSourceIds.includes(id));
+        if (allowedDataSourceIds.length === 0) return [];
+      } else {
+        allowedDataSourceIds = colSourceIds;
+      }
+    }
+
+    if (options.dataSourceId) {
+      if (allowedDataSourceIds && !allowedDataSourceIds.includes(options.dataSourceId)) {
+        return [];
+      }
+      allowedDataSourceIds = [options.dataSourceId];
     }
 
     if (options.dataSourceIds && options.dataSourceIds.length > 0) {
@@ -1089,6 +1175,9 @@ export class DataSourcesService {
   /**
    * Get assigned data sources for a specific agent
    */
+  /**
+   * Get assigned data sources for a specific agent
+   */
   async getAgentDataSources(companyId: string, agentId: string) {
     const [agent] = await this.db
       .select()
@@ -1100,14 +1189,17 @@ export class DataSourcesService {
     }
 
     const availableDataSources = await this.list(companyId);
+    const availableCollections = await this.collectionsService.list(companyId);
     const access = (agent.metadata as any)?.dataSourceAccess;
 
     let mode: "all" | "selected" | "none" = "none";
     let dataSourceIds: string[] = [];
+    let collectionIds: string[] = [];
 
     if (access && typeof access === "object") {
       mode = access.mode || "none";
       dataSourceIds = Array.isArray(access.dataSourceIds) ? access.dataSourceIds : [];
+      collectionIds = Array.isArray(access.collectionIds) ? access.collectionIds : [];
     } else {
       // Default heuristics: built-in knowledge & data agents default to "all"
       const marker = readBuiltInAgentMarker(agent.metadata);
@@ -1122,24 +1214,39 @@ export class DataSourcesService {
       }
     }
 
-    let assignedDataSources: DataSource[] = [];
+    const selectedColSet = new Set(collectionIds);
+    const selectedDsSet = new Set(dataSourceIds);
+
+    // Compute effective allowed data source IDs:
+    // Direct dataSourceIds PLUS all dataSources whose collectionId is in collectionIds
+    const effectiveAllowedSet = new Set<string>();
     if (mode === "all") {
-      assignedDataSources = availableDataSources;
+      for (const ds of availableDataSources) {
+        effectiveAllowedSet.add(ds.id);
+      }
     } else if (mode === "selected") {
-      const idSet = new Set(dataSourceIds);
-      assignedDataSources = availableDataSources.filter((ds) => idSet.has(ds.id));
-    } else {
-      assignedDataSources = [];
+      for (const ds of availableDataSources) {
+        if (selectedDsSet.has(ds.id)) {
+          effectiveAllowedSet.add(ds.id);
+        } else if (ds.collectionId && selectedColSet.has(ds.collectionId)) {
+          effectiveAllowedSet.add(ds.id);
+        }
+      }
     }
+
+    const assignedDataSources = availableDataSources.filter((ds) => effectiveAllowedSet.has(ds.id));
 
     return {
       agentId,
       companyId,
       agentName: agent.name,
       mode,
-      dataSourceIds: mode === "selected" ? dataSourceIds : (mode === "all" ? availableDataSources.map((ds) => ds.id) : []),
+      dataSourceIds,
+      collectionIds,
+      effectiveDataSourceIds: Array.from(effectiveAllowedSet),
       assignedDataSources,
       availableDataSources,
+      availableCollections,
     };
   }
 
@@ -1149,7 +1256,7 @@ export class DataSourcesService {
   async updateAgentDataSources(
     companyId: string,
     agentId: string,
-    input: { mode: "all" | "selected" | "none"; dataSourceIds?: string[] },
+    input: { mode: "all" | "selected" | "none"; dataSourceIds?: string[]; collectionIds?: string[] },
   ) {
     const [agent] = await this.db
       .select()
@@ -1166,6 +1273,7 @@ export class DataSourcesService {
       dataSourceAccess: {
         mode: input.mode,
         dataSourceIds: input.mode === "selected" ? (input.dataSourceIds || []) : [],
+        collectionIds: input.mode === "selected" ? (input.collectionIds || []) : [],
         updatedAt: new Date().toISOString(),
       },
     };
@@ -1190,6 +1298,7 @@ export class DataSourcesService {
       details: {
         mode: input.mode,
         assignedCount: input.mode === "selected" ? (input.dataSourceIds || []).length : input.mode === "all" ? "all" : 0,
+        collectionCount: input.mode === "selected" ? (input.collectionIds || []).length : 0,
       },
     });
 

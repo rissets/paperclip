@@ -81,6 +81,7 @@ def main():
     group.add_argument("--sql", type=str, help="Execute direct read-only ClickHouse/SQL query")
 
     # Options for aggregate
+    parser.add_argument("--collection", "-c", type=str, help="Filter tables by collection ID or slug")
     parser.add_argument("--table", type=str, help="Table ID or Table Name for aggregation")
     parser.add_argument("--data-source-id", type=str, help="Data Source ID (optional if table is unique)")
     parser.add_argument("--column", type=str, help="Column / metric to aggregate")
@@ -102,6 +103,8 @@ def main():
     access_mode = get_env_or_default("PAPERCLIP_DATA_SOURCES_MODE", "all")
     assigned_raw = get_env_or_default("PAPERCLIP_ASSIGNED_DATA_SOURCES", "")
     assigned_ids = set([x.strip() for x in assigned_raw.split(",") if x.strip()])
+    assigned_col_raw = get_env_or_default("PAPERCLIP_ASSIGNED_COLLECTIONS", "")
+    assigned_col_ids = set([x.strip() for x in assigned_col_raw.split(",") if x.strip()])
 
     if not company_id:
         print("Error: Company ID is required (set $PAPERCLIP_COMPANY_ID or pass --company-id)", file=sys.stderr)
@@ -117,35 +120,50 @@ def main():
     # 1. List Tables
     if args.list_tables:
         url = f"{api_prefix}/companies/{company_id}/data-sources"
+        params = []
         if agent_id:
-            url += f"?agentId={agent_id}"
+            params.append(f"agentId={agent_id}")
+        if args.collection:
+            params.append(f"collectionId={args.collection}")
+        if params:
+            url += "?" + "&".join(params)
+
         sources = make_request(url, api_key=args.api_key, agent_id=agent_id)
         
         tables_list = []
         for ds in sources:
             ds_name = ds.get("name")
             ds_id = ds.get("id")
-            if access_mode == "selected" and assigned_ids and ds_id not in assigned_ids:
-                continue
+            col_id = ds.get("collectionId")
+            col_name = ds.get("collectionName")
+
+            if access_mode == "selected":
+                allowed_by_ds = ds_id in assigned_ids if assigned_ids else False
+                allowed_by_col = col_id in assigned_col_ids if (col_id and assigned_col_ids) else False
+                if not allowed_by_ds and not allowed_by_col and (assigned_ids or assigned_col_ids):
+                    continue
+
             ds_type = ds.get("sourceType")
             status = ds.get("status")
             for tbl in ds.get("tables", []):
                 tables_list.append({
                     "Table Name": tbl.get("tableName"),
-                    "Table ID": tbl.get("id"),
-                    "Source Type": ds_type,
+                    "Collection": col_name or "-",
                     "Row Count": f"{tbl.get('rowCount', 0):,}",
                     "Column Count": tbl.get("columnCount", 0),
+                    "Source Type": ds_type,
                     "Status": status,
+                    "Table ID": tbl.get("id"),
                     "Data Source ID": ds_id
                 })
 
         if args.format == "json":
             print(json.dumps(tables_list, indent=2))
         else:
-            print(f"### Structured Tables in Company ({len(tables_list)} found):\n")
+            scope_label = f" in Collection '{args.collection}'" if args.collection else ""
+            print(f"### Structured Tables{scope_label} ({len(tables_list)} found):\n")
             if tables_list:
-                headers = ["Table Name", "Row Count", "Column Count", "Source Type", "Status", "Table ID"]
+                headers = ["Table Name", "Collection", "Row Count", "Column Count", "Source Type", "Status", "Table ID"]
                 print_markdown_table(headers, tables_list)
             else:
                 print("No structured tables accessible to this agent.")
@@ -205,7 +223,7 @@ def main():
     if args.sql:
         url = f"{api_prefix}/companies/{company_id}/data-sources/clickhouse/query"
         payload = {"sql": args.sql, "limit": args.limit}
-        res = make_request(url, method="POST", payload=payload, api_key=args.api_key)
+        res = make_request(url, method="POST", payload=payload, api_key=args.api_key, agent_id=agent_id)
         
         if args.format == "json":
             print(json.dumps(res, indent=2))
@@ -232,7 +250,7 @@ def main():
 
         if not ds_id:
             url = f"{api_prefix}/companies/{company_id}/data-sources"
-            sources = make_request(url, api_key=args.api_key)
+            sources = make_request(url, api_key=args.api_key, agent_id=agent_id)
             for ds in sources:
                 for tbl in ds.get("tables", []):
                     if tbl.get("id") == args.table or tbl.get("tableName", "").lower() == args.table.lower():
@@ -260,7 +278,7 @@ def main():
             query_payload["filter"] = {k.strip(): v.strip()}
 
         url = f"{api_prefix}/companies/{company_id}/data-sources/{ds_id}/tables/{table_id}/query"
-        res = make_request(url, method="POST", payload=query_payload, api_key=args.api_key)
+        res = make_request(url, method="POST", payload=query_payload, api_key=args.api_key, agent_id=agent_id)
 
         if args.format == "json":
             print(json.dumps(res, indent=2))

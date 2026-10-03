@@ -1,11 +1,33 @@
 import { pgTable, uuid, text, integer, timestamp, index, jsonb } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 
+export const dataSourceCollections = pgTable(
+  "data_source_collections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    slug: text("slug").notNull(),
+    description: text("description"),
+    color: text("color"),
+    icon: text("icon"),
+    semanticProfile: jsonb("semantic_profile").$type<Record<string, unknown>>(),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    companyIdx: index("data_source_collections_company_idx").on(table.companyId),
+    companySlugIdx: index("data_source_collections_company_slug_idx").on(table.companyId, table.slug),
+  }),
+);
+
 export const dataSources = pgTable(
   "data_sources",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    collectionId: uuid("collection_id").references(() => dataSourceCollections.id, { onDelete: "set null" }),
     name: text("name").notNull(),
     description: text("description"),
     sourceType: text("source_type").notNull(), // 'csv' | 'excel' | 'rag_document'
@@ -22,6 +44,7 @@ export const dataSources = pgTable(
     companyIdx: index("data_sources_company_idx").on(table.companyId),
     companyStatusIdx: index("data_sources_company_status_idx").on(table.companyId, table.status),
     companyTypeIdx: index("data_sources_company_type_idx").on(table.companyId, table.sourceType),
+    collectionIdx: index("data_sources_collection_idx").on(table.collectionId),
   }),
 );
 

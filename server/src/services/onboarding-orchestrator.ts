@@ -23,12 +23,14 @@ import type {
   SemanticMetric,
   SemanticDimension,
   TableRelation,
+  DataSourceCollection,
 } from "@paperclipai/shared";
 import { StructuredIngestionService } from "./structured-ingestion.js";
 import { KnowledgeIngestionService } from "./knowledge-ingestion.js";
 import { DatabaseIntegrationService } from "./database-integration.js";
 import { TypeSafeJevService } from "./typesafe-jev.js";
 import { EnterpriseAgentRosterService } from "./enterprise-agent-roster.js";
+import { DataSourceCollectionsService } from "./data-source-collections.js";
 import { aiReasoningService } from "./ai-reasoning.js";
 
 export interface OnboardingFileInput {
@@ -38,13 +40,23 @@ export interface OnboardingFileInput {
   size?: number;
 }
 
+export interface OnboardingOptions {
+  name?: string;
+  description?: string;
+  async?: boolean;
+  collectionId?: string;
+  skipCorrelation?: boolean;
+}
+
 export class OnboardingOrchestratorService {
   private jevService: TypeSafeJevService;
   private rosterService: EnterpriseAgentRosterService;
+  private collectionsService: DataSourceCollectionsService;
 
   constructor(private db: Db) {
     this.jevService = new TypeSafeJevService();
     this.rosterService = new EnterpriseAgentRosterService(db);
+    this.collectionsService = new DataSourceCollectionsService(db);
   }
 
   /**
@@ -53,12 +65,22 @@ export class OnboardingOrchestratorService {
   async onboardSource(
     companyId: string,
     file: OnboardingFileInput,
-    options: { name?: string; description?: string; async?: boolean } = {},
+    options: OnboardingOptions = {},
   ): Promise<DataSource> {
     // 0. Ensure enterprise agent roster exists
     await this.rosterService.ensureEnterpriseRoster(companyId);
 
     const ext = file.originalname.split(".").pop()?.toLowerCase() || "";
+
+    // Handle ZIP archives containing multiple structured/RAG files
+    if (ext === "zip") {
+      const zipRes = await this.onboardZip(companyId, file, options);
+      if (zipRes.dataSources.length > 0) {
+        return zipRes.dataSources[0];
+      }
+      throw new Error(`No valid data files found in ZIP archive: ${file.originalname}`);
+    }
+
     let sourceType: DataSourceType = "rag_document";
 
     if (ext === "csv" || ext === "tsv") {
@@ -114,6 +136,7 @@ export class OnboardingOrchestratorService {
       .insert(dataSources)
       .values({
         companyId,
+        collectionId: options.collectionId || null,
         name: defaultName,
         description: options.description || `Ingested from ${file.originalname}`,
         sourceType,
@@ -145,6 +168,7 @@ export class OnboardingOrchestratorService {
       });
       return {
         ...initialDs,
+        collectionId: initialDs.collectionId,
         sourceType: initialDs.sourceType as any,
         status: initialDs.status as any,
         tables: [],
@@ -155,11 +179,74 @@ export class OnboardingOrchestratorService {
     return await pipelinePromise;
   }
 
+  /**
+   * Onboard a ZIP archive containing multiple structured and RAG documents into a Collection
+   */
+  async onboardZip(
+    companyId: string,
+    file: OnboardingFileInput,
+    options: OnboardingOptions = {},
+  ): Promise<{ collection: DataSourceCollection; dataSources: DataSource[] }> {
+    await this.rosterService.ensureEnterpriseRoster(companyId);
+
+    let collectionId = options.collectionId;
+    let collection: DataSourceCollection | null = null;
+
+    if (collectionId) {
+      collection = await this.collectionsService.getById(companyId, collectionId);
+    }
+
+    if (!collection) {
+      const collectionName = options.name?.trim() || file.originalname.replace(/\.zip$/i, "");
+      collection = await this.collectionsService.create(companyId, {
+        name: collectionName,
+        description: options.description || `Extracted from ${file.originalname}`,
+      });
+      collectionId = collection.id;
+    }
+
+    const extractedFiles = this.collectionsService.extractZipEntries(file.buffer);
+    if (extractedFiles.length === 0) {
+      throw new Error(
+        `No supported files found in ${file.originalname}. Supported formats: CSV, TSV, Excel, PDF, DOCX, TXT, MD, JSON.`,
+      );
+    }
+
+    const onboardedSources: DataSource[] = [];
+    for (const extracted of extractedFiles) {
+      try {
+        const ds = await this.onboardSource(companyId, extracted, {
+          collectionId,
+          skipCorrelation: true,
+          async: false,
+        });
+        onboardedSources.push(ds);
+      } catch (err) {
+        console.error(`[OnboardingOrchestrator] Error onboarding extracted file ${extracted.originalname}:`, err);
+      }
+    }
+
+    // Correlate the collection once all files are ingested
+    if (collectionId) {
+      try {
+        await this.collectionsService.correlateCollection(companyId, collectionId);
+      } catch (err) {
+        console.error(`[OnboardingOrchestrator] Failed to correlate collection ${collectionId}:`, err);
+      }
+      collection = await this.collectionsService.getById(companyId, collectionId);
+    }
+
+    return {
+      collection: collection!,
+      dataSources: onboardedSources,
+    };
+  }
+
   private async executeOnboardingPipeline(
     companyId: string,
     initialDs: typeof dataSources.$inferSelect,
     file: OnboardingFileInput,
-    options: { name?: string; description?: string; async?: boolean },
+    options: OnboardingOptions,
     defaultName: string,
     ext: string,
     sourceType: DataSourceType,
@@ -546,13 +633,24 @@ export class OnboardingOrchestratorService {
           semanticProfile,
         );
 
-        return {
+        const finalDs: DataSource = {
           ...updated,
+          collectionId: updated.collectionId,
           sourceType: updated.sourceType as any,
           status: updated.status as any,
           semanticProfile,
           tables: createdTables,
         };
+
+        if (options.collectionId && !options.skipCorrelation) {
+          try {
+            await this.collectionsService.correlateCollection(companyId, options.collectionId);
+          } catch (err) {
+            console.error(`[OnboardingOrchestrator] Failed to correlate collection ${options.collectionId}:`, err);
+          }
+        }
+
+        return finalDs;
       } else {
         // --- 4. KNOWLEDGE / RAG INGESTION SPECIALIST PIPELINE ---
         // Look up the real built-in Knowledge Ingestion Agent by its metadata key.
@@ -709,13 +807,24 @@ export class OnboardingOrchestratorService {
           semanticProfile,
         );
 
-        return {
+        const finalDs: DataSource = {
           ...updated,
+          collectionId: updated.collectionId,
           sourceType: updated.sourceType as any,
           status: updated.status as any,
           semanticProfile,
           chunks: chunks as any[],
         };
+
+        if (options.collectionId && !options.skipCorrelation) {
+          try {
+            await this.collectionsService.correlateCollection(companyId, options.collectionId);
+          } catch (err) {
+            console.error(`[OnboardingOrchestrator] Failed to correlate collection ${options.collectionId}:`, err);
+          }
+        }
+
+        return finalDs;
       }
     } catch (err: any) {
       await this.db

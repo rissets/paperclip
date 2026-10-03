@@ -156,7 +156,7 @@ export const agentsApi = {
     ),
   updateDataSources: (
     id: string,
-    data: { mode: "all" | "selected" | "none"; dataSourceIds?: string[] },
+    data: { mode: "all" | "selected" | "none"; dataSourceIds?: string[]; collectionIds?: string[] },
     companyId?: string,
   ) =>
     api.put<AgentDataSourcesResponse>(

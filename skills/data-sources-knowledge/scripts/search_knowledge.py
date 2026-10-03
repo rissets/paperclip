@@ -38,6 +38,12 @@ def parse_args():
         help="Optional specific data source ID to scope retrieval to",
     )
     parser.add_argument(
+        "--collection", "-c", "--collection-id",
+        type=str,
+        default=None,
+        help="Optional Collection ID or slug to scope RAG retrieval to",
+    )
+    parser.add_argument(
         "--format", "-f",
         choices=["compact", "markdown", "json"],
         default="compact",
@@ -95,12 +101,22 @@ def main():
     assigned_raw = os.environ.get("PAPERCLIP_ASSIGNED_DATA_SOURCES", "")
     assigned = [x.strip() for x in assigned_raw.split(",") if x.strip()]
 
+    assigned_col_raw = os.environ.get("PAPERCLIP_ASSIGNED_COLLECTIONS", "")
+    assigned_cols = [x.strip() for x in assigned_col_raw.split(",") if x.strip()]
+
+    target_collection = args.collection
+    if not target_collection and assigned_cols and len(assigned_cols) == 1:
+        target_collection = assigned_cols[0]
+
+    if target_collection:
+        payload["collectionId"] = target_collection
+
     if args.data_source_id:
         if mode == "selected" and assigned and args.data_source_id not in assigned:
             print(f"Error: Akses ditolak. Data source '{args.data_source_id}' tidak ditugaskan ke agen ini.", file=sys.stderr)
             sys.exit(1)
         payload["dataSourceId"] = args.data_source_id
-    elif mode == "selected" and assigned:
+    elif mode == "selected" and assigned and not target_collection:
         payload["dataSourceIds"] = assigned
 
     agent_id = args.agent_id or os.environ.get("PAPERCLIP_AGENT_ID")

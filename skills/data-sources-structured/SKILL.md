@@ -16,7 +16,13 @@ This skill equips Paperclip agents (such as `DataAgent`, `AnalyticsEngineerAgent
 
 Agents should run the pre-built Python CLI tool directly from bash to inspect schemas, execute aggregations, and run SQL queries:
 
-### A. Discover All Structured Tables
+### A. Discover Structured Tables (Collection-Scoped or Universal)
+Discover tables within a specific collection (ultra-fast, avoids scanning unrelated enterprise datasets):
+```bash
+python3 skills/data-sources-structured/scripts/query_structured.py --list-tables --collection "<collection_slug_or_id>"
+```
+
+Or list all tables assigned to this agent:
 ```bash
 python3 skills/data-sources-structured/scripts/query_structured.py --list-tables
 ```
@@ -47,11 +53,23 @@ python3 skills/data-sources-structured/scripts/query_structured.py \
 ```
 
 ### D. Execute Custom Read-Only ClickHouse OLAP SQL
-For complex analytical queries, quantiles, or window expressions:
+For complex analytical queries, quantiles, time-series distributions, CTEs, or window expressions:
 ```bash
 python3 skills/data-sources-structured/scripts/query_structured.py \
-  --sql "SELECT category, count(*), sum(total_amount) AS revenue FROM my_table GROUP BY category ORDER BY revenue DESC"
+  --sql "SELECT category_col, count(*), sum(metric_col) AS total FROM <table_name> GROUP BY category_col ORDER BY total DESC"
 ```
+
+#### ClickHouse Best Practices for Dynamic SQL:
+1. **Date & Timestamp Functions**:
+   Ingested tabular datasets (CSV/Excel) often store timestamp and date values as `String`. In ClickHouse, date functions (such as `toHour()`, `toDayOfWeek()`, `toDate()`, `toStartOfDay()`, `toStartOfHour()`) require `DateTime` or `Date`.
+   Always wrap string date/timestamp columns with `parseDateTimeBestEffortOrNull(column_name)` or `toDateTimeOrNull(column_name)`:
+   ```sql
+   SELECT toHour(parseDateTimeBestEffortOrNull(timestamp_col)) AS hour, count(*) FROM <table_name> GROUP BY hour ORDER BY hour ASC
+   ```
+2. **Multi-Stage Common Table Expressions (CTEs)**:
+   You can freely structure queries using CTEs (`WITH <cte_name> AS (...) SELECT ... FROM <cte_name>`).
+3. **Dynamic Schema Introspection First**:
+   Always run `--describe-table <table_name>` first to discover the exact column names, data types, and semantic metrics before constructing custom analytical queries.
 
 ---
 

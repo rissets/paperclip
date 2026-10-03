@@ -76,15 +76,26 @@ export const ENTERPRISE_AGENT_ROSTER: EnterpriseAgentSpec[] = [
 
 export const ENTERPRISE_ROSTER_DEFINITIONS = ENTERPRISE_AGENT_ROSTER;
 
+const ensuredCompanies = new Set<string>();
+
+export function clearEnsuredCompaniesCache() {
+  ensuredCompanies.clear();
+}
+
 export class EnterpriseAgentRosterService {
   constructor(private db: Db) {}
 
   /**
    * Ensure all enterprise agents exist for the specified company.
    * Auto-provisions the 6 core built-in agents (Homseo, 3 onboarding agents, 2 query/retrieval agents).
+   * Caches results per company to avoid redundant DB scans on every chat message.
    */
   async ensureEnterpriseRoster(companyId: string) {
+    if (ensuredCompanies.has(companyId)) {
+      return;
+    }
     await builtInAgentService(this.db).autoProvisionBundledAgents(companyId);
+    ensuredCompanies.add(companyId);
   }
 
   /**

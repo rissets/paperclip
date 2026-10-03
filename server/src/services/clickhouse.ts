@@ -148,6 +148,46 @@ export class ClickhouseService {
 
     if (!res.ok) {
       const errText = await res.text();
+      // Auto-heal ClickHouse Date/DateTime type mismatch on String columns:
+      // e.g. "Code: 43. DB::Exception: Illegal type String of argument of function toHour. Should be Date, Date32, DateTime or DateTime64"
+      const typeMismatchMatch = errText.match(/Illegal type String of argument of function (\w+)\. Should be Date/i);
+      if (typeMismatchMatch) {
+        const dateFuncs = "toHour|toDayOfWeek|toDayOfMonth|toDayOfYear|toMonth|toYear|toQuarter|toMinute|toSecond|toStartOfHour|toStartOfDay|toStartOfWeek|toStartOfMonth|toStartOfQuarter|toStartOfYear|toStartOfInterval|toDate|toDateTime|toUnixTimestamp";
+        const replaceRegex = new RegExp(`\\b(${dateFuncs})\\s*\\(\\s*([a-zA-Z0-9_]+)\\s*\\)`, "gi");
+        const rewrittenSql = formattedSql.replace(replaceRegex, (match, fn, col) => {
+          if (/^(parseDateTime|toDateTime|toDate|now|today|yesterday)/i.test(col)) return match;
+          return `${fn}(parseDateTimeBestEffortOrNull(${col}))`;
+        });
+
+        if (rewrittenSql !== formattedSql) {
+          const retryRes = await fetch(url.toString(), {
+            method: "POST",
+            headers: {
+              ...this.getHeaders(),
+              "Content-Type": "text/plain; charset=utf-8",
+            },
+            body: rewrittenSql,
+            signal: AbortSignal.timeout(60000),
+          });
+
+          if (retryRes.ok) {
+            const json = await retryRes.json();
+            const meta = (json.meta || []) as Array<{ name: string; type: string }>;
+            const columns = meta.map((m) => m.name);
+            const rows = (json.data || []) as T[];
+            const rowCount = typeof json.rows === "number" ? json.rows : rows.length;
+
+            return {
+              columns,
+              rows,
+              rowCount,
+              executionTimeMs: Date.now() - startTime,
+              meta,
+              statistics: json.statistics,
+            };
+          }
+        }
+      }
       throw new Error(`ClickHouse query error (${res.status}): ${errText.trim()}`);
     }
 
