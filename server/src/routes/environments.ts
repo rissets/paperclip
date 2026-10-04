@@ -359,7 +359,7 @@ export function environmentRoutes(
   }
 
   function assertCanReadInstanceEnvironments(req: Request) {
-    assertBoardOrgAccess(req);
+    assertCanAccessInstanceEnvironments(req);
   }
 
   function assertCustomImageCompanyAccess(req: Request, companyId: string) {

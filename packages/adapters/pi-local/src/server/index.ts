@@ -59,5 +59,9 @@ export {
   normalizePiModelId,
   resetPiModelsCacheForTests,
   syncCustomPiModels,
+  savePiProviderToHost,
+  listExistingPiConnections,
 } from "./models.js";
+export type { PiConnection } from "./models.js";
 export { parsePiJsonl, isPiUnknownSessionError } from "./parse.js";
+

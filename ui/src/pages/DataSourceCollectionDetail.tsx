@@ -38,6 +38,7 @@ import {
 } from "lucide-react";
 import { useCompany } from "@/context/CompanyContext";
 import { useUserRbac } from "@/hooks/useUserRbac";
+import { copyTextToClipboard } from "@/lib/clipboard";
 import { dataSourcesApi } from "@/api/data-sources";
 import type {
   DataSourceCollection,
@@ -163,7 +164,7 @@ export function DataSourceCollectionDetail() {
   };
 
   const copyToClipboard = (text: string, index: number) => {
-    navigator.clipboard.writeText(text);
+    void copyTextToClipboard(text);
     setCopiedViewIndex(index);
     setTimeout(() => setCopiedViewIndex(null), 2000);
   };

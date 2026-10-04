@@ -56,7 +56,6 @@ type ConnectPhase =
 import { secretsApi } from "../api/secrets";
 import { Label } from "./ui/label";
 import { Input } from "./ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { useLocation, useNavigate, useParams } from "@/lib/router";
 import { useDialog } from "../context/DialogContext";
 import { useCompany } from "../context/CompanyContext";
@@ -64,7 +63,7 @@ import { ApiError } from "../api/client";
 import { companiesApi } from "../api/companies";
 import { useCompanyListQuery } from "../api/companies-query";
 import { goalsApi } from "../api/goals";
-import { agentsApi } from "../api/agents";
+import { agentsApi, type PiConnection } from "../api/agents";
 import { approvalsApi } from "../api/approvals";
 import { issuesApi } from "../api/issues";
 import { projectsApi } from "../api/projects";
@@ -131,6 +130,7 @@ import { ModelSourceTiles, type CredentialMode } from "./onboarding/ModelSourceT
 import { CredentialModeLink } from "./onboarding/CredentialModeLink";
 import { FooterNav, type FooterPrimaryIcon } from "./onboarding/FooterNav";
 import { OnboardingHeading } from "./onboarding/OnboardingPrimitives";
+import { SearchableModelSelect } from "./onboarding/SearchableModelSelect";
 import { DEFAULT_AGENT_ROLE } from "../lib/onboarding-agent-role";
 import { capsuleHeroMotion, capsuleRoomEnter, capsuleRoomExit, heroRoomArrival, heroRoomMotion, ledeMotion, stepContentMotion, titleSwapMotion } from "./onboarding/onboarding-motion";
 import { Badge } from "@/components/ui/badge";
@@ -141,6 +141,7 @@ import {
   Loader2,
   ChevronDown,
   RefreshCw,
+  Plus,
 } from "lucide-react";
 
 type Step = 0 | 1 | 2 | 3 | 4 | 5;
@@ -711,6 +712,23 @@ function OnboardingWizardInner({
   const [piSyncing, setPiSyncing] = useState(false);
   const [piSyncError, setPiSyncError] = useState<string | null>(null);
   const [piSyncSuccess, setPiSyncSuccess] = useState<string | null>(null);
+  const [piConnections, setPiConnections] = useState<PiConnection[]>([]);
+  const [piConnectionsLoading, setPiConnectionsLoading] = useState(false);
+  const [piConnectionMode, setPiConnectionMode] = useState<"existing" | "new">("existing");
+  const [selectedPiConnectionId, setSelectedPiConnectionId] = useState<string>("");
+
+  const activePiConnection = useMemo(() => {
+    return (
+      piConnections.find((c) => c.id === selectedPiConnectionId) ??
+      piConnections[0] ??
+      null
+    );
+  }, [piConnections, selectedPiConnectionId]);
+
+  const availableExistingPiModels = useMemo(() => {
+    return activePiConnection?.models ?? [];
+  }, [activePiConnection]);
+
 
   // Created entity IDs — pre-populate from existing company when skipping step 1
   const [createdCompanyId, setCreatedCompanyId] = useState<string | null>(
@@ -943,6 +961,54 @@ function OnboardingWizardInner({
     createdCompanyId, createdCompanyPrefix, createdAgentId,
     createdCompanyGoalId, createdProjectId, createdIssueRef,
   ]);
+
+  // Fetch existing Pi connections when reaching step 4 with pi_local
+  useEffect(() => {
+    if (!effectiveOnboardingOpen || step !== 4 || adapterType !== "pi_local") return;
+    const compId = createdCompanyId ?? companies[0]?.id;
+    if (!compId) return;
+    let cancelled = false;
+    setPiConnectionsLoading(true);
+    agentsApi
+      .getPiConnections(compId)
+      .then((res) => {
+        if (cancelled) return;
+        const conns = res.connections ?? [];
+        setPiConnections(conns);
+        if (conns.length > 0) {
+          setPiConnectionMode("existing");
+          let targetConnId = conns[0].id;
+          setSelectedPiConnectionId((prev) => {
+            const exists = conns.find((c) => c.id === prev);
+            if (exists) {
+              targetConnId = exists.id;
+              return prev;
+            }
+            return conns[0].id;
+          });
+          const targetConn = conns.find((c) => c.id === targetConnId) ?? conns[0];
+          if (targetConn && targetConn.models.length > 0) {
+            setModel((prevModel) => {
+              if (prevModel && targetConn.models.some((m) => m.id === prevModel)) return prevModel;
+              return targetConn.models[0].id;
+            });
+          }
+        } else {
+          setPiConnectionMode("new");
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setPiConnections([]);
+        setPiConnectionMode("new");
+      })
+      .finally(() => {
+        if (!cancelled) setPiConnectionsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [effectiveOnboardingOpen, step, adapterType, createdCompanyId, companies]);
 
   const {
     data: adapterModels,
@@ -1412,7 +1478,7 @@ function OnboardingWizardInner({
                 disabled:
                   !connectStepReady ||
                   (adapterType === "pi_local"
-                    ? !piEndpoint.trim() || !model.trim()
+                    ? (piConnectionMode === "existing" ? !model.trim() : (!piEndpoint.trim() || !model.trim()))
                     : credentialMode === "api" && !apiKey.trim() && !selectedApiKey),
               }
           : // Nothing is chosen on arrival, and the row is what chooses. Until
@@ -1569,7 +1635,7 @@ function OnboardingWizardInner({
     setAdapterEnvResult(null);
     adapterEnvResultAppliedStoredLoginRef.current = false;
     setAdapterEnvError(null);
-  }, [step, adapterType, model, command, args, url, credentialMode, apiKey, piEndpoint, piModels, selectedSavedKey, selectedApiKey?.id, savedSubscription?.id]);
+  }, [step, adapterType, model, command, args, url, credentialMode, apiKey, piEndpoint, piModels, piConnectionMode, selectedPiConnectionId, selectedSavedKey, selectedApiKey?.id, savedSubscription?.id]);
 
   /**
    * Leaving the step puts the row back to a question.
@@ -1915,38 +1981,63 @@ function OnboardingWizardInner({
       config.env = env;
     }
     if (adapterType === "pi_local") {
-      const trimmedEndpoint = piEndpoint.trim();
       const rawModel = model.trim();
-      const cleanModelId = rawModel.includes("/") ? rawModel.split("/").slice(1).join("/") : rawModel;
-      const effectiveModel = rawModel ? (rawModel.includes("/") ? rawModel : `custom/${rawModel}`) : "";
-      if (effectiveModel) {
+      if (piConnectionMode === "existing") {
+        const activeConn =
+          piConnections.find((c) => c.id === selectedPiConnectionId) ?? piConnections[0];
+        let effectiveModel = rawModel;
+        if (activeConn && !rawModel.includes("/")) {
+          effectiveModel = `${activeConn.id}/${rawModel}`;
+        }
         config.model = effectiveModel;
-      }
-
-      if (trimmedEndpoint) {
         const env =
           typeof config.env === "object" && config.env !== null && !Array.isArray(config.env)
             ? { ...(config.env as Record<string, unknown>) }
             : {};
-
-        const modelEntries = piModels.map((m) => {
-          const id = m.id.includes("/") ? m.id.split("/").slice(1).join("/") : m.id;
-          return { id, name: m.label || id };
-        });
-        if (cleanModelId && !modelEntries.some((m) => m.id === cleanModelId)) {
-          modelEntries.unshift({ id: cleanModelId, name: cleanModelId });
+        if (activeConn?.baseUrl) {
+          env.PI_API_BASE_URL = activeConn.baseUrl;
+        }
+        env.PAPERCLIP_PI_MERGE_HOST_PROVIDERS = "true";
+        config.env = env;
+      } else {
+        const trimmedEndpoint = piEndpoint.trim();
+        const cleanModelId = rawModel.startsWith("custom/")
+          ? rawModel.slice("custom/".length)
+          : rawModel;
+        const effectiveModel = cleanModelId ? `custom/${cleanModelId}` : "";
+        if (effectiveModel) {
+          config.model = effectiveModel;
         }
 
-        const customProvider = {
-          baseUrl: trimmedEndpoint,
-          apiKey: apiKey.trim() ? "{env:PI_API_KEY}" : "",
-          api: "openai",
-          models: modelEntries.length > 0 ? modelEntries : [{ id: cleanModelId || "default", name: cleanModelId || "default" }],
-        };
+        if (trimmedEndpoint) {
+          const env =
+            typeof config.env === "object" && config.env !== null && !Array.isArray(config.env)
+              ? { ...(config.env as Record<string, unknown>) }
+              : {};
 
-        env.PAPERCLIP_PI_PROVIDERS = JSON.stringify({ custom: customProvider });
-        env.PI_API_BASE_URL = trimmedEndpoint;
-        config.env = env;
+          const modelEntries = piModels.map((m) => {
+            const id = m.id.startsWith("custom/") ? m.id.slice("custom/".length) : m.id;
+            return { id, name: m.label || id };
+          });
+          if (cleanModelId && !modelEntries.some((m) => m.id === cleanModelId)) {
+            modelEntries.unshift({ id: cleanModelId, name: cleanModelId });
+          }
+
+          const customProvider = {
+            baseUrl: trimmedEndpoint,
+            apiKey: apiKey.trim() ? "{env:PI_API_KEY}" : "",
+            api: "openai-completions",
+            models:
+              modelEntries.length > 0
+                ? modelEntries
+                : [{ id: cleanModelId || "default", name: cleanModelId || "default" }],
+          };
+
+          env.PAPERCLIP_PI_PROVIDERS = JSON.stringify({ custom: customProvider });
+          env.PI_API_BASE_URL = trimmedEndpoint;
+          env.PAPERCLIP_PI_MERGE_HOST_PROVIDERS = "true";
+          config.env = env;
+        }
       }
     }
     // A key typed on this step is the credential the agent is being hired with,
@@ -2051,6 +2142,7 @@ function OnboardingWizardInner({
         {
           adapterConfig: adapterConfigOverride ?? buildAdapterConfig(),
           ...(managedBindingForStep() ? { aiConnection: managedBindingForStep() } : {}),
+          ...(apiKey.trim() ? { testCredentials: { [apiKeyEnvKeyFor(adapterType)]: apiKey.trim() } } : {}),
           environmentId,
         }
       );
@@ -2170,12 +2262,18 @@ function OnboardingWizardInner({
         }
       }
       if (adapterType === "pi_local") {
-        if (!piEndpoint.trim()) {
-          setError("Custom API endpoint is required for Pi.");
-          return;
+        if (piConnectionMode === "new") {
+          if (!piEndpoint.trim()) {
+            setError("Custom API endpoint is required for Pi.");
+            return;
+          }
         }
         if (!model.trim()) {
-          setError("Default model is required for Pi.");
+          setError(
+            piConnectionMode === "existing"
+              ? "Silakan pilih model untuk koneksi Pi."
+              : "Default model is required for Pi."
+          );
           return;
         }
       }
@@ -2801,7 +2899,13 @@ function OnboardingWizardInner({
                         setSourcePicked(true);
                         setAdapterType(id);
                         if (id === "opencode_local") setModel(DEFAULT_OPENCODE_LOCAL_MODEL);
-                        else if (id === "pi_local") setCredentialMode("api");
+                        else if (id === "pi_local") {
+                          setCredentialMode("api");
+                          const active = piConnections.find((c) => c.id === selectedPiConnectionId) ?? piConnections[0];
+                          if (active && active.models.length > 0) {
+                            setModel(active.models[0].id);
+                          }
+                        }
                         else if (id !== "codex_local") setModel("");
                         setConnectPhase("collapsing");
                       }}
@@ -2882,129 +2986,285 @@ function OnboardingWizardInner({
                       </p>
                     ) : adapterType === "pi_local" ? (
                       <OnboardingLoginCard
-                        instruction="Configure custom API endpoint and model for Pi"
+                        instruction={
+                          piConnections.length > 0
+                            ? piConnectionMode === "existing"
+                              ? "Pilih koneksi dan model yang tersedia untuk Pi"
+                              : "Konfigurasi custom API endpoint dan model baru untuk Pi"
+                            : "Configure custom API endpoint and model for Pi"
+                        }
                       >
                         <div className="space-y-4">
-                          <div className="space-y-1.5">
-                            <Label htmlFor="pi-endpoint" className="text-xs text-muted-foreground">
-                              Custom API Endpoint
-                            </Label>
-                            <Input
-                              id="pi-endpoint"
-                              className="h-9 rounded-lg bg-background text-xs"
-                              placeholder="e.g. http://localhost:11434/v1 or https://api.openai.com/v1"
-                              value={piEndpoint}
-                              onChange={(e) => {
-                                setPiEndpoint(e.target.value);
-                                setPiSyncError(null);
-                                setPiSyncSuccess(null);
-                              }}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter" && piEndpoint.trim()) {
-                                  e.preventDefault();
-                                  void handleSyncPiModels();
-                                }
-                              }}
-                            />
-                          </div>
-
-                          <div className="space-y-1.5">
-                            <Label htmlFor="pi-api-key" className="text-xs text-muted-foreground">
-                              API Token / Key (Optional for local endpoints)
-                            </Label>
-                            <Input
-                              id="pi-api-key"
-                              type="password"
-                              className="h-9 rounded-lg bg-background text-xs"
-                              placeholder="Enter API token / key"
-                              value={apiKey}
-                              onChange={(e) => {
-                                setApiKey(e.target.value);
-                                setPiSyncError(null);
-                                setPiSyncSuccess(null);
-                              }}
-                            />
-                          </div>
-
-                          <div className="flex flex-col gap-2">
-                            <div className="flex items-center gap-2">
-                              <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                className="h-8 gap-1.5 text-xs"
-                                disabled={!piEndpoint.trim() || piSyncing}
-                                onClick={() => void handleSyncPiModels()}
-                              >
-                                <RefreshCw className={cn("size-3.5", piSyncing && "animate-spin")} />
-                                {piSyncing ? "Syncing models…" : "Import / Sync models"}
-                              </Button>
+                          {piConnectionsLoading ? (
+                            <div className="flex items-center gap-2 text-xs text-muted-foreground py-2">
+                              <Loader2 className="size-3.5 animate-spin" />
+                              Memeriksa koneksi Pi yang tersedia…
                             </div>
+                          ) : piConnections.length > 0 ? (
+                            <div className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-muted/30 p-1 text-xs">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setPiConnectionMode("existing");
+                                  const conn =
+                                    piConnections.find((c) => c.id === selectedPiConnectionId) ??
+                                    piConnections[0];
+                                  if (
+                                    conn &&
+                                    conn.models.length > 0 &&
+                                    !conn.models.some((m) => m.id === model)
+                                  ) {
+                                    setModel(conn.models[0].id);
+                                  }
+                                }}
+                                className={cn(
+                                  "flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition-colors",
+                                  piConnectionMode === "existing"
+                                    ? "bg-background text-foreground shadow-xs"
+                                    : "text-muted-foreground hover:text-foreground",
+                                )}
+                              >
+                                <Check
+                                  className={cn(
+                                    "size-3.5",
+                                    piConnectionMode === "existing" ? "opacity-100" : "opacity-0",
+                                  )}
+                                />
+                                Gunakan koneksi yang ada
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setPiConnectionMode("new");
+                                }}
+                                className={cn(
+                                  "flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition-colors",
+                                  piConnectionMode === "new"
+                                    ? "bg-background text-foreground shadow-xs"
+                                    : "text-muted-foreground hover:text-foreground",
+                                )}
+                              >
+                                <Plus
+                                  className={cn(
+                                    "size-3.5",
+                                    piConnectionMode === "new" ? "opacity-100" : "opacity-0",
+                                  )}
+                                />
+                                Buat baru
+                              </button>
+                            </div>
+                          ) : null}
 
-                            {piSyncError && (
-                              <p className="text-xs text-destructive">{piSyncError}</p>
-                            )}
-                            {piSyncSuccess && (
-                              <p className="text-xs text-muted-foreground">{piSyncSuccess}</p>
-                            )}
-                          </div>
-
-                          <div className="space-y-1.5">
-                            <Label htmlFor="pi-default-model" className="text-xs text-muted-foreground">
-                              Default Model
-                            </Label>
-                            {piModels.length > 0 ? (
-                              <div className="space-y-2">
-                                <Select
-                                  value={model}
-                                  onValueChange={(val) => setModel(val)}
+                          {piConnectionMode === "existing" && piConnections.length > 0 ? (
+                            <div className="space-y-4">
+                              <div className="space-y-1.5">
+                                <Label
+                                  htmlFor="pi-connection-select"
+                                  className="text-xs text-muted-foreground"
                                 >
-                                  <SelectTrigger id="pi-default-model-select" className="h-9 bg-background text-xs">
-                                    <SelectValue placeholder="Select imported model" />
-                                  </SelectTrigger>
-                                  <SelectContent>
-                                    {piModels.map((m) => (
-                                      <SelectItem key={m.id} value={m.id}>
-                                        {m.label || m.id}
-                                      </SelectItem>
-                                    ))}
-                                  </SelectContent>
-                                </Select>
+                                  Koneksi Pi
+                                </Label>
+                                <select
+                                  id="pi-connection-select"
+                                  value={selectedPiConnectionId || activePiConnection?.id || ""}
+                                  onChange={(e) => {
+                                    const nextId = e.target.value;
+                                    setSelectedPiConnectionId(nextId);
+                                    const conn = piConnections.find((c) => c.id === nextId);
+                                    if (conn && conn.models.length > 0) {
+                                      if (!conn.models.some((m) => m.id === model)) {
+                                        setModel(conn.models[0].id);
+                                      }
+                                    } else {
+                                      setModel("");
+                                    }
+                                  }}
+                                  className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-xs"
+                                >
+                                  {piConnections.map((conn) => (
+                                    <option key={conn.id} value={conn.id}>
+                                      {conn.name} ({conn.baseUrl || "local"}) — {conn.modelsCount} model(s)
+                                    </option>
+                                  ))}
+                                </select>
+                                {activePiConnection && (
+                                  <div className="flex flex-wrap items-center gap-2 text-(length:--text-micro) text-muted-foreground">
+                                    <span>
+                                      Endpoint: <code className="font-mono">{activePiConnection.baseUrl || "local"}</code>
+                                    </span>
+                                    {activePiConnection.hasApiKey && (
+                                      <Badge variant="outline" className="px-1.5 py-0 text-(length:--text-micro)">
+                                        API Key Terpasang
+                                      </Badge>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+
+                              <div className="space-y-1.5">
+                                <Label htmlFor="pi-existing-model" className="text-xs text-muted-foreground">
+                                  Pilih Model
+                                </Label>
+                                {availableExistingPiModels.length > 0 ? (
+                                  <div className="space-y-2">
+                                    <SearchableModelSelect
+                                      id="pi-existing-model-select"
+                                      value={model}
+                                      options={availableExistingPiModels}
+                                      onValueChange={(val) => setModel(val)}
+                                      placeholder="Pilih model dari koneksi ini..."
+                                      searchPlaceholder="Cari model (contoh: qwen3.8-27b)..."
+                                    />
+                                    <Input
+                                      id="pi-existing-model"
+                                      className="h-8 rounded-lg bg-background text-xs"
+                                      placeholder="Atau ketik model ID..."
+                                      value={model}
+                                      onChange={(e) => setModel(e.target.value)}
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter" && model.trim()) {
+                                          e.preventDefault();
+                                          handleConnectStepPrimary();
+                                        }
+                                      }}
+                                    />
+                                  </div>
+                                ) : (
+                                  <Input
+                                    id="pi-existing-model"
+                                    className="h-9 rounded-lg bg-background text-xs"
+                                    placeholder="e.g. rissets/llm-hd/qwen3.8-27b"
+                                    value={model}
+                                    onChange={(e) => setModel(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter" && model.trim()) {
+                                        e.preventDefault();
+                                        handleConnectStepPrimary();
+                                      }
+                                    }}
+                                  />
+                                )}
+                                <p className="text-(length:--text-micro) text-muted-foreground">
+                                  Pilih model dari daftar koneksi atau masukkan ID model secara manual.
+                                </p>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="space-y-4">
+                              <div className="space-y-1.5">
+                                <Label htmlFor="pi-endpoint" className="text-xs text-muted-foreground">
+                                  Custom API Endpoint
+                                </Label>
                                 <Input
-                                  id="pi-default-model"
-                                  className="h-8 rounded-lg bg-background text-xs"
-                                  placeholder="Or enter custom model ID..."
-                                  value={model}
-                                  onChange={(e) => setModel(e.target.value)}
+                                  id="pi-endpoint"
+                                  className="h-9 rounded-lg bg-background text-xs"
+                                  placeholder="e.g. http://localhost:11434/v1 or https://api.openai.com/v1"
+                                  value={piEndpoint}
+                                  onChange={(e) => {
+                                    setPiEndpoint(e.target.value);
+                                    setPiSyncError(null);
+                                    setPiSyncSuccess(null);
+                                  }}
                                   onKeyDown={(e) => {
-                                    if (e.key === "Enter" && piEndpoint.trim() && model.trim()) {
+                                    if (e.key === "Enter" && piEndpoint.trim()) {
                                       e.preventDefault();
-                                      handleConnectStepPrimary();
+                                      void handleSyncPiModels();
                                     }
                                   }}
                                 />
                               </div>
-                            ) : (
-                              <Input
-                                id="pi-default-model"
-                                className="h-9 rounded-lg bg-background text-xs"
-                                placeholder="e.g. llama3:latest, gpt-4o, or qwen2.5-coder:7b"
-                                value={model}
-                                onChange={(e) => setModel(e.target.value)}
-                                onKeyDown={(e) => {
-                                  if (e.key === "Enter" && piEndpoint.trim() && model.trim()) {
-                                    e.preventDefault();
-                                    handleConnectStepPrimary();
-                                  }
-                                }}
-                              />
-                            )}
-                            <p className="text-(length:--text-micro) text-muted-foreground">
-                              {piModels.length > 0
-                                ? "Select an imported model above or enter custom model ID."
-                                : "Click \"Import / Sync models\" to load models from your endpoint, or enter a model ID manually."}
-                            </p>
-                          </div>
+
+                              <div className="space-y-1.5">
+                                <Label htmlFor="pi-api-key" className="text-xs text-muted-foreground">
+                                  API Token / Key (Optional for local endpoints)
+                                </Label>
+                                <Input
+                                  id="pi-api-key"
+                                  type="password"
+                                  className="h-9 rounded-lg bg-background text-xs"
+                                  placeholder="Enter API token / key"
+                                  value={apiKey}
+                                  onChange={(e) => {
+                                    setApiKey(e.target.value);
+                                    setPiSyncError(null);
+                                    setPiSyncSuccess(null);
+                                  }}
+                                />
+                              </div>
+
+                              <div className="flex flex-col gap-2">
+                                <div className="flex items-center gap-2">
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    className="h-8 gap-1.5 text-xs"
+                                    disabled={!piEndpoint.trim() || piSyncing}
+                                    onClick={() => void handleSyncPiModels()}
+                                  >
+                                    <RefreshCw className={cn("size-3.5", piSyncing && "animate-spin")} />
+                                    {piSyncing ? "Syncing models…" : "Import / Sync models"}
+                                  </Button>
+                                </div>
+
+                                {piSyncError && (
+                                  <p className="text-xs text-destructive">{piSyncError}</p>
+                                )}
+                                {piSyncSuccess && (
+                                  <p className="text-xs text-muted-foreground">{piSyncSuccess}</p>
+                                )}
+                              </div>
+
+                              <div className="space-y-1.5">
+                                <Label htmlFor="pi-default-model" className="text-xs text-muted-foreground">
+                                  Default Model
+                                </Label>
+                                {piModels.length > 0 ? (
+                                  <div className="space-y-2">
+                                    <SearchableModelSelect
+                                      id="pi-default-model-select"
+                                      value={model}
+                                      options={piModels}
+                                      onValueChange={(val) => setModel(val)}
+                                      placeholder="Select imported model"
+                                    />
+                                    <Input
+                                      id="pi-default-model"
+                                      className="h-8 rounded-lg bg-background text-xs"
+                                      placeholder="Or enter custom model ID..."
+                                      value={model}
+                                      onChange={(e) => setModel(e.target.value)}
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter" && piEndpoint.trim() && model.trim()) {
+                                          e.preventDefault();
+                                          handleConnectStepPrimary();
+                                        }
+                                      }}
+                                    />
+                                  </div>
+                                ) : (
+                                  <Input
+                                    id="pi-default-model"
+                                    className="h-9 rounded-lg bg-background text-xs"
+                                    placeholder="e.g. llama3:latest, gpt-4o, or qwen2.5-coder:7b"
+                                    value={model}
+                                    onChange={(e) => setModel(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter" && piEndpoint.trim() && model.trim()) {
+                                        e.preventDefault();
+                                        handleConnectStepPrimary();
+                                      }
+                                    }}
+                                  />
+                                )}
+                                <p className="text-(length:--text-micro) text-muted-foreground">
+                                  {piModels.length > 0
+                                    ? "Select an imported model above or enter custom model ID."
+                                    : "Click \"Import / Sync models\" to load models from your endpoint, or enter a model ID manually."}
+                                </p>
+                              </div>
+                            </div>
+                          )}
                         </div>
                       </OnboardingLoginCard>
                     ) : credentialMode === "api" ? (

@@ -102,7 +102,9 @@ export function CompanySettingsSidebar() {
         className={primarySidebarStyles.nav}
       >
         <div data-slot="contextual-sidebar-group" className={primarySidebarStyles.group}>
-          <SidebarNavItem to="/company/settings" label="General" icon={SlidersHorizontal} end />
+          {showPage("company.settings") && (
+            <SidebarNavItem to="/company/settings" label="General" icon={SlidersHorizontal} end />
+          )}
           {showPage("instance.profile") && (
             <SidebarNavItem
               to={`${INSTANCE_SETTINGS_PATH_PREFIX}/profile`}

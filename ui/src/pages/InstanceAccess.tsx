@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Shield, ShieldCheck } from "lucide-react";
-import { accessApi } from "@/api/access";
+import { accessApi, type HumanCompanyRole } from "@/api/access";
+import { agentsApi } from "@/api/agents";
+import { dataSourcesApi } from "@/api/data-sources";
+import { projectsApi } from "@/api/projects";
 import { ApiError } from "@/api/client";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -10,6 +13,319 @@ import { Card } from "@/components/ui/card";
 import { companyDirectoryQueryOptions, useAccountIdentity } from "@/api/companies-query";
 import { useToast } from "@/context/ToastContext";
 import { queryKeys } from "@/lib/queryKeys";
+
+function CompanyMembershipAccessConfig({
+  companyId,
+  companyName,
+  userId,
+  search,
+}: {
+  companyId: string;
+  companyName: string;
+  userId: string;
+  search: string;
+}) {
+  const queryClient = useQueryClient();
+  const { pushToast } = useToast();
+
+  const accessConfigQuery = useQuery({
+    queryKey: ["user-access-config", companyId, userId],
+    queryFn: () => accessApi.getUserAccessConfig(companyId, userId),
+    enabled: !!companyId && !!userId,
+  });
+
+  const agentsQuery = useQuery({
+    queryKey: ["agents", companyId],
+    queryFn: () => agentsApi.list(companyId),
+    enabled: !!companyId,
+  });
+
+  const dataSourcesQuery = useQuery({
+    queryKey: ["data-sources", companyId],
+    queryFn: () => dataSourcesApi.list(companyId),
+    enabled: !!companyId,
+  });
+
+  const projectsQuery = useQuery({
+    queryKey: ["projects", companyId],
+    queryFn: () => projectsApi.list(companyId),
+    enabled: !!companyId,
+  });
+
+  const [role, setRole] = useState<HumanCompanyRole>("operator");
+  const [assignedAgentIds, setAssignedAgentIds] = useState<string[]>([]);
+  const [allowedDataSourceIds, setAllowedDataSourceIds] = useState<string[]>([]);
+  const [assignedProjectIds, setAssignedProjectIds] = useState<string[]>([]);
+  const [isExpanded, setIsExpanded] = useState(true);
+
+  useEffect(() => {
+    if (!accessConfigQuery.data) return;
+    setRole(accessConfigQuery.data.role);
+    setAssignedAgentIds(accessConfigQuery.data.assignedAgentIds ?? []);
+    setAllowedDataSourceIds(accessConfigQuery.data.allowedDataSourceIds ?? []);
+    setAssignedProjectIds(accessConfigQuery.data.assignedProjectIds ?? []);
+  }, [accessConfigQuery.data]);
+
+  const saveMutation = useMutation({
+    mutationFn: () =>
+      accessApi.updateUserAccessConfig(companyId, userId, {
+        role,
+        assignedAgentIds,
+        allowedDataSourceIds,
+        assignedProjectIds,
+      }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["user-access-config", companyId, userId] });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.access.userCompanyAccess(userId) });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.access.adminUsers(search) });
+      pushToast({ title: `Access configuration saved for ${companyName}`, tone: "success" });
+    },
+    onError: (err) => {
+      pushToast({
+        title: "Failed to update access",
+        body: err instanceof Error ? err.message : "Unknown error",
+        tone: "error",
+      });
+    },
+  });
+
+  const agents = agentsQuery.data ?? [];
+  const dataSources = dataSourcesQuery.data ?? [];
+  const projects = projectsQuery.data ?? [];
+
+  return (
+    <div className="space-y-4 rounded-xl border border-border bg-card p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3 className="text-base font-semibold">{companyName}</h3>
+          <p className="text-xs text-muted-foreground">Configure role and fine-grained resource permissions</p>
+        </div>
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-2 text-sm font-medium">
+            <span>Role:</span>
+            <select
+              value={role}
+              onChange={(e) => setRole(e.target.value as HumanCompanyRole)}
+              className="rounded-md border border-border bg-background px-3 py-1.5 text-sm font-medium focus:ring-ring"
+            >
+              <option value="owner">Owner</option>
+              <option value="admin">Admin</option>
+              <option value="operator">Operator</option>
+              <option value="viewer">Viewer</option>
+            </select>
+          </label>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => setIsExpanded(!isExpanded)}
+          >
+            {isExpanded ? "Collapse" : "Expand"}
+          </Button>
+        </div>
+      </div>
+
+      {isExpanded && (
+        <>
+          {role === "owner" || role === "admin" ? (
+            <div className="rounded-lg bg-muted/40 p-3 text-xs text-muted-foreground">
+              {role === "owner" ? "Owners" : "Admins"} have full administrative access to all agents, data sources, projects, and settings across {companyName}.
+            </div>
+          ) : role === "viewer" ? (
+            <div className="rounded-lg bg-muted/40 p-3 text-xs text-muted-foreground">
+              Viewers have read-only visibility for this organization.
+            </div>
+          ) : (
+            <div className="space-y-4 border-t border-border pt-3">
+              {accessConfigQuery.data && (
+                <div className="flex items-center justify-between rounded-lg bg-muted/30 px-3 py-2 text-xs">
+                  <span className="font-medium">Operator Agent Limit:</span>
+                  <span className="text-muted-foreground">
+                    {accessConfigQuery.data.operatorCreatedAgentCount} / {accessConfigQuery.data.operatorMaxAgents} agents created by this operator (Max 3)
+                  </span>
+                </div>
+              )}
+
+              {/* Assigned Agents */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-medium">
+                    Assigned Agents ({assignedAgentIds.length}/{agents.length})
+                  </span>
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={() => setAssignedAgentIds(agents.map((a) => a.id))}
+                    >
+                      Select all
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={() => setAssignedAgentIds([])}
+                    >
+                      Clear
+                    </Button>
+                  </div>
+                </div>
+                <div className="max-h-40 space-y-1 overflow-y-auto rounded-md border border-border p-2">
+                  {agents.length === 0 ? (
+                    <div className="p-2 text-xs text-muted-foreground">No agents in this organization.</div>
+                  ) : (
+                    agents.map((agent) => (
+                      <label
+                        key={agent.id}
+                        className="flex cursor-pointer items-center gap-2 rounded p-1.5 text-xs hover:bg-muted/50"
+                      >
+                        <Checkbox
+                          checked={assignedAgentIds.includes(agent.id)}
+                          onCheckedChange={(checked) => {
+                            if (checked) {
+                              setAssignedAgentIds((prev) => [...prev, agent.id]);
+                            } else {
+                              setAssignedAgentIds((prev) => prev.filter((id) => id !== agent.id));
+                            }
+                          }}
+                        />
+                        <span className="font-medium text-foreground">{agent.name}</span>
+                        <span className="text-muted-foreground">({agent.role})</span>
+                      </label>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              {/* Allowed Data Sources */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-medium">
+                    Allowed Data Sources ({allowedDataSourceIds.length}/{dataSources.length})
+                  </span>
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={() => setAllowedDataSourceIds(dataSources.map((ds) => ds.id))}
+                    >
+                      Select all
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={() => setAllowedDataSourceIds([])}
+                    >
+                      Clear
+                    </Button>
+                  </div>
+                </div>
+                <div className="max-h-40 space-y-1 overflow-y-auto rounded-md border border-border p-2">
+                  {dataSources.length === 0 ? (
+                    <div className="p-2 text-xs text-muted-foreground">No data sources in this organization.</div>
+                  ) : (
+                    dataSources.map((ds) => (
+                      <label
+                        key={ds.id}
+                        className="flex cursor-pointer items-center gap-2 rounded p-1.5 text-xs hover:bg-muted/50"
+                      >
+                        <Checkbox
+                          checked={allowedDataSourceIds.includes(ds.id)}
+                          onCheckedChange={(checked) => {
+                            if (checked) {
+                              setAllowedDataSourceIds((prev) => [...prev, ds.id]);
+                            } else {
+                              setAllowedDataSourceIds((prev) => prev.filter((id) => id !== ds.id));
+                            }
+                          }}
+                        />
+                        <span className="font-medium text-foreground">{ds.name}</span>
+                        <span className="text-muted-foreground">({ds.sourceType})</span>
+                      </label>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              {/* Assigned Projects */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-medium">
+                    Assigned Projects ({assignedProjectIds.length}/{projects.length})
+                  </span>
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={() => setAssignedProjectIds(projects.map((p) => p.id))}
+                    >
+                      Select all
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={() => setAssignedProjectIds([])}
+                    >
+                      Clear
+                    </Button>
+                  </div>
+                </div>
+                <div className="max-h-40 space-y-1 overflow-y-auto rounded-md border border-border p-2">
+                  {projects.length === 0 ? (
+                    <div className="p-2 text-xs text-muted-foreground">No projects in this organization.</div>
+                  ) : (
+                    projects.map((proj) => (
+                      <label
+                        key={proj.id}
+                        className="flex cursor-pointer items-center gap-2 rounded p-1.5 text-xs hover:bg-muted/50"
+                      >
+                        <Checkbox
+                          checked={assignedProjectIds.includes(proj.id)}
+                          onCheckedChange={(checked) => {
+                            if (checked) {
+                              setAssignedProjectIds((prev) => [...prev, proj.id]);
+                            } else {
+                              setAssignedProjectIds((prev) => prev.filter((id) => id !== proj.id));
+                            }
+                          }}
+                        />
+                        <span className="font-medium text-foreground">{proj.name}</span>
+                        {proj.description && (
+                          <span className="truncate text-muted-foreground">({proj.description})</span>
+                        )}
+                      </label>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="flex justify-end border-t border-border pt-3">
+            <Button
+              size="sm"
+              onClick={() => saveMutation.mutate()}
+              disabled={saveMutation.isPending}
+            >
+              {saveMutation.isPending ? "Saving..." : "Save Access Configuration"}
+            </Button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 
 export function InstanceAccess() {
   const { userId: accountUserId, settled: accountSettled } = useAccountIdentity();
@@ -237,24 +553,22 @@ export function InstanceAccess() {
                 </div>
               </div>
 
-              <div className="space-y-2">
-                <h2 className="text-sm font-semibold">Current memberships</h2>
-                <div className="space-y-2">
+              <div className="space-y-4">
+                <div>
+                  <h2 className="text-sm font-semibold">Organization Permissions & Resource Access</h2>
+                  <p className="text-sm text-muted-foreground">
+                    Configure role and fine-grained agent, data source, and project access for each organization membership.
+                  </p>
+                </div>
+                <div className="space-y-4">
                   {(userAccessQuery.data?.companyAccess ?? []).map((membership) => (
-                    <div
+                    <CompanyMembershipAccessConfig
                       key={membership.id}
-                      className="flex items-center justify-between rounded-lg border border-border px-3 py-2 text-sm"
-                    >
-                      <div>
-                        <div className="font-medium">{membership.companyName || membership.companyId}</div>
-                        <div className="text-muted-foreground">
-                          {membership.membershipRole || "unset"} • {membership.status}
-                        </div>
-                      </div>
-                      <div className="text-xs text-muted-foreground">
-                        {new Date(membership.updatedAt).toLocaleDateString()}
-                      </div>
-                    </div>
+                      companyId={membership.companyId}
+                      companyName={membership.companyName || membership.companyId}
+                      userId={selectedUserId}
+                      search={search}
+                    />
                   ))}
                 </div>
               </div>

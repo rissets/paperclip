@@ -74,6 +74,13 @@ export function dataSourceRoutes(db: Db) {
         const allowed = new Set(access.effectiveDataSourceIds || access.dataSourceIds || []);
         list = list.filter((ds: any) => allowed.has(ds.id));
       }
+    } else if (req.actor.type === "board" && req.actor.userId && !req.actor.isInstanceAdmin) {
+      const isOwnerOrAdmin = await rbac.isOwnerOrAdmin(companyId, req.actor.userId);
+      if (!isOwnerOrAdmin) {
+        const allowedIds = await rbac.getAllowedDataSourcesForUser(companyId, req.actor.userId);
+        const allowed = new Set(allowedIds);
+        list = list.filter((ds: any) => allowed.has(ds.id));
+      }
     }
     res.json(list);
   });
@@ -261,6 +268,14 @@ export function dataSourceRoutes(db: Db) {
       const allowedIds = access.effectiveDataSourceIds || access.dataSourceIds || [];
       if (access.mode === "selected" && !allowedIds.includes(id)) {
         throw forbidden(`Akses ditolak: Data source '${id}' tidak ditugaskan ke agen ini`);
+      }
+    } else if (req.actor.type === "board" && req.actor.userId && !req.actor.isInstanceAdmin) {
+      const isOwnerOrAdmin = await rbac.isOwnerOrAdmin(companyId, req.actor.userId);
+      if (!isOwnerOrAdmin) {
+        const canAccess = await rbac.canUserAccessDataSource(companyId, req.actor.userId, id);
+        if (!canAccess) {
+          throw forbidden("Akses ditolak: Anda tidak memiliki izin akses ke data source ini");
+        }
       }
     }
 

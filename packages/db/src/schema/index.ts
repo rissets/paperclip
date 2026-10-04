@@ -226,4 +226,6 @@ export { agentInstructionRevisions, agentInstructionHeads, agentInstructionWorki
 export { browserUseSettings, browserUseSessions, browserUseRuns, browserUseBrowsers } from "./browser_use.js";
 export * from "./company_skill_sources.js";
 export { userAgentAssignments } from "./user_agent_assignments.js";
+export { userDataSourceAssignments } from "./user_data_source_assignments.js";
+export { userProjectAssignments } from "./user_project_assignments.js";
 export { userInvitations } from "./user_invitations.js";

@@ -7,6 +7,7 @@ import {
   recoveryObservabilityService,
 } from "../services/recovery-observability.js";
 import { assertCompanyAccess } from "./authz.js";
+import { userRbacService } from "../services/user-rbac-service.js";
 
 function parsePositiveNumber(
   value: unknown,
@@ -23,11 +24,19 @@ export function dashboardRoutes(db: Db) {
   const router = Router();
   const svc = dashboardService(db);
   const recoveryObservability = recoveryObservabilityService(db);
+  const rbac = userRbacService(db);
 
   router.get("/companies/:companyId/dashboard", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
-    const summary = await svc.summary(companyId);
+    let allowedAgentIds: string[] | null = null;
+    if (req.actor.type === "board" && !(req.actor.source === "local_implicit" || req.actor.isInstanceAdmin)) {
+      const isOwnerOrAdmin = await rbac.isOwnerOrAdmin(companyId, req.actor.userId ?? "");
+      if (!isOwnerOrAdmin) {
+        allowedAgentIds = await rbac.getAssignedAgentIds(companyId, req.actor.userId ?? "");
+      }
+    }
+    const summary = await svc.summary(companyId, allowedAgentIds);
     res.json(summary);
   });
 

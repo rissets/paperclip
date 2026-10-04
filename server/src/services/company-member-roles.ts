@@ -55,7 +55,10 @@ export function grantsForHumanRole(
         { permissionKey: "tools:admin", scope: null },
       ];
     case "operator":
-      return [{ permissionKey: "tasks:assign", scope: null }];
+      return [
+        { permissionKey: "tasks:assign", scope: null },
+        { permissionKey: "agents:create", scope: null },
+      ];
     case "viewer":
       return [];
   }

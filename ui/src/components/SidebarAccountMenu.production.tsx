@@ -1,10 +1,10 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
-  BookOpen,
   Flag,
   LogOut,
   type LucideIcon,
+  Settings,
   UserPlus,
 } from "lucide-react";
 import { hidesCompanyPage, type DeploymentMode } from "@paperclipai/shared";
@@ -16,6 +16,7 @@ import { useCloudInviteUrl } from "@/hooks/useCloudInviteUrl";
 import { useCanInviteCompanyMembers } from "@/hooks/useCompanyInviteAccess";
 import { useHiddenSettings } from "@/hooks/useHiddenSettings";
 import { useSignOut } from "@/hooks/useSignOut";
+import { useUserRbac } from "@/hooks/useUserRbac";
 import { useStagingCommit } from "@/hooks/useStagingCommit";
 import { userProfilePath } from "@/lib/userProfileLinks";
 import { useSidebar } from "../context/SidebarContext";
@@ -27,7 +28,6 @@ import { ThemeToggle } from "./ThemeToggle";
 import { SidebarServerInfo } from "./SidebarServerInfo";
 
 const INVITES_PATH = "/company/settings/members?tab=invites";
-const DOCS_URL = "https://docs.paperclip.ing/";
 const FEEDBACK_URL = "https://paperclip.ing/feedback";
 
 interface SidebarAccountMenuProps {
@@ -126,6 +126,7 @@ export function SidebarAccountMenu({
   // shortcut when the hosting operator hides either surface, and until the
   // health response resolves so a hidden surface never flashes.
   const { hidden: hiddenSettings, loaded: hiddenSettingsLoaded } = useHiddenSettings();
+  const { canManageSettings } = useUserRbac();
   // On Cloud the shortcut exists only for the current stack's owner/admin and
   // only once the stack metadata is known; the in-app Invites tab is never a
   // fallback there because it drives a different invitation flow.
@@ -230,6 +231,23 @@ export function SidebarAccountMenu({
             </div>
 
             <div className="mt-4 space-y-1">
+              {canManageSettings ? (
+                <MenuAction
+                  label="Settings"
+                  description="Manage company and instance settings."
+                  icon={Settings}
+                  href="/company/settings"
+                  onClick={closeNavigationChrome}
+                />
+              ) : (
+                <MenuAction
+                  label="Profile"
+                  description="Open your account settings."
+                  icon={Settings}
+                  href="/company/settings/instance/profile"
+                  onClick={closeNavigationChrome}
+                />
+              )}
               {showInvite && inviteHref ? (
                 <MenuAction
                   label="Invite"
@@ -240,16 +258,8 @@ export function SidebarAccountMenu({
                   onClick={closeNavigationChrome}
                 />
               ) : null}
-              <MenuAction
-                label="Documentation"
-                description="Open Paperclip docs in a new tab."
-                icon={BookOpen}
-                href={DOCS_URL}
-                external
-                onClick={() => setOpen(false)}
-              />
               <ThemeToggle variant="menu-action" onAfterToggle={() => setOpen(false)} />
-              {deploymentMode === "authenticated" || Boolean(session?.user?.id) ? (
+              {deploymentMode === "authenticated" ? (
                 <button
                   type="button"
                   className={cn(

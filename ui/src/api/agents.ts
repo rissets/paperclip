@@ -52,6 +52,15 @@ export interface AdapterModel {
   label: string;
 }
 
+export interface PiConnection {
+  id: string;
+  name: string;
+  baseUrl: string;
+  hasApiKey: boolean;
+  modelsCount: number;
+  models: AdapterModel[];
+}
+
 export interface DetectedAdapterModel {
   model: string;
   provider: string;
@@ -259,6 +268,10 @@ export const agentsApi = {
     api.post<{ models: AdapterModel[] }>(
       `/companies/${encodeURIComponent(companyId)}/adapters/pi_local/sync-models`,
       payload,
+    ),
+  getPiConnections: (companyId: string) =>
+    api.get<{ connections: PiConnection[] }>(
+      `/companies/${encodeURIComponent(companyId)}/adapters/pi_local/connections`,
     ),
   testEnvironment: (
     companyId: string,

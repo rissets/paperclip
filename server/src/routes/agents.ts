@@ -4,7 +4,7 @@ import { agentFileStore, agentFileTokenFromHash } from "../services/agent-file-s
 import { pipeline } from "node:stream/promises";
 import { resolveAgentAppearance, agentAvatarUrl } from "@paperclipai/shared";
 import { listOpenRouterModels } from "../services/openrouter-models.js";
-import { syncCustomPiModels } from "@paperclipai/adapter-pi-local/server";
+import { syncCustomPiModels, listExistingPiConnections } from "@paperclipai/adapter-pi-local/server";
 import { prepareManagedAiRuntime, assertManagedAiProjectAuth, stripAiAuthBindings } from "../services/ai-connection-runtime.js";
 import { ADAPTER_AUTH_MISSING_CHECK_CODE, AI_CONNECTION_CAPABILITIES, aiConnectionBindingSchema, type AiConnectionBinding } from "@paperclipai/shared";
 import { toolConnections } from "@paperclipai/db";
@@ -1761,7 +1761,7 @@ export function agentRoutes(
         req.actor.isInstanceAdmin,
       );
       if (!canCreate) {
-        throw forbidden("Akses ditolak: Hanya Owner atau Admin yang dapat menambahkan agent");
+        throw forbidden("Akses ditolak: Hanya Owner atau Admin yang dapat menambahkan agent, atau batas maksimal 3 agent untuk operator telah tercapai");
       }
     }
     const decision = await access.decide({
@@ -3324,6 +3324,18 @@ export function agentRoutes(
     }
   });
 
+  router.get("/companies/:companyId/adapters/pi_local/connections", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    try {
+      const connections = await listExistingPiConnections();
+      res.json({ connections });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: message });
+    }
+  });
+
   // The environment drivers the adapter Test route accepts. A local, SSH, or
   // sandbox environment can host a probe; a plugin environment cannot.
   const ADAPTER_TEST_ALLOWED_ENVIRONMENT_DRIVERS = ["local", "ssh", "sandbox"];
@@ -4681,6 +4693,7 @@ export function agentRoutes(
         {
           id: hiredAgentId,
           ...normalizedHireInput,
+          createdByUserId: req.actor.userId || null,
           status,
           spentMonthlyCents: 0,
           lastHeartbeatAt: null,
@@ -4706,6 +4719,17 @@ export function agentRoutes(
           },
         },
       );
+      if (req.actor.type === "board" && req.actor.userId) {
+        const currentAssigned = await rbac.getAssignedAgentsForUser(companyId, req.actor.userId);
+        if (!currentAssigned.includes(createdAgent.id)) {
+          await rbac.assignAgentsToUser(
+            companyId,
+            req.actor.userId,
+            [...currentAssigned, createdAgent.id],
+            req.actor.userId,
+          );
+        }
+      }
       const onboardingFirstAgentBundle = await resolveOnboardingFirstAgentBundle({
         onboardingFirstAgent: hireOnboardingFirstAgent,
         actorType: req.actor.type,
@@ -4930,6 +4954,7 @@ export function agentRoutes(
       {
         id: agentId,
         ...createInput,
+        createdByUserId: req.actor.userId || null,
         adapterConfig: normalizedAdapterConfig,
         runtimeConfig: normalizedRuntimeConfig,
         status: "idle",
@@ -4948,6 +4973,17 @@ export function agentRoutes(
         },
       },
     );
+    if (req.actor.type === "board" && req.actor.userId) {
+      const currentAssigned = await rbac.getAssignedAgentsForUser(companyId, req.actor.userId);
+      if (!currentAssigned.includes(createdAgent.id)) {
+        await rbac.assignAgentsToUser(
+          companyId,
+          req.actor.userId,
+          [...currentAssigned, createdAgent.id],
+          req.actor.userId,
+        );
+      }
+    }
     const onboardingFirstAgentBundle = await resolveOnboardingFirstAgentBundle({
       onboardingFirstAgent: createOnboardingFirstAgent,
       actorType: req.actor.type,
@@ -7055,6 +7091,14 @@ export function agentRoutes(
         .limit(targetRunCount - liveRuns.length);
 
       rows = [...liveRuns, ...recentRuns];
+    }
+
+    const rbac = userRbacService(db);
+    const userId = req.actor.userId;
+    const isOwnerOrAdmin = req.actor.source === "local_implicit" || req.actor.isInstanceAdmin || (userId ? await rbac.isOwnerOrAdmin(companyId, userId) : false);
+    if (!isOwnerOrAdmin && userId) {
+      const assignedAgentIds = await rbac.getAssignedAgentsForUser(companyId, userId);
+      rows = rows.filter((r) => assignedAgentIds.includes(r.agentId));
     }
 
     const projections = await executionProjectionsForRuns(db, companyId, rows.map(run => run.id));

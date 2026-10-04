@@ -398,7 +398,7 @@ describe("SidebarAccountMenu", () => {
 
     expect(document.body.textContent).toContain("Settings");
     expect(document.body.textContent).not.toContain("Instance settings");
-    expect(document.body.textContent).toContain("Documentation");
+    expect(document.body.textContent).not.toContain("Documentation");
 
     const popover = document.body.querySelector('[data-slot="popover-content"]');
     expect(popover?.textContent).not.toContain("Feedback");
@@ -431,13 +431,8 @@ describe("SidebarAccountMenu", () => {
     expect(inviteLink?.hasAttribute("target")).toBe(false);
     const menuOrder = popover?.textContent ?? "";
     expect(menuOrder.indexOf("Settings")).toBeLessThan(menuOrder.indexOf("Invite"));
-    expect(menuOrder.indexOf("Invite")).toBeLessThan(menuOrder.indexOf("Documentation"));
-
-    // Documentation still appears before the theme toggle.
-    const menuText = popover?.textContent ?? "";
-    const docsPos = menuText.indexOf("Documentation");
-    const themePos = menuText.indexOf("Switch to");
-    expect(docsPos).toBeLessThan(themePos);
+    expect(menuOrder.indexOf("Invite")).toBeLessThan(menuOrder.indexOf("Switch to"));
+    expect(popover?.textContent).not.toContain("Documentation");
 
     // The popover header stays down to name + email: no "Account" badge, no version line.
     expect(popover?.textContent).not.toContain("Account");
@@ -615,7 +610,7 @@ describe("SidebarAccountMenu", () => {
     const popover = document.body.querySelector('[data-slot="popover-content"]');
     expect(popover?.textContent).not.toContain("Invite");
     expect(popover?.querySelector('a[href="/company/settings/members?tab=invites"]')).toBeNull();
-    expect(popover?.textContent).toContain("Documentation");
+    expect(popover?.textContent).not.toContain("Documentation");
 
     await act(async () => {
       root.unmount();
@@ -649,7 +644,7 @@ describe("SidebarAccountMenu", () => {
     expect(popover?.querySelector('a[href="/company/settings/members?tab=invites"]')).toBeNull();
     // The settings-independent entries stay put.
     expect(popover?.querySelector('a[aria-label="View profile"]')).not.toBeNull();
-    expect(popover?.textContent).toContain("Documentation");
+    expect(popover?.textContent).not.toContain("Documentation");
 
     await act(async () => {
       root.unmount();
@@ -686,7 +681,7 @@ describe("SidebarAccountMenu", () => {
     expect(popover?.textContent).not.toContain("Invite");
     expect(popover?.querySelector('a[href="/company/settings/members?tab=invites"]')).toBeNull();
     expect(popover?.querySelector('a[aria-label="View profile"]')).not.toBeNull();
-    expect(popover?.textContent).toContain("Documentation");
+    expect(popover?.textContent).not.toContain("Documentation");
 
     await act(async () => {
       root.unmount();

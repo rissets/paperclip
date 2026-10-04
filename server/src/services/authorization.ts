@@ -39,6 +39,7 @@ import {
 import { logger } from "../middleware/logger.js";
 import { normalizeAgentPermissions } from "./agent-permissions.js";
 import { grantsForHumanRole, normalizeHumanRole } from "./company-member-roles.js";
+import { userRbacService } from "./user-rbac-service.js";
 
 export type AuthorizationActor =
   {
@@ -138,6 +139,7 @@ export type AuthorizationDecision = {
     | "deny_missing_consent"
     | "deny_no_grant"
     | "deny_policy_restricted"
+    | "deny_agent_not_assigned"
     | "deny_low_trust_boundary"
     | "deny_scope"
     | "deny_unsupported_action";
@@ -1682,6 +1684,99 @@ export function authorizationService(db: Db | DbTransaction) {
       });
     }
 
+    async function checkOperatorResourceAccess(
+      action: string,
+      resource: AuthorizationResource,
+      targetCompanyId: string,
+      userId: string,
+      membershipRole: string,
+    ): Promise<{ allowed: boolean; reason?: AuthorizationDecision["reason"]; explanation?: string }> {
+      if (["owner", "admin"].includes(membershipRole.toLowerCase())) {
+        return { allowed: true };
+      }
+
+      const rbac = userRbacService(db as Db);
+
+      if (action === "company_scope:read") {
+        return {
+          allowed: false,
+          reason: "deny_scope",
+          explanation: "Operators do not have company-wide issue visibility; issues must be filtered.",
+        };
+      }
+
+      if (action === "agent:read" || action === "agent:wake") {
+        if (resource.type === "agent" && resource.agentId) {
+          const assigned = await rbac.canUserEditAgent(targetCompanyId, userId, resource.agentId);
+          if (!assigned) {
+            return {
+              allowed: false,
+              reason: "deny_agent_not_assigned",
+              explanation: `Agent ${resource.agentId} is not assigned to user ${userId}.`,
+            };
+          }
+        }
+      }
+
+      if (action === "project:read") {
+        const projectId =
+          resource.type === "project"
+            ? resource.projectId
+            : resource.type === "issue"
+              ? resource.projectId
+              : null;
+        if (projectId) {
+          const canAccess = await rbac.canUserAccessProject(targetCompanyId, userId, projectId);
+          if (!canAccess) {
+            return {
+              allowed: false,
+              reason: "deny_missing_grant",
+              explanation: `Project ${projectId} is not assigned to or created by user ${userId}.`,
+            };
+          }
+        }
+      }
+
+      if (action === "issue:read") {
+        if (resource.type === "issue") {
+          if (resource.projectId) {
+            const canAccessProject = await rbac.canUserAccessProject(targetCompanyId, userId, resource.projectId);
+            if (!canAccessProject) {
+              return {
+                allowed: false,
+                reason: "deny_missing_grant",
+                explanation: `Task belongs to project ${resource.projectId} which is not assigned to user ${userId}.`,
+              };
+            }
+          } else {
+            const assignedAgents = await rbac.getAssignedAgentsForUser(targetCompanyId, userId);
+            const isAssignedToUser = resource.assigneeUserId === userId;
+            const isAssignedToUserAgent = Boolean(resource.assigneeAgentId && assignedAgents.includes(resource.assigneeAgentId));
+
+            let isCreatedByUser = false;
+            if (resource.issueId) {
+              const issueRow = await (db as Db)
+                .select({ createdByUserId: issues.createdByUserId })
+                .from(issues)
+                .where(eq(issues.id, resource.issueId))
+                .then((r) => r[0] ?? null);
+              isCreatedByUser = issueRow?.createdByUserId === userId;
+            }
+
+            if (!isAssignedToUser && !isAssignedToUserAgent && !isCreatedByUser) {
+              return {
+                allowed: false,
+                reason: "deny_missing_grant",
+                explanation: `Task is not assigned to or created by user ${userId}.`,
+              };
+            }
+          }
+        }
+      }
+
+      return { allowed: true };
+    }
+
     if (input.actor.type === "board") {
       let taskAssignmentPolicyEffect: AssignmentPolicyEffect | null = null;
       if (input.actor.source === "local_implicit") {
@@ -1723,6 +1818,20 @@ export function authorizationService(db: Db | DbTransaction) {
             input.action === "issue:read" ||
             input.action === "project:read"
           ) {
+            const operatorCheck = await checkOperatorResourceAccess(
+              input.action,
+              input.resource,
+              companyId,
+              input.actor.userId,
+              String(membership.membershipRole),
+            );
+            if (!operatorCheck.allowed) {
+              return deny({
+                action: input.action,
+                reason: operatorCheck.reason ?? "deny_policy_restricted",
+                explanation: operatorCheck.explanation ?? "Access denied for operator.",
+              });
+            }
             return allow({
               action: input.action,
               reason: "allow_company_member",
@@ -1839,32 +1948,58 @@ export function authorizationService(db: Db | DbTransaction) {
           input.action === "secrets:propose"
         ) {
           const membership = await getActiveMembership(companyId, "user", input.actor.userId);
-          // Mirroring the tasks:assign carve-out above, viewers keep the
-          // read-only visibility actions but not the privileged ones.
-          const requiresNonViewer =
-            input.action === "agent:wake" ||
-            input.action === "runtime:manage" ||
-            input.action === "secrets:read" ||
-            input.action === "decision_queue:manage" ||
-            input.action === "decision_triage:manage";
-          if (membership && (!requiresNonViewer || membership.membershipRole !== "viewer")) {
-            return allow({
+          if (!membership) {
+            return deny({
               action: input.action,
-              reason: "allow_simple_company_member",
-              explanation: "Allowed by standard same-company board membership visibility.",
+              reason: "deny_missing_membership",
+              explanation: `user principal ${input.actor.userId} is not an active member of company ${companyId}.`,
             });
           }
-          if (membership) {
+
+          // Privileged actions require owner or admin
+          const requiresAdmin =
+            input.action === "runtime:manage" ||
+            input.action === "secrets:read" ||
+            input.action === "secrets:propose";
+          if (requiresAdmin && !["owner", "admin"].includes(String(membership.membershipRole))) {
+            return deny({
+              action: input.action,
+              reason: "deny_missing_grant",
+              explanation: `Role ${membership.membershipRole} does not grant ${input.action}.`,
+            });
+          }
+
+          const requiresNonViewer =
+            input.action === "agent:wake" ||
+            input.action === "decision_queue:manage" ||
+            input.action === "decision_triage:manage";
+          if (requiresNonViewer && membership.membershipRole === "viewer") {
             return deny({
               action: input.action,
               reason: "deny_missing_grant",
               explanation: `Viewer membership does not grant ${input.action}.`,
             });
           }
-          return deny({
+
+          const operatorCheck = await checkOperatorResourceAccess(
+            input.action,
+            input.resource,
+            companyId,
+            input.actor.userId,
+            String(membership.membershipRole),
+          );
+          if (!operatorCheck.allowed) {
+            return deny({
+              action: input.action,
+              reason: operatorCheck.reason ?? "deny_policy_restricted",
+              explanation: operatorCheck.explanation ?? "Access denied for operator.",
+            });
+          }
+
+          return allow({
             action: input.action,
-            reason: "deny_missing_membership",
-            explanation: `user principal ${input.actor.userId} is not an active member of company ${companyId}.`,
+            reason: "allow_simple_company_member",
+            explanation: "Allowed by standard same-company board membership visibility.",
           });
         }
         return deny({

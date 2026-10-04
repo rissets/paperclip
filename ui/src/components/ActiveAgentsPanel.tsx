@@ -13,6 +13,7 @@ import { StatusGlyph } from "./StatusGlyph";
 import { RunChatSurface } from "./RunChatSurface";
 import { useLiveRunTranscripts } from "./transcript/useLiveRunTranscripts";
 import { usePublishSharedQueryData, useSharedPollingQuery } from "../hooks/useSharedPolling";
+import { useUserRbac } from "@/hooks/useUserRbac";
 
 const MIN_DASHBOARD_RUNS = 4;
 const DASHBOARD_RUN_CARD_LIMIT = 4;
@@ -81,7 +82,15 @@ export function ActiveAgentsPanel({
   });
   usePublishSharedQueryData(sharedLiveRuns, liveRuns, liveRunsUpdatedAt);
 
-  const runs = liveRuns ?? [];
+  const { isOwnerOrAdmin, assignedAgentIds } = useUserRbac();
+  const runs = useMemo(() => {
+    const list = liveRuns ?? [];
+    if (!isOwnerOrAdmin && assignedAgentIds) {
+      return list.filter((r) => assignedAgentIds.includes(r.agentId));
+    }
+    return list;
+  }, [liveRuns, isOwnerOrAdmin, assignedAgentIds]);
+
   const cardRuns = useMemo(() => {
     if (!dedupeLinkedTasks) return runs;
 

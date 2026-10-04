@@ -23,6 +23,7 @@ import { MetricCard } from "../components/MetricCard";
 import { EmptyState } from "../components/EmptyState";
 import { StatusIcon } from "../components/StatusIcon";
 import { usePublishSharedQueryData, useSharedPollingQuery } from "../hooks/useSharedPolling";
+import { useUserRbac } from "@/hooks/useUserRbac";
 
 import { ActivityRow } from "../components/ActivityRow";
 import { timeAgo } from "../lib/timeAgo";
@@ -75,6 +76,7 @@ export function Dashboard() {
   const { openOnboarding } = useDialogActions();
   const location = useLocation();
   const { setBreadcrumbs } = useBreadcrumbs();
+  const { canAddAgent } = useUserRbac();
   const [animatedActivityIds, setAnimatedActivityIds] = useState<Set<string>>(new Set());
   const seenActivityIdsRef = useRef<Set<string>>(new Set());
   const hydratedActivityRef = useRef(false);
@@ -144,7 +146,7 @@ export function Dashboard() {
   // wizard that was deliberately closed. `claimOnboardingOffer` holds the
   // companies already offered; see it for why that outlives this component.
   useEffect(() => {
-    if (!shouldOpenOnboarding || !selectedCompanyId) return;
+    if (!shouldOpenOnboarding || !selectedCompanyId || !canAddAgent) return;
     if (!claimOnboardingOffer(selectedCompanyId)) return;
     openOnboarding({
       companyId: selectedCompanyId,
@@ -152,7 +154,7 @@ export function Dashboard() {
     });
     // No mission lookup to wait on any more: the step this opens is the same
     // whatever the goals say, so waiting only delayed the open.
-  }, [shouldOpenOnboarding, selectedCompanyId, openOnboarding]);
+  }, [shouldOpenOnboarding, selectedCompanyId, openOnboarding, canAddAgent]);
 
   useEffect(() => {
     setBreadcrumbs([{ label: "Dashboard" }]);
@@ -362,15 +364,17 @@ export function Dashboard() {
           <div className="flex items-center gap-2.5">
             <Bot className="h-4 w-4 text-amber-600 dark:text-amber-400 shrink-0" />
             <p className="text-sm text-amber-900 dark:text-amber-100">
-              You have no agents.
+              {canAddAgent ? "You have no agents." : "No agents have been assigned to you."}
             </p>
           </div>
-          <button
-            onClick={() => openOnboarding({ initialStep: 3, companyId: selectedCompanyId! })}
-            className="text-sm font-medium text-amber-700 hover:text-amber-900 dark:text-amber-300 dark:hover:text-amber-100 underline underline-offset-2 shrink-0"
-          >
-            Create one here
-          </button>
+          {canAddAgent ? (
+            <button
+              onClick={() => openOnboarding({ initialStep: 3, companyId: selectedCompanyId! })}
+              className="text-sm font-medium text-amber-700 hover:text-amber-900 dark:text-amber-300 dark:hover:text-amber-100 underline underline-offset-2 shrink-0"
+            >
+              Create one here
+            </button>
+          ) : null}
         </div>
       )}
 

@@ -19,7 +19,7 @@ import {
   describeAdapterExecutionTarget,
   resolveAdapterExecutionTargetCwd,
 } from "@paperclipai/adapter-utils/execution-target";
-import { discoverPiModelsCached } from "./models.js";
+import { discoverPiModelsCached, normalizePiModelId } from "./models.js";
 import { parsePiJsonl } from "./parse.js";
 import { preparePiRuntimeConfig } from "./runtime-config.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
@@ -126,7 +126,10 @@ export async function testEnvironment(
   for (const [key, value] of Object.entries(envConfig)) {
     if (typeof value === "string") env[key] = value;
   }
-  const preparedRuntimeConfig = await preparePiRuntimeConfig({ env });
+  const preparedRuntimeConfig = await preparePiRuntimeConfig({
+    env,
+    mergeHostProviders: true,
+  });
   const runtimeEnv = normalizeEnv(ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env }));
 
   try {
@@ -214,9 +217,11 @@ export async function testEnvironment(
     });
   } else if (canRunProbe) {
     // Verify model is in the list
+    let effectiveModel = configuredModel;
     try {
       const discovered = await discoverPiModelsCached({ command, cwd, env: runtimeEnv });
-      const modelExists = discovered.some((m: { id: string }) => m.id === configuredModel);
+      effectiveModel = normalizePiModelId(configuredModel, discovered);
+      const modelExists = discovered.some((m: { id: string }) => m.id === configuredModel || m.id === effectiveModel);
       if (modelExists) {
         checks.push({
           code: "pi_model_configured",
@@ -239,29 +244,27 @@ export async function testEnvironment(
         message: `Configured model: ${configuredModel}`,
       });
     }
-  }
 
-  if (canRunProbe && configuredModel) {
     // Parse model for probe
-    const provider = configuredModel.includes("/") 
-      ? configuredModel.slice(0, configuredModel.indexOf("/")) 
+    const provider = effectiveModel.includes("/") 
+      ? effectiveModel.slice(0, effectiveModel.indexOf("/")) 
       : "";
-    const modelId = configuredModel.includes("/")
-      ? configuredModel.slice(configuredModel.indexOf("/") + 1)
-      : configuredModel;
-    const thinking = asString(config.thinking, "").trim();
-    const extraArgs = (() => {
-      const fromExtraArgs = asStringArray(config.extraArgs);
-      if (fromExtraArgs.length > 0) return fromExtraArgs;
-      return asStringArray(config.args);
-    })();
+      const modelId = effectiveModel.includes("/")
+        ? effectiveModel.slice(effectiveModel.indexOf("/") + 1)
+        : effectiveModel;
+      const thinking = asString(config.thinking, "").trim();
+      const extraArgs = (() => {
+        const fromExtraArgs = asStringArray(config.extraArgs);
+        if (fromExtraArgs.length > 0) return fromExtraArgs;
+        return asStringArray(config.args);
+      })();
 
-    const args = ["-p", "Respond with hello.", "--mode", "json"];
-    if (provider) args.push("--provider", provider);
-    if (modelId) args.push("--model", modelId);
-    if (thinking) args.push("--thinking", thinking);
-    args.push("--tools", "read");
-    if (extraArgs.length > 0) args.push(...extraArgs);
+      const args = ["-p", "Respond with hello.", "--mode", "json"];
+      if (provider) args.push("--provider", provider);
+      if (modelId) args.push("--model", modelId);
+      if (thinking) args.push("--thinking", thinking);
+      args.push("--tools", "read");
+      if (extraArgs.length > 0) args.push(...extraArgs);
 
     try {
       const probe = await runAdapterExecutionTargetProcess(

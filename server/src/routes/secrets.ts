@@ -79,8 +79,7 @@ function assertSecretDefinitionAdmin(req: Parameters<typeof assertBoard>[0], com
 }
 
 function assertCompanySecretWrite(req: Parameters<typeof assertBoard>[0], companyId: string) {
-  assertBoard(req);
-  assertCompanyAccess(req, companyId);
+  assertSecretDefinitionAdmin(req, companyId);
 }
 
 function currentUserId(req: Parameters<typeof assertBoard>[0]) {
@@ -240,7 +239,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
   router.get("/companies/:companyId/secret-proposals", async (req, res) => {
     assertBoard(req);
     const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
+    assertSecretDefinitionAdmin(req, companyId);
     const status = typeof req.query.status === "string" ? req.query.status : null;
     const page = proposalListPage(req.query);
     const rows = await proposals.listForBoard(companyId, status, {
@@ -361,14 +360,14 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
   router.get("/companies/:companyId/secret-providers", (req, res) => {
     assertBoard(req);
     const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
+    assertSecretDefinitionAdmin(req, companyId);
     res.json(svc.listProviders());
   });
 
   router.get("/companies/:companyId/secret-providers/health", async (req, res) => {
     assertBoard(req);
     const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
+    assertSecretDefinitionAdmin(req, companyId);
     const checks = await svc.checkProviders();
     res.json({ providers: checks });
   });
@@ -376,7 +375,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
   router.get("/companies/:companyId/secret-provider-configs", async (req, res) => {
     assertBoard(req);
     const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
+    assertSecretDefinitionAdmin(req, companyId);
     res.json(await svc.listProviderConfigs(companyId));
   });
 
@@ -386,7 +385,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
     async (req, res) => {
       assertBoard(req);
       const companyId = req.params.companyId as string;
-      assertCompanyAccess(req, companyId);
+      assertSecretDefinitionAdmin(req, companyId);
 
       const preview = await svc.previewProviderConfigDiscovery(companyId, {
         provider: req.body.provider,
@@ -418,7 +417,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
   router.post("/companies/:companyId/secret-provider-configs", validate(createSecretProviderConfigSchema), async (req, res) => {
     assertBoard(req);
     const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
+    assertSecretDefinitionAdmin(req, companyId);
 
     const created = await svc.createProviderConfig(
       companyId,
@@ -454,6 +453,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
     assertBoard(req);
     const existing = await getAccessibleResource(req, res, svc.getProviderConfigById(req.params.id as string), "Provider vault not found");
     if (!existing) return;
+    assertSecretDefinitionAdmin(req, existing.companyId);
     res.json(existing);
   });
 
@@ -462,6 +462,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
     const id = req.params.id as string;
     const existing = await getAccessibleResource(req, res, svc.getProviderConfigById(id), "Provider vault not found");
     if (!existing) return;
+    assertSecretDefinitionAdmin(req, existing.companyId);
 
     const updated = await svc.updateProviderConfig(id, {
       displayName: req.body.displayName,
@@ -497,6 +498,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
     const id = req.params.id as string;
     const existing = await getAccessibleResource(req, res, svc.getProviderConfigById(id), "Provider vault not found");
     if (!existing) return;
+    assertSecretDefinitionAdmin(req, existing.companyId);
 
     const removed = await svc.removeProviderConfig(id);
     if (!removed) {
@@ -526,6 +528,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
     const id = req.params.id as string;
     const existing = await getAccessibleResource(req, res, svc.getProviderConfigById(id), "Provider vault not found");
     if (!existing) return;
+    assertSecretDefinitionAdmin(req, existing.companyId);
 
     const updated = await svc.setDefaultProviderConfig(id);
     if (!updated) {
@@ -555,6 +558,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
     const id = req.params.id as string;
     const existing = await getAccessibleResource(req, res, svc.getProviderConfigById(id), "Provider vault not found");
     if (!existing) return;
+    assertSecretDefinitionAdmin(req, existing.companyId);
 
     const health = await svc.checkProviderConfigHealth(id);
     if (!health) {
@@ -594,7 +598,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
   router.get("/companies/:companyId/secrets", async (req, res) => {
     assertBoard(req);
     const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
+    assertSecretDefinitionAdmin(req, companyId);
     const secrets = await svc.list(companyId);
     res.json(secrets);
   });
@@ -924,7 +928,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
     async (req, res) => {
       assertBoard(req);
       const companyId = req.params.companyId as string;
-      assertCompanyAccess(req, companyId);
+      assertSecretDefinitionAdmin(req, companyId);
 
       const preview = await svc.previewRemoteImport(companyId, {
         providerConfigId: req.body.providerConfigId,
@@ -959,7 +963,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
     async (req, res) => {
       assertBoard(req);
       const companyId = req.params.companyId as string;
-      assertCompanyAccess(req, companyId);
+      assertSecretDefinitionAdmin(req, companyId);
 
       const result = await svc.importRemoteSecrets(
         companyId,
@@ -1000,6 +1004,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
       "Secret not found",
     );
     if (!existing) return;
+    assertSecretDefinitionAdmin(req, existing.companyId);
     if (existing.status === "deleted") {
       res.status(404).json({ error: "Secret not found" });
       return;
@@ -1040,6 +1045,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
       "Secret not found",
     );
     if (!existing) return;
+    assertSecretDefinitionAdmin(req, existing.companyId);
     if (existing.status === "deleted") {
       res.status(404).json({ error: "Secret not found" });
       return;
@@ -1084,6 +1090,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
       "Secret not found",
     );
     if (!existing) return;
+    assertSecretDefinitionAdmin(req, existing.companyId);
     const bindings = await svc.listBindingReferences(existing.companyId, existing.id);
     res.json({ secretId: existing.id, bindings });
   });
@@ -1099,6 +1106,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
       "Secret not found",
     );
     if (!existing) return;
+    assertSecretDefinitionAdmin(req, existing.companyId);
     const events = await svc.listAccessEvents(existing.companyId, existing.id);
     res.json(events);
   });
@@ -1114,6 +1122,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
       "Secret not found",
     );
     if (!existing) return;
+    assertSecretDefinitionAdmin(req, existing.companyId);
 
     const removed = await svc.remove(id);
     if (!removed) {

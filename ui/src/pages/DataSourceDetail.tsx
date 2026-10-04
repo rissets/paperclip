@@ -34,6 +34,7 @@ import {
   Folder,
 } from "lucide-react";
 import { useCompany } from "@/context/CompanyContext";
+import { copyTextToClipboard } from "@/lib/clipboard";
 import { dataSourcesApi } from "@/api/data-sources";
 import type { SqlQueryResult, StructuredQueryResult } from "@paperclipai/shared";
 
@@ -1230,7 +1231,7 @@ function JevSemanticProfileView({
   };
 
   const handleCopyJoin = (sql: string) => {
-    navigator.clipboard?.writeText(sql);
+    void copyTextToClipboard(sql);
     setCopiedJoin(sql);
     setTimeout(() => setCopiedJoin(null), 2000);
   };

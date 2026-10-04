@@ -346,7 +346,7 @@ export function pluginManagedAgentService(
         action: "plugin.managed_agent.relinked", entityType: "agent", entityId: agentId,
         details: { sourcePluginKey: options.pluginKey, managedResourceKey: declaration.agentKey, previousPluginId },
       });
-      return relinked as Agent;
+      return relinked as unknown as Agent;
     });
   }
 

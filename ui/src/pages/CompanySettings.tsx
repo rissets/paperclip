@@ -1,5 +1,5 @@
 import { ChangeEvent, useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "@/lib/router";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   type InteractionResolverGovernance,
@@ -24,11 +24,9 @@ import {
   type GovernanceSelectValue,
 } from "../components/InteractionGovernancePanel";
 import { CompanyPatternIcon } from "../components/CompanyPatternIcon";
-import {
-  Field,
-  ToggleField,
-} from "../components/agent-config-primitives";
+import { Field, ToggleField } from "../components/agent-config-primitives";
 import { InstanceGeneralSettings } from "./InstanceGeneralSettings";
+import { useUserRbac } from "@/hooks/useUserRbac";
 
 export function CompanySettings() {
   const {
@@ -37,11 +35,19 @@ export function CompanySettings() {
     selectedCompanyId,
     setSelectedCompanyId
   } = useCompany();
+  const { canManageSettings, isLoading: rbacLoading } = useUserRbac();
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const toastActions = useOptionalToastActions();
   const cloud = useCloudInstance();
+
+  useEffect(() => {
+    if (!rbacLoading && !canManageSettings) {
+      navigate("/dashboard", { replace: true });
+    }
+  }, [canManageSettings, rbacLoading, navigate]);
+
   // Managed instances derive the task ID prefix from the company name, so a
   // rename here also renumbers the existing task IDs.
   const isCloudManaged = Boolean(cloud);

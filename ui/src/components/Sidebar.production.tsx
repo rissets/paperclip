@@ -38,6 +38,7 @@ import { queryKeys } from "../lib/queryKeys";
 import { attentionBadgeCount } from "../lib/attention";
 import { useInboxBadge } from "../hooks/useInboxBadge";
 import { usePublishSharedQueryData, useSharedPollingQuery } from "../hooks/useSharedPolling";
+import { useUserRbac } from "@/hooks/useUserRbac";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn, SIDEBAR_RAIL_HIDDEN_LABEL } from "../lib/utils";
 import { PluginSlotOutlet } from "@/plugins/slots";
@@ -46,6 +47,7 @@ import { SidebarCompanyMenu } from "./SidebarCompanyMenu.production";
 
 export function Sidebar() {
   const { openNewIssue } = useDialogActions();
+  const { canManageSettings } = useUserRbac();
   // Every labeled section is collapsible (session-scoped, default open) —
   // one policy across static nav groups and the data-driven sections.
   const [workOpen, setWorkOpen] = useState(true);
@@ -235,7 +237,9 @@ export function Sidebar() {
           <SidebarNavItem to="/costs" label="Costs" icon={DollarSign} />
           {/* One entry — /audit merged into the rich Activity feed (PAP-16302). */}
           <SidebarNavItem to="/activity" label="Activity" icon={History} />
-          <SidebarNavItem to="/company/settings" label="Settings" icon={Settings} />
+          {canManageSettings ? (
+            <SidebarNavItem to="/company/settings" label="Settings" icon={Settings} />
+          ) : null}
         </SidebarSection>
 
         <PluginSlotOutlet

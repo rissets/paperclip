@@ -1,4 +1,4 @@
-import type { AgentAdapterType, JoinRequest, PermissionKey } from "@paperclipai/shared";
+import type { AgentAdapterType, JoinRequest, PermissionKey, UserAccessConfigResponse, UpdateUserAccessConfigRequest } from "@paperclipai/shared";
 import { api } from "./client";
 
 export type HumanCompanyRole = "owner" | "admin" | "operator" | "viewer";
@@ -478,5 +478,14 @@ export const accessApi = {
     api.put<{ success: true; assignedAgentIds: string[] }>(
       `/companies/${companyId}/users/${userId}/assigned-agents`,
       { agentIds },
+    ),
+
+  getUserAccessConfig: (companyId: string, userId: string) =>
+    api.get<UserAccessConfigResponse>(`/companies/${companyId}/users/${userId}/access-config`),
+
+  updateUserAccessConfig: (companyId: string, userId: string, data: UpdateUserAccessConfigRequest) =>
+    api.put<{ success: true; config: UserAccessConfigResponse }>(
+      `/companies/${companyId}/users/${userId}/access-config`,
+      data,
     ),
 };

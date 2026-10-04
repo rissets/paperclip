@@ -778,6 +778,10 @@ export function App() {
           <Route path="instance" element={<LegacySettingsRedirect />} />
           <Route path="instance/settings" element={<LegacySettingsRedirect />} />
           <Route path="instance/settings/*" element={<LegacySettingsRedirect />} />
+          <Route path="dashboard" element={<UnprefixedBoardRedirect />} />
+          <Route path="dashboard/*" element={<UnprefixedBoardRedirect />} />
+          <Route path="company" element={<UnprefixedBoardRedirect />} />
+          <Route path="company/*" element={<UnprefixedBoardRedirect />} />
           <Route path="companies" element={<UnprefixedBoardRedirect />} />
           <Route path="issues" element={<UnprefixedBoardRedirect />} />
           <Route path="tasks" element={<UnprefixedBoardRedirect />} />

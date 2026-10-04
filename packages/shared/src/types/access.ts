@@ -198,7 +198,40 @@ export interface UserRbacStatus {
   companyId: string;
   role: "owner" | "admin" | "operator" | "viewer";
   isOwnerOrAdmin: boolean;
+  isInstanceAdmin: boolean;
   canAddDataSource: boolean;
   canAddAgent: boolean;
+  canCreateCompany: boolean;
+  canManageSettings: boolean;
+  canAccessSecrets: boolean;
+  canAccessEnvironments: boolean;
+  canAccessUsers: boolean;
+  canAccessPlugins: boolean;
+  canAccessAdapters: boolean;
+  canAccessExperimental: boolean;
+  canExportCompany: boolean;
+  canImportCompany: boolean;
   assignedAgentIds: string[];
+  allowedDataSourceIds: string[];
+  assignedProjectIds: string[];
+  operatorCreatedAgentCount?: number;
+  operatorMaxAgents?: number;
+}
+
+export interface UserAccessConfigResponse {
+  userId: string;
+  companyId: string;
+  role: "owner" | "admin" | "operator" | "viewer";
+  assignedAgentIds: string[];
+  allowedDataSourceIds: string[];
+  assignedProjectIds: string[];
+  operatorCreatedAgentCount: number;
+  operatorMaxAgents: number;
+}
+
+export interface UpdateUserAccessConfigRequest {
+  role?: "owner" | "admin" | "operator" | "viewer";
+  assignedAgentIds?: string[];
+  allowedDataSourceIds?: string[];
+  assignedProjectIds?: string[];
 }

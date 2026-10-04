@@ -490,7 +490,7 @@ export function userInvitationRoutes(db: Db) {
     await assertCompanyAccess(req, companyId, { readOnly: true });
 
     const agentIds = await rbac.getAssignedAgentsForUser(companyId, targetUserId);
-    res.json(agentIds);
+    res.json({ assignedAgentIds: agentIds });
   });
 
   // 10. Assign agents to a user in a company (admin/owner only)
@@ -509,9 +509,35 @@ export function userInvitationRoutes(db: Db) {
       }
 
       await rbac.assignAgentsToUser(companyId, targetUserId, req.body.agentIds, userId);
-      res.json({ success: true });
+      res.json({ success: true, assignedAgentIds: req.body.agentIds });
     },
   );
+
+  // 11. Get full access configuration for a user in a company (role, agents, datasources, projects)
+  router.get("/companies/:companyId/users/:userId/access-config", async (req: Request, res: Response) => {
+    const companyId = req.params.companyId as string;
+    const targetUserId = req.params.userId as string;
+    await assertCompanyAccess(req, companyId, { readOnly: true });
+
+    const config = await rbac.getUserAccessConfig(companyId, targetUserId);
+    res.json(config);
+  });
+
+  // 12. Update full access configuration for a user in a company (owner/admin only)
+  router.put("/companies/:companyId/users/:userId/access-config", async (req: Request, res: Response) => {
+    const companyId = req.params.companyId as string;
+    const targetUserId = req.params.userId as string;
+    await assertCompanyAccess(req, companyId);
+
+    const userId = req.actor.userId || "local-board";
+    const isPrivileged = req.actor.isInstanceAdmin || (await rbac.isOwnerOrAdmin(companyId, userId));
+    if (!isPrivileged) {
+      throw forbidden("Only an owner or admin can configure access.");
+    }
+
+    const updated = await rbac.updateUserAccessConfig(companyId, targetUserId, req.body, userId);
+    res.json(updated);
+  });
 
   return router;
 }

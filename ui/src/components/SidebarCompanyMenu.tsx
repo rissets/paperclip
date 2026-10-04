@@ -37,6 +37,7 @@ import { useCloudInstance } from "@/hooks/useCloudInstance";
 import { useHiddenSettings } from "@/hooks/useHiddenSettings";
 import { useCompanyOrder } from "@/hooks/useCompanyOrder";
 import { useSignOut } from "@/hooks/useSignOut";
+import { useUserRbac } from "@/hooks/useUserRbac";
 import { queryKeys } from "@/lib/queryKeys";
 import { cn, SIDEBAR_RAIL_HIDDEN_LABEL } from "@/lib/utils";
 import { useSidebar } from "../context/SidebarContext";
@@ -189,8 +190,10 @@ function BuiltinCompanyMenu({ open: controlledOpen, onOpenChange }: SidebarCompa
 
   // Keep invitation links hidden until the operator policy is known.
   const { hidden: hiddenSettings, loaded: hiddenSettingsLoaded } = useHiddenSettings();
+  const { canCreateCompany, canAccessUsers } = useUserRbac();
   const showInvitePeople =
     hiddenSettingsLoaded &&
+    canAccessUsers &&
     !hidesCompanyPage(hiddenSettings, "company.members") &&
     !hidesCompanyPage(hiddenSettings, "company.invites");
   const switcherNoun = "organization";
@@ -228,7 +231,7 @@ function BuiltinCompanyMenu({ open: controlledOpen, onOpenChange }: SidebarCompa
   }
 
   function addCompany() {
-    if (companyCreationManaged) return;
+    if (companyCreationManaged || !canCreateCompany) return;
     setOpen(false);
     if (isMobile) setSidebarOpen(false);
     // Skip the front-door "how would you like to get started?" choice and land
@@ -358,7 +361,7 @@ function BuiltinCompanyMenu({ open: controlledOpen, onOpenChange }: SidebarCompa
           ) : null}
         </div>
         <div className="flex flex-col gap-0.5 border-t border-border px-2.5 pb-2.5 pt-2">
-          {!companyCreationManaged && (
+          {!companyCreationManaged && canCreateCompany && (
             <DropdownMenuItem
               onClick={addCompany}
               className={ORGANIZATION_ACTION_CLASS}

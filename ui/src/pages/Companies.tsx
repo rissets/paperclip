@@ -4,6 +4,7 @@ import { useCompany } from "../context/CompanyContext";
 import { useDialogActions } from "../context/DialogContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useCloudInstance } from "../hooks/useCloudInstance";
+import { useUserRbac } from "@/hooks/useUserRbac";
 import { companiesApi } from "../api/companies";
 import { queryKeys } from "../lib/queryKeys";
 import { formatCents, relativeTime } from "../lib/utils";
@@ -43,6 +44,7 @@ export function Companies() {
   const { openOnboarding } = useDialogActions();
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
+  const { canCreateCompany, isOwnerOrAdmin } = useUserRbac();
   // A cloud stack holds exactly one company; creating another is a 403 floor
   // server-side, so the wizard entry point is hidden rather than dead-ending.
   const isCloud = Boolean(useCloudInstance());
@@ -110,12 +112,12 @@ export function Companies() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-end">
-        {isCloud ? null : (
+        {!isCloud && canCreateCompany ? (
           <Button size="sm" onClick={() => openOnboarding()}>
             <Plus className="h-3.5 w-3.5 mr-1.5" />
             New Organization
           </Button>
-        )}
+        ) : null}
       </div>
 
       <div className="h-6">
@@ -199,17 +201,19 @@ export function Companies() {
                       >
                         {company.status}
                       </Badge>
-                      <Button
-                        variant="ghost"
-                        size="icon-xs"
-                        className="text-muted-foreground opacity-0 group-hover:opacity-100"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          startEdit(company.id, company.name);
-                        }}
-                      >
-                        <Pencil className="h-3 w-3" />
-                      </Button>
+                      {isOwnerOrAdmin && (
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          className="text-muted-foreground opacity-0 group-hover:opacity-100"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            startEdit(company.id, company.name);
+                          }}
+                        >
+                          <Pencil className="h-3 w-3" />
+                        </Button>
+                      )}
                     </div>
                   )}
                   {company.description && !isEditing && (
@@ -220,44 +224,46 @@ export function Companies() {
                 </div>
 
                 {/* Three-dot menu */}
-                <div onClick={(e) => e.stopPropagation()}>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button
-                        variant="ghost"
-                        size="icon-xs"
-                        className="text-muted-foreground opacity-0 group-hover:opacity-100 data-[state=open]:opacity-100"
-                      >
-                        <MoreHorizontal className="h-4 w-4" />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      <DropdownMenuItem
-                        onClick={() => startEdit(company.id, company.name)}
-                      >
-                        <Pencil className="h-3.5 w-3.5" />
-                        Rename
-                      </DropdownMenuItem>
-                      {company.status === "archived" && (
-                        <DropdownMenuItem
-                          disabled={unarchiveMutation.isPending}
-                          onClick={() => unarchiveMutation.mutate(company.id)}
+                {isOwnerOrAdmin && (
+                  <div onClick={(e) => e.stopPropagation()}>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          className="text-muted-foreground opacity-0 group-hover:opacity-100 data-[state=open]:opacity-100"
                         >
-                          <ArchiveRestore className="h-3.5 w-3.5" />
-                          Unarchive
+                          <MoreHorizontal className="h-4 w-4" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem
+                          onClick={() => startEdit(company.id, company.name)}
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                          Rename
                         </DropdownMenuItem>
-                      )}
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem
-                        variant="destructive"
-                        onClick={() => setConfirmDeleteId(company.id)}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                        Delete Organization
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </div>
+                        {company.status === "archived" && (
+                          <DropdownMenuItem
+                            disabled={unarchiveMutation.isPending}
+                            onClick={() => unarchiveMutation.mutate(company.id)}
+                          >
+                            <ArchiveRestore className="h-3.5 w-3.5" />
+                            Unarchive
+                          </DropdownMenuItem>
+                        )}
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          variant="destructive"
+                          onClick={() => setConfirmDeleteId(company.id)}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          Delete Organization
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
+                )}
               </div>
 
               {/* Stats row */}

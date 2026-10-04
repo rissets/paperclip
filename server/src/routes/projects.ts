@@ -44,6 +44,7 @@ import { appendWithCap } from "../adapters/utils.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import { environmentService } from "../services/environments.js";
 import { secretService } from "../services/secrets.js";
+import { userRbacService } from "../services/user-rbac-service.js";
 
 const WORKSPACE_CONTROL_OUTPUT_MAX_CHARS = 256 * 1024;
 const SHARED_WORKSPACE_STOP_AND_RESTART_ACTIONS = new Set(["stop", "restart"]);
@@ -51,6 +52,7 @@ const SHARED_WORKSPACE_STOP_AND_RESTART_ACTIONS = new Set(["stop", "restart"]);
 export function projectRoutes(db: Db) {
   const router = Router();
   const svc = projectService(db);
+  const rbac = userRbacService(db);
 
   async function repositoryViewer(req: Request) {
     if (req.actor.type === "board") return { userId: req.actor.userId ?? null, localTrusted: req.actor.source === "local_implicit" };
@@ -267,6 +269,7 @@ export function projectRoutes(db: Db) {
     const fingerprint = createHash("sha256").update(JSON.stringify({ projectData, workspace, repositoryIds, repositoryUrls })).digest("hex");
     const receiptKey = idempotencyKey ? `project:${companyId}:${actor.actorId}:${runContext?.issue.id ?? "board"}:${idempotencyKey}` : null;
     const result = await db.transaction(async (tx) => {
+      const service = projectService(tx as unknown as Db);
       if (receiptKey) {
         await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${receiptKey}, 0))`);
         const [prior] = await tx.select().from(activityLog).where(and(
@@ -281,8 +284,8 @@ export function projectRoutes(db: Db) {
         }
       }
       if (runContext) await projectToolContext(tx as unknown as Db, req.actor, true);
-      const service = projectService(tx as unknown as Db);
-      const project = repositories ? await service.createWithRepositories(companyId, projectData, repositories) : await service.create(companyId, projectData);
+      const projectPayload = { ...projectData, createdByUserId: req.actor.userId || null };
+      const project = repositories ? await service.createWithRepositories(companyId, projectPayload, repositories) : await service.create(companyId, projectPayload);
       const attachedUrls = new Set((repositories ?? []).map(repo => repo.url.toLowerCase()));
       const registeredUrls: typeof urlRepositories = [];
       for (const repo of urlRepositories) {
@@ -314,6 +317,17 @@ export function projectRoutes(db: Db) {
     if (result.publication) publishActivity(result.publication);
     if (result.project.env) await secretsSvc.syncEnvBindingsForTarget?.(companyId, { targetType: "project", targetId: result.project.id }, result.project.env);
     if (result.duplicate) { res.status(200).json(result.project); return; }
+    if (req.actor.type === "board" && req.actor.userId) {
+      const currentProjects = await rbac.getAssignedProjectsForUser(companyId, req.actor.userId);
+      if (!currentProjects.includes(result.project.id)) {
+        await rbac.assignProjectsToUser(
+          companyId,
+          req.actor.userId,
+          [...currentProjects, result.project.id],
+          req.actor.userId,
+        );
+      }
+    }
     const telemetryClient = getTelemetryClient();
     if (telemetryClient) {
       trackProjectCreated(telemetryClient);

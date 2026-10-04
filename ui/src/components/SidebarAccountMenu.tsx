@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
-  BookOpen,
   Flag,
   LogOut,
   Settings,
@@ -17,6 +16,7 @@ import { useCloudInviteUrl } from "@/hooks/useCloudInviteUrl";
 import { useCanInviteCompanyMembers } from "@/hooks/useCompanyInviteAccess";
 import { useHiddenSettings } from "@/hooks/useHiddenSettings";
 import { useSignOut } from "@/hooks/useSignOut";
+import { useUserRbac } from "@/hooks/useUserRbac";
 import { useStagingCommit } from "@/hooks/useStagingCommit";
 import { userProfilePath } from "@/lib/userProfileLinks";
 import { useSidebar } from "../context/SidebarContext";
@@ -28,7 +28,6 @@ import { ThemeToggle } from "./ThemeToggle";
 import { SidebarServerInfo } from "./SidebarServerInfo";
 
 const INVITES_PATH = "/company/settings/members?tab=invites";
-const DOCS_URL = "https://docs.paperclip.ing/";
 const FEEDBACK_URL = "https://paperclip.ing/feedback";
 
 interface SidebarAccountMenuProps {
@@ -125,6 +124,7 @@ export function SidebarAccountMenu({
   // shortcut when the hosting operator hides either surface, and until the
   // health response resolves so a hidden surface never flashes.
   const { hidden: hiddenSettings, loaded: hiddenSettingsLoaded } = useHiddenSettings();
+  const { canManageSettings } = useUserRbac();
   // On Cloud the shortcut exists only for the current stack's owner/admin and
   // only once the stack metadata is known; the in-app Invites tab is never a
   // fallback there because it drives a different invitation flow.
@@ -229,12 +229,21 @@ export function SidebarAccountMenu({
             </div>
 
             <div className="flex flex-1 flex-col gap-0.5 border-t border-border px-2.5 pb-2.5 pt-2">
-              <MenuAction
-                label="Settings"
-                icon={Settings}
-                href="/company/settings"
-                onClick={closeNavigationChrome}
-              />
+              {canManageSettings ? (
+                <MenuAction
+                  label="Settings"
+                  icon={Settings}
+                  href="/company/settings"
+                  onClick={closeNavigationChrome}
+                />
+              ) : (
+                <MenuAction
+                  label="Profile"
+                  icon={Settings}
+                  href="/company/settings/instance/profile"
+                  onClick={closeNavigationChrome}
+                />
+              )}
               {showInvite && inviteHref ? (
                 <MenuAction
                   label="Invite"
@@ -244,15 +253,8 @@ export function SidebarAccountMenu({
                   onClick={closeNavigationChrome}
                 />
               ) : null}
-              <MenuAction
-                label="Documentation"
-                icon={BookOpen}
-                href={DOCS_URL}
-                external
-                onClick={() => setOpen(false)}
-              />
               <ThemeToggle variant="compact-menu-action" onAfterToggle={() => setOpen(false)} />
-              {deploymentMode === "authenticated" || Boolean(session?.user?.id) ? (
+              {deploymentMode === "authenticated" ? (
                 <button
                   type="button"
                   className={cn(

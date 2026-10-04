@@ -59,6 +59,7 @@ const mockGoalsApi = vi.hoisted(() => ({
 const mockAgentsApi = vi.hoisted(() => ({
   adapterModels: vi.fn(async () => [] as Array<{ id: string; label: string }>),
   syncPiModels: vi.fn(async () => ({ models: [] as Array<{ id: string; label: string }> })),
+  getPiConnections: vi.fn(async () => ({ connections: [] as any[] })),
   testEnvironment: vi.fn(
     async (): Promise<import("@paperclipai/shared").AdapterEnvironmentTestResult> => ({
       adapterType: "claude_local",
@@ -3462,6 +3463,60 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
           adapterType: "pi_local",
           adapterConfig: expect.objectContaining({
             model: "custom/llama3:latest",
+          }),
+        }),
+      );
+
+      await act(async () => root.unmount());
+    });
+
+    it("connects Pi adapter using existing connection and model choice", async () => {
+      mockAdapterRegistry.list = [{ type: "claude_local" }, { type: "codex_local" }, { type: "pi_local" }];
+      mockAgentsApi.getPiConnections.mockResolvedValue({
+        connections: [
+          {
+            id: "rissets",
+            name: "rissets",
+            baseUrl: "https://router.rissets.com/v1",
+            hasApiKey: true,
+            modelsCount: 1,
+            models: [{ id: "rissets/llm-hd/qwen3.8-27b", label: "Qwen 3.8:27 (HD) (rissets)" }],
+          },
+        ],
+      });
+      const { root } = await openStep4({ adapterType: "pi_local" });
+
+      const piTile = [...document.body.querySelectorAll("button[aria-checked]")].find(
+        (t) => t.textContent?.includes("pi_local") || t.textContent?.includes("Pi"),
+      );
+      expect(piTile).toBeDefined();
+
+      await act(async () => {
+        piTile!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      for (let i = 0; i < 10; i++) await flushReact();
+
+      // Check existing connection UI elements
+      expect(document.body.textContent).toContain("Gunakan koneksi yang ada");
+      expect(document.body.textContent).toContain("Koneksi Pi");
+
+      // Connect button should be enabled once model is selected
+      const connectBtn = Array.from(document.querySelectorAll("button")).find((btn) =>
+        btn.textContent?.includes("Connect"),
+      );
+      expect(connectBtn?.disabled).toBe(false);
+
+      await act(async () => {
+        connectBtn!.click();
+      });
+      for (let i = 0; i < 5; i++) await flushReact();
+
+      expect(mockAgentsApi.hire).toHaveBeenCalledWith(
+        "company-new",
+        expect.objectContaining({
+          adapterType: "pi_local",
+          adapterConfig: expect.objectContaining({
+            model: "rissets/llm-hd/qwen3.8-27b",
           }),
         }),
       );

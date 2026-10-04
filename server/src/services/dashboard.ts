@@ -1,4 +1,4 @@
-import { and, eq, gte, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, approvals, companies, costEvents, heartbeatRuns, issues } from "@paperclipai/db";
 import { notFound } from "../errors.js";
@@ -27,7 +27,7 @@ function getRecentUtcDateKeys(now: Date, days: number): string[] {
 export function dashboardService(db: Db) {
   const budgets = budgetService(db);
   return {
-    summary: async (companyId: string) => {
+    summary: async (companyId: string, allowedAgentIds?: string[] | null) => {
       // This lookup only reads the company row. Rebuild it after a transient
       // disconnect; do not replay the later summary or budget workflows.
       const company = await retryIdempotentDatabaseOperation(() => db
@@ -38,16 +38,34 @@ export function dashboardService(db: Db) {
 
       if (!company) throw notFound("Company not found");
 
+      const agentConditions = [eq(agents.companyId, companyId)];
+      if (allowedAgentIds !== null && allowedAgentIds !== undefined) {
+        if (allowedAgentIds.length === 0) {
+          agentConditions.push(sql`1 = 0`);
+        } else {
+          agentConditions.push(inArray(agents.id, allowedAgentIds));
+        }
+      }
+
       const agentRows = await db
         .select({ status: agents.status, count: sql<number>`count(*)` })
         .from(agents)
-        .where(eq(agents.companyId, companyId))
+        .where(and(...agentConditions))
         .groupBy(agents.status);
+
+      const taskConditions = [eq(issues.companyId, companyId), executionIssueCondition()];
+      if (allowedAgentIds !== null && allowedAgentIds !== undefined) {
+        if (allowedAgentIds.length === 0) {
+          taskConditions.push(sql`1 = 0`);
+        } else {
+          taskConditions.push(inArray(issues.assigneeAgentId, allowedAgentIds));
+        }
+      }
 
       const taskRows = await retryIdempotentDatabaseOperation(() => db
         .select({ status: issues.status, count: sql<number>`count(*)` })
         .from(issues)
-        .where(and(eq(issues.companyId, companyId), executionIssueCondition()))
+        .where(and(...taskConditions))
         .groupBy(issues.status));
 
       const pendingApprovals = await retryIdempotentDatabaseOperation(() => db
@@ -109,6 +127,20 @@ export function dashboardService(db: Db) {
       // created after the run it retries, so ancestors of an out-of-window
       // child are themselves out of window and invisible to the membership
       // test below. Unbounded, the seed walks every run the company ever had.
+      const agentRunFilter =
+        allowedAgentIds !== null && allowedAgentIds !== undefined
+          ? allowedAgentIds.length === 0
+            ? sql`AND 1 = 0`
+            : sql`AND run.agent_id IN (${sql.join(allowedAgentIds.map(id => sql`${id}`), sql`, `)})`
+          : sql``;
+
+      const childRunFilter =
+        allowedAgentIds !== null && allowedAgentIds !== undefined
+          ? allowedAgentIds.length === 0
+            ? sql`AND 1 = 0`
+            : sql`AND child.agent_id IN (${sql.join(allowedAgentIds.map(id => sql`${id}`), sql`, `)})`
+          : sql``;
+
       const runActivityRows = (await db.execute(sql`
         WITH RECURSIVE recovered_runs(id) AS (
           SELECT parent.id
@@ -117,12 +149,14 @@ export function dashboardService(db: Db) {
           WHERE child.company_id = ${companyId}
             AND child.status = 'succeeded'
             AND child.created_at >= ${runActivityStart.toISOString()}::timestamptz
+            ${childRunFilter}
           UNION
           SELECT parent.id
           FROM recovered_runs rr
           JOIN ${heartbeatRuns} AS child ON child.id = rr.id
           JOIN ${heartbeatRuns} AS parent ON parent.id = child.retry_of_run_id
           WHERE child.created_at >= ${runActivityStart.toISOString()}::timestamptz
+            ${childRunFilter}
         )
         SELECT
           to_char(run.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS date,
@@ -133,6 +167,7 @@ export function dashboardService(db: Db) {
         FROM ${heartbeatRuns} AS run
         WHERE run.company_id = ${companyId}
           AND run.created_at >= ${runActivityStart.toISOString()}::timestamptz
+          ${agentRunFilter}
         GROUP BY date, run.status, run.error_code, recovered
       `)) as unknown as Iterable<{
         date: string;

@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import express, { Router, type NextFunction, type Request, type Response } from "express";
 import multer from "multer";
-import { and, count as countFn, eq } from "drizzle-orm";
+import { and, count as countFn, eq, inArray, or, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
-import { agents as agentsTable } from "@paperclipai/db";
+import { agents as agentsTable, issues, projects } from "@paperclipai/db";
 import type { CompanyPortabilityImportResult } from "@paperclipai/shared";
 import {
   MAX_ZIP_ENTRY_DECOMPRESSED_BYTES,
@@ -69,6 +69,7 @@ import { getHiddenSettings } from "../services/settings-visibility.js";
 import type { StorageService } from "../storage/types.js";
 import { assertBoard, assertCompanyAccess, assertInstanceAdmin, getActorInfo, hasCompanyAccess } from "./authz.js";
 import { COMPANY_IMPORT_ROUTE_PATH } from "./company-import-paths.js";
+import { userRbacService } from "../services/user-rbac-service.js";
 
 // A company import can arrive one of two ways on the import + preview routes:
 //   • application/json — the original inline body `{ source, target, ... }`,
@@ -347,7 +348,7 @@ export function companyRoutes(db: Db, storage?: StorageService, options?: Compan
     offset: z.string().optional(),
   }).passthrough();
 
-  function assertImportTargetAccess(
+  async function assertImportTargetAccess(
     req: Request,
     target: { mode: "new_company" } | { mode: "existing_company"; companyId: string },
   ) {
@@ -356,11 +357,24 @@ export function companyRoutes(db: Db, storage?: StorageService, options?: Compan
       return;
     }
     assertCompanyAccess(req, target.companyId);
+    if (!(req.actor.source === "local_implicit" || req.actor.isInstanceAdmin)) {
+      const isOwnerOrAdmin = await userRbacService(db).isOwnerOrAdmin(target.companyId, req.actor.userId ?? "");
+      if (!isOwnerOrAdmin) {
+        throw forbidden("Company admin access required");
+      }
+    }
   }
 
   async function assertSameCompanyCeoAgentOrBoard(req: Request, companyId: string, capability: string) {
     assertCompanyAccess(req, companyId);
     if (req.actor.type === "board") {
+      if (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin) {
+        return;
+      }
+      const isOwnerOrAdmin = await userRbacService(db).isOwnerOrAdmin(companyId, req.actor.userId ?? "");
+      if (!isOwnerOrAdmin) {
+        throw forbidden("Company admin access required");
+      }
       return;
     }
     if (!req.actor.agentId) throw forbidden("Agent authentication required");
@@ -421,8 +435,37 @@ export function companyRoutes(db: Db, storage?: StorageService, options?: Compan
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     const query = companyArtifactsQuerySchema.parse(req.query);
+
+    let issueConditions: SQL[] | undefined;
+    if (req.actor.type === "board" && req.actor.userId && !req.actor.isInstanceAdmin) {
+      const rbac = userRbacService(db);
+      const isOwnerOrAdmin = await rbac.isOwnerOrAdmin(companyId, req.actor.userId);
+      if (!isOwnerOrAdmin) {
+        const assignedProjects = await rbac.getAssignedProjectsForUser(companyId, req.actor.userId);
+        const assignedAgents = await rbac.getAssignedAgentsForUser(companyId, req.actor.userId);
+
+        const createdProjects = await db
+          .select({ id: projects.id })
+          .from(projects)
+          .where(and(eq(projects.companyId, companyId), eq(projects.createdByUserId, req.actor.userId)));
+        const allowedProjectIds = [...new Set([...assignedProjects, ...createdProjects.map((p) => p.id)])];
+
+        const conditions: SQL[] = [];
+        if (allowedProjectIds.length > 0) {
+          conditions.push(inArray(issues.projectId, allowedProjectIds));
+        }
+        conditions.push(eq(issues.assigneeUserId, req.actor.userId));
+        conditions.push(eq(issues.createdByUserId, req.actor.userId));
+        if (assignedAgents.length > 0) {
+          conditions.push(inArray(issues.assigneeAgentId, assignedAgents));
+        }
+        issueConditions = [or(...conditions)!];
+      }
+    }
+
     res.json(await artifacts.list(companyId, query, {
       userId: query.starred && req.actor.type === "board" ? req.actor.userId : undefined,
+      issueConditions,
     }));
   });
 
@@ -576,7 +619,7 @@ export function companyRoutes(db: Db, storage?: StorageService, options?: Compan
   router.post("/import/preview", async (req, res) => {
     assertBoard(req);
     const body = companyPortabilityPreviewSchema.parse(await resolveImportPayload(req, res));
-    assertImportTargetAccess(req, body.target);
+    await assertImportTargetAccess(req, body.target);
     const preview = await portability.previewImport(body);
     res.json(preview);
   });
@@ -620,7 +663,7 @@ export function companyRoutes(db: Db, storage?: StorageService, options?: Compan
     const operation = async () => {
       try {
         const importBody = companyPortabilityImportSchema.parse(rawImportBody);
-        assertImportTargetAccess(req, importBody.target);
+        await assertImportTargetAccess(req, importBody.target);
         const activity = importedCompanyActivityContext(actor, importBody.include ?? null);
         const result = await portability.importBundle(importBody, boardUserId, {
           pauseAutomations: importBody.pauseAutomations === true,
@@ -1345,6 +1388,12 @@ export function companyRoutes(db: Db, storage?: StorageService, options?: Compan
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     assertBoard(req);
+    if (!(req.actor.source === "local_implicit" || req.actor.isInstanceAdmin)) {
+      const isOwnerOrAdmin = await userRbacService(db).isOwnerOrAdmin(companyId, req.actor.userId ?? "");
+      if (!isOwnerOrAdmin) {
+        throw forbidden("Company admin access required");
+      }
+    }
     const company = await svc.archive(companyId, getActorInfo(req));
     if (!company) {
       res.status(404).json({ error: "Company not found" });
@@ -1357,6 +1406,12 @@ export function companyRoutes(db: Db, storage?: StorageService, options?: Compan
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     assertBoard(req);
+    if (!(req.actor.source === "local_implicit" || req.actor.isInstanceAdmin)) {
+      const isOwnerOrAdmin = await userRbacService(db).isOwnerOrAdmin(companyId, req.actor.userId ?? "");
+      if (!isOwnerOrAdmin) {
+        throw forbidden("Company admin access required");
+      }
+    }
     const company = await svc.remove(companyId);
     if (!company) {
       res.status(404).json({ error: "Company not found" });

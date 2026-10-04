@@ -2,8 +2,9 @@
 name: first-task
 description: >
   Guide the user's first Paperclip task when its description invokes /first-task.
-  Interpret the opening answer, clarify their goal, propose a plan or a single
-  task, and wait for approval before hiring agents or executing approved work.
+  Interpret the opening answer, clarify their organization & workspace goals,
+  propose a workspace plan and agent team architecture, and wait for approval
+  before hiring agents or executing approved work.
 ---
 
 # First task
@@ -17,22 +18,33 @@ next steps directly. This is a wording preference: answer truthfully if the
 user asks about the workflow, and always disclose relevant permissions,
 security implications, and execution actions.
 
-This is the user's first task in Paperclip. Your job is to understand what they want and propose a path forward. A greeting and an opening question card were already posted for you; the card offered two choices: "Interview me and propose a plan and an agent team to execute it." (option `interview`) or "I have a task in mind" (option `task`, with a text field). You are running because the user answered that card (the answer is in your wake payload) or wrote a message instead of answering. Don't re-introduce yourself and don't post the opening card again.
+This is the user's first task in Paperclip. Your job is to onboard the organization workspace and design the AI agent team. An opening greeting and question card were already posted for you; the card offered two choices: option `interview` ("Wawancara onboarding workspace & rancang tim AI agent") or option `task` ("Saya sudah memiliki deskripsi kebutuhan organisasi & workspace", with free-text field). You are running because the user answered that card (the answer is in your wake payload) or wrote a message instead of answering. Don't re-introduce yourself and don't post the opening card again.
 
 Work in this order.
 
 1. Take the path the user picked.
 
-   - `interview` → ask the user 3–4 questions in one Paperclip question card (`request_human_input` with `interactionKind: "questions"` when available, otherwise the `ask_user_questions` API) that pin down what their organization does, what they want to achieve first, any constraints (time, budget, tools), and what "done" looks like. Don't guess; ask. Don't post anything else before the card. The answers lead to the plan-and-team path in step 2.
+   - `interview` → ask the user 4 questions in one Paperclip question card (`request_human_input` with `interactionKind: "questions"` when available, otherwise the `ask_user_questions` API) focused on organization & workspace onboarding. Do not guess; ask. The 4 required questions are:
+     1. **Identitas & Tujuan Organisasi**: Nama organisasi, bidang/industri, deskripsi singkat kegiatan organisasi, dan siapa target penggunanya.
+     2. **Objektif Workspace**: Apa masalah utama yang ingin diselesaikan atau target apa yang ingin dicapai dengan platform ini (misal: efisiensi customer service, otomatisasi operasional, analisis dokumen legal/finansial, dll)?
+     3. **Kebutuhan AI Agent**: Berapa estimasi jumlah AI agent yang ingin dibuat? Apa peran, kemampuan spesifik (tools/skills), dan tone of voice (gaya bahasa) dari masing-masing agent? Dari mana agent akan mengambil sumber pengetahuan (knowledge base / RAG: dokumen, database, Notion, API)?
+     4. **Distribusi & Integrasi**: Di channel mana AI agent ini akan diimplementasikan (misal: WhatsApp, Slack, API Backend, Website, dashboard internal)?
+     Don't post anything else before the card. The answers lead to the organization workspace plan-and-team path in step 2.
 
-   - `task` → the text they typed is the task. If it is clear enough to propose on, go straight to step 2. If not, reply by asking 2–3 questions specific to their message (concrete goal, constraints, what "done" looks like), then go to step 2.
+   - `task` → the user provided their organization and workspace requirements directly. Evaluate whether their description covers the 4 key pillars (Identitas Organisasi, Objektif Workspace, Kebutuhan AI Agent & RAG, Distribusi/Integrasi). If clear and sufficient, go straight to step 2. If important details are missing, reply by asking 2–3 questions in a question card targeting the missing pillars, then go to step 2.
 
    - If they wrote a message instead of answering the card, treat the message as the `task` path.
 
 2. Propose, then wait for acceptance.
 
    - Choose the proposal form from the user’s request first: an explicit plan request or the interview path always requires a saved plan, even when the task description says `confirmation`.
-   - If they want a plan, save a `plan` document on this onboarding task describing the goal, scope, steps, proposed team, and what done means. Post one `request_checkbox_confirmation` targeting the saved plan revision. A card or thread message alone is not a saved plan. This applies to explicit plan requests regardless of the single-task proposal mode. Proposing a team does not authorize hiring it.
+   - If they want a plan or came from the interview/workspace onboarding path, save a `plan` document on this onboarding task titled "Rencana Workspace & Arsitektur Tim AI Agent" describing:
+     * Ringkasan Profil & Identitas Organisasi
+     * Objektif & Ruang Lingkup Workspace
+     * Arsitektur Tim AI Agent (daftar agent yang diusulkan, peran, capabilities/tools, tone of voice, dan sumber pengetahuan / RAG)
+     * Rencana Distribusi & Integrasi Channel (WhatsApp, Slack, API, Web, dll)
+     * Roadmap Pelaksanaan & Langkah Berikutnya
+     Post one `request_checkbox_confirmation` targeting the saved plan revision. A card or thread message alone is not a saved plan. This applies to explicit plan requests regardless of the single-task proposal mode. Proposing a team does not authorize hiring it.
    - If they want one thing done, propose exactly one child task with a clear outcome and scope. Ask them to accept it before creating the child. Do not produce the requested finished work inside the proposal, even when it is quick to do.
    - For a single-task proposal, follow the `Single-task proposal mode` saved in the task description: `confirmation` means one `request_confirmation` card describing the child task, without a plan document; `plan` means save a short `plan` document describing that same child task and post one `request_checkbox_confirmation` targeting its saved revision.
    - Keep this task `in_review` while waiting. You may clarify, research for planning, and save or revise a plan/proposal before acceptance. Do not hire, create execution tasks, perform the deliverable, save finished output, or claim completion yet.

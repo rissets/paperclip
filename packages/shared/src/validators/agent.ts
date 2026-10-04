@@ -275,6 +275,7 @@ export const testAdapterEnvironmentSchema = z.object({
     ZAI_API_KEY: z.string().max(16384),
     KIMI_API_KEY: z.string().max(16384),
     MINIMAX_API_KEY: z.string().max(16384),
+    PI_API_KEY: z.string().max(16384),
   }).partial().strict().optional(),
   adapterConfig: adapterConfigSchema.optional().default({}),
   /**

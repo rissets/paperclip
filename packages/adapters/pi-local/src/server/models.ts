@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
 import type { AdapterModel } from "@paperclipai/adapter-utils";
 import { asString, runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 
@@ -212,6 +215,21 @@ export function normalizePiModelId(model: string, availableModels?: AdapterModel
   const trimmed = model.trim();
   if (!trimmed) return trimmed;
   if (availableModels?.some((m) => m.id === trimmed)) return trimmed;
+  if (availableModels) {
+    const matching = availableModels.find((m) => {
+      const slashIdx = m.id.indexOf("/");
+      if (slashIdx !== -1 && m.id.slice(slashIdx + 1) === trimmed) return true;
+      return false;
+    });
+    if (matching) return matching.id;
+  }
+  if (trimmed.startsWith("custom/")) {
+    const withoutCustom = trimmed.slice("custom/".length);
+    if (availableModels?.some((m) => m.id === withoutCustom)) return withoutCustom;
+  } else {
+    const withCustom = `custom/${trimmed}`;
+    if (availableModels?.some((m) => m.id === withCustom)) return withCustom;
+  }
   if (trimmed.startsWith("cmd/")) {
     const candidate = `rissets/${trimmed}`;
     if (!availableModels || availableModels.some((m) => m.id === candidate)) {
@@ -346,7 +364,18 @@ export async function syncCustomPiModels(input: {
         throw new Error("No models found in endpoint response.");
       }
 
-      return sortModels(dedupeModels(extracted));
+      const dedupled = sortModels(dedupeModels(extracted));
+      try {
+        await savePiProviderToHost({
+          endpoint: baseUrl,
+          apiKey,
+          models: dedupled,
+        });
+      } catch {
+        // ignore save error
+      }
+
+      return dedupled;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
     }
@@ -354,3 +383,178 @@ export async function syncCustomPiModels(input: {
 
   throw lastError ?? new Error("Failed to connect to the custom API endpoint.");
 }
+
+export interface PiConnection {
+  id: string;
+  name: string;
+  baseUrl: string;
+  hasApiKey: boolean;
+  modelsCount: number;
+  models: AdapterModel[];
+}
+
+export async function savePiProviderToHost(input: {
+  endpoint: string;
+  apiKey?: string;
+  models: AdapterModel[];
+  providerName?: string;
+}): Promise<string> {
+  const hostDir = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
+  const modelsPath = path.join(hostDir, "models.json");
+  const baseUrl = input.endpoint.replace(/\/+$/, "");
+
+  let data: any = { providers: {} };
+  try {
+    const raw = await fs.readFile(modelsPath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") data = parsed;
+    if (!data.providers || typeof data.providers !== "object") data.providers = {};
+  } catch {
+    // initialize new object
+  }
+
+  let targetProviderKey = "";
+  if (input.providerName && data.providers[input.providerName]) {
+    targetProviderKey = input.providerName;
+  } else {
+    for (const [key, p] of Object.entries(data.providers as Record<string, any>)) {
+      if (p && typeof p === "object" && typeof p.baseUrl === "string") {
+        const pBase = p.baseUrl.replace(/\/+$/, "");
+        if (pBase === baseUrl) {
+          targetProviderKey = key;
+          break;
+        }
+      }
+    }
+  }
+
+  if (!targetProviderKey) {
+    if (input.providerName) {
+      targetProviderKey = input.providerName;
+    } else {
+      try {
+        const u = new URL(baseUrl);
+        const hostParts = u.hostname.split(".");
+        targetProviderKey = hostParts.length >= 2 ? hostParts[hostParts.length - 2] : "custom";
+      } catch {
+        targetProviderKey = "custom";
+      }
+      if (data.providers[targetProviderKey] && data.providers[targetProviderKey].baseUrl !== baseUrl) {
+        targetProviderKey = `custom-${Date.now().toString(36)}`;
+      }
+    }
+  }
+
+  const existingProvider = data.providers[targetProviderKey] || {};
+  const existingModels: any[] = Array.isArray(existingProvider.models) ? existingProvider.models : [];
+  const existingModelIds = new Set(existingModels.map((m: any) => m.id || m.name));
+
+  const newModels = [...existingModels];
+  for (const m of input.models) {
+    if (!existingModelIds.has(m.id)) {
+      newModels.push({
+        id: m.id,
+        name: m.label || m.id,
+        reasoning: true,
+        input: ["text"],
+      });
+      existingModelIds.add(m.id);
+    }
+  }
+
+  data.providers[targetProviderKey] = {
+    ...existingProvider,
+    baseUrl,
+    api: existingProvider.api || "openai-completions",
+    ...(input.apiKey ? { apiKey: input.apiKey } : {}),
+    models: newModels,
+  };
+
+  try {
+    await fs.mkdir(hostDir, { recursive: true });
+    await fs.writeFile(modelsPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+    discoveryCache.clear();
+  } catch {
+    // ignore
+  }
+
+  return targetProviderKey;
+}
+
+export async function listExistingPiConnections(): Promise<PiConnection[]> {
+  const hostDir = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
+  const modelsPath = path.join(hostDir, "models.json");
+  const connections: PiConnection[] = [];
+
+  try {
+    const raw = await fs.readFile(modelsPath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && parsed.providers && typeof parsed.providers === "object") {
+      for (const [providerId, config] of Object.entries(parsed.providers as Record<string, any>)) {
+        if (!config || typeof config !== "object") continue;
+        const baseUrl = asString(config.baseUrl, "");
+        const modelsList: AdapterModel[] = [];
+        if (Array.isArray(config.models)) {
+          for (const m of config.models) {
+            const rawId = asString(m?.id || m?.name, "");
+            if (rawId) {
+              const label = asString(m?.name || m?.label, rawId);
+              modelsList.push({
+                id: `${providerId}/${rawId}`,
+                label: label !== rawId ? `${label} (${providerId})` : `${rawId} (${providerId})`,
+              });
+            }
+          }
+        }
+        connections.push({
+          id: providerId,
+          name: providerId,
+          baseUrl,
+          hasApiKey: !!(config.apiKey && String(config.apiKey).trim().length > 0),
+          modelsCount: Array.isArray(config.models) ? config.models.length : 0,
+          models: dedupeModels(modelsList),
+        });
+      }
+    }
+  } catch {
+    // models.json not present
+  }
+
+  const envProvidersRaw = process.env.PAPERCLIP_PI_PROVIDERS;
+  if (envProvidersRaw) {
+    try {
+      const parsedEnv = JSON.parse(envProvidersRaw);
+      if (parsedEnv && typeof parsedEnv === "object" && !Array.isArray(parsedEnv)) {
+        for (const [providerId, config] of Object.entries(parsedEnv as Record<string, any>)) {
+          if (!config || typeof config !== "object") continue;
+          if (connections.some((c) => c.id === providerId)) continue;
+          const baseUrl = asString(config.baseUrl, "");
+          const modelsList: AdapterModel[] = [];
+          if (Array.isArray(config.models)) {
+            for (const m of config.models) {
+              const rawId = asString(m?.id || m?.name, "");
+              if (rawId) {
+                const label = asString(m?.name || m?.label, rawId);
+                modelsList.push({
+                  id: `${providerId}/${rawId}`,
+                  label: label !== rawId ? `${label} (${providerId})` : `${rawId} (${providerId})`,
+                });
+              }
+            }
+          }
+          connections.push({
+            id: providerId,
+            name: providerId,
+            baseUrl,
+            hasApiKey: !!(config.apiKey && String(config.apiKey).trim().length > 0),
+            modelsCount: Array.isArray(config.models) ? config.models.length : 0,
+            models: dedupeModels(modelsList),
+          });
+        }
+      }
+    } catch {}
+  }
+
+  return connections;
+}
+

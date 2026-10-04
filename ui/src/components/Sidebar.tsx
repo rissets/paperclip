@@ -44,6 +44,7 @@ import { attentionBadgeCount } from "../lib/attention";
 import { useInboxBadge } from "../hooks/useInboxBadge";
 import { useStreamlinedUiEnabled } from "../hooks/useStreamlinedUiEnabled";
 import { usePublishSharedQueryData, useSharedPollingQuery } from "../hooks/useSharedPolling";
+import { useUserRbac } from "@/hooks/useUserRbac";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn, SIDEBAR_RAIL_HIDDEN_LABEL } from "../lib/utils";
 import { PluginSlotOutlet } from "@/plugins/slots";
@@ -53,6 +54,7 @@ import { primarySidebarStyles } from "./primary-sidebar-styles";
 
 export function Sidebar({ children }: { children?: ReactNode }) {
   const { openNewIssue } = useDialogActions();
+  const { canManageSettings } = useUserRbac();
   const { enabled: agentChatEnabled } = useAgentChatEnabled();
   // Every labeled section is collapsible (session-scoped, default open) —
   // one policy across static nav groups and the data-driven sections.
@@ -267,7 +269,9 @@ export function Sidebar({ children }: { children?: ReactNode }) {
               <SidebarNavItem to="/timeline" label="Timeline" icon={GanttChartSquare} />
               <SidebarNavItem to="/costs" label="Costs" icon={DollarSign} />
               <SidebarNavItem to="/activity" label="Activity" icon={History} />
-              <SidebarNavItem to="/company/settings" label="Settings" icon={Settings} />
+              {canManageSettings ? (
+                <SidebarNavItem to="/company/settings" label="Settings" icon={Settings} />
+              ) : null}
             </SidebarSection>
           </>
         )}

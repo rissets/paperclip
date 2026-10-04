@@ -103,4 +103,28 @@ describe("pi models", () => {
       }
     });
   });
+
+  it("normalizes model ID using available models", () => {
+    const available = [
+      { id: "rissets/llm-hd/qwen3.8-27b", label: "Qwen 3.8:27 (HD)" },
+      { id: "custom/llama3:latest", label: "Llama 3" },
+    ];
+    expect(normalizePiModelId("llm-hd/qwen3.8-27b", available)).toBe("rissets/llm-hd/qwen3.8-27b");
+    expect(normalizePiModelId("rissets/llm-hd/qwen3.8-27b", available)).toBe("rissets/llm-hd/qwen3.8-27b");
+    expect(normalizePiModelId("llama3:latest", available)).toBe("custom/llama3:latest");
+  });
+
+  describe("listExistingPiConnections", () => {
+    it("returns array of connections", async () => {
+      const { listExistingPiConnections } = await import("./models.js");
+      const conns = await listExistingPiConnections();
+      expect(Array.isArray(conns)).toBe(true);
+      if (conns.length > 0) {
+        expect(conns[0]).toHaveProperty("id");
+        expect(conns[0]).toHaveProperty("name");
+        expect(conns[0]).toHaveProperty("baseUrl");
+        expect(conns[0]).toHaveProperty("models");
+      }
+    });
+  });
 });

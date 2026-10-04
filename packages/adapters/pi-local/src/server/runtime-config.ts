@@ -87,6 +87,21 @@ function parseProviderConfig(
   }
 }
 
+async function readHostPiProviders(): Promise<Record<string, unknown>> {
+  const hostDir = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
+  const modelsPath = path.join(hostDir, "models.json");
+  try {
+    const raw = await fs.readFile(modelsPath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (isPlainObject(parsed) && isPlainObject(parsed.providers)) {
+      return parsed.providers;
+    }
+  } catch {
+    // ignore
+  }
+  return {};
+}
+
 // Materialize custom Pi providers supplied via PAPERCLIP_PI_PROVIDERS (a JSON
 // object in Pi's models.json "providers" shape) into a managed agent-config dir.
 //
@@ -106,6 +121,7 @@ function parseProviderConfig(
 // and repoints PI_CODING_AGENT_DIR at the in-sandbox copy.
 export async function preparePiRuntimeConfig(input: {
   env: Record<string, string>;
+  mergeHostProviders?: boolean;
 }): Promise<PreparedPiRuntimeConfig> {
   const resolveEnv = (name: string): string | undefined => input.env[name] ?? process.env[name];
   const { providers, warning } = parseProviderConfig(
@@ -123,11 +139,35 @@ export async function preparePiRuntimeConfig(input: {
 
   const agentConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pi-agent-config-"));
   try {
+    const shouldMerge =
+      input.mergeHostProviders ?? input.env.PAPERCLIP_PI_MERGE_HOST_PROVIDERS === "true";
+    const hostProviders = shouldMerge ? await readHostPiProviders() : {};
+    const mergedProviders = { ...hostProviders, ...providers };
+
     await fs.writeFile(
       path.join(agentConfigDir, "models.json"),
-      `${JSON.stringify({ providers }, null, 2)}\n`,
+      `${JSON.stringify({ providers: mergedProviders }, null, 2)}\n`,
       "utf8",
     );
+
+    if (shouldMerge) {
+      const hostDir = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
+      try {
+        const entries = await fs.readdir(hostDir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (entry.name === "models.json") continue;
+          const src = path.join(hostDir, entry.name);
+          const dst = path.join(agentConfigDir, entry.name);
+          try {
+            await fs.symlink(src, dst);
+          } catch {
+            // ignore symlink errors
+          }
+        }
+      } catch {
+        // ignore readdir errors
+      }
+    }
   } catch (err) {
     // Never leak the temp dir when the write fails (e.g. disk-full): the
     // caller only receives the cleanup handle on success.

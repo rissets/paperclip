@@ -28,6 +28,7 @@ import { SIDEBAR_SCROLL_RESET_STATE } from "../lib/navigation-scroll";
 import { queryKeys } from "../lib/queryKeys";
 import { cn, agentRouteRef, agentUrl, SIDEBAR_RAIL_HIDDEN_LABEL } from "../lib/utils";
 import { useAgentOrder } from "../hooks/useAgentOrder";
+import { useUserRbac } from "@/hooks/useUserRbac";
 import {
   isStarred,
   resourceMembershipState,
@@ -138,6 +139,7 @@ function SidebarAgentItem({
   onToggleStar?: (agent: Agent, starred: boolean) => void;
   starPending?: boolean;
 }) {
+  const { canEditAgent } = useUserRbac();
   const routeRef = agentRouteRef(agent);
   const href = activeTab ? `${agentUrl(agent)}/${activeTab}` : agentUrl(agent);
   const editHref = `${agentUrl(agent)}/configuration`;
@@ -253,18 +255,22 @@ function SidebarAgentItem({
               <DropdownMenuSeparator />
             </>
           ) : null}
-          <DropdownMenuItem asChild>
-            <Link
-              to={editHref}
-              onClick={() => {
-                if (isMobile) setSidebarOpen(false);
-              }}
-            >
-              <Pencil className="size-4" />
-              <span>Edit agent</span>
-            </Link>
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
+          {canEditAgent(agent.id) ? (
+            <>
+              <DropdownMenuItem asChild>
+                <Link
+                  to={editHref}
+                  onClick={() => {
+                    if (isMobile) setSidebarOpen(false);
+                  }}
+                >
+                  <Pencil className="size-4" />
+                  <span>Edit agent</span>
+                </Link>
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+            </>
+          ) : null}
           <DropdownMenuItem
             onClick={() => {
               if (pauseResumeDisabled) return;
@@ -305,6 +311,7 @@ export function SidebarAgents({ streamlined = false }: { streamlined?: boolean }
   const rail = collapsed && !peeking;
   const { pushToast } = useToastActions();
   const location = useLocation();
+  const { canAddAgent, isOwnerOrAdmin, assignedAgentIds } = useUserRbac();
 
   const { data: agents } = useQuery({
     queryKey: queryKeys.agents.list(selectedCompanyId!),
@@ -371,7 +378,7 @@ export function SidebarAgents({ streamlined = false }: { streamlined?: boolean }
   }, [liveCountByAgent]);
 
   const visibleAgents = useMemo(() => {
-    const filtered = (agents ?? []).filter(
+    let filtered = (agents ?? []).filter(
       (a: Agent) =>
         a.status !== "terminated" &&
         (
@@ -379,8 +386,11 @@ export function SidebarAgents({ streamlined = false }: { streamlined?: boolean }
           resourceMembershipState(membershipsQuery.data, "agent", a.id) !== "left"
         )
     );
+    if (!isOwnerOrAdmin && assignedAgentIds) {
+      filtered = filtered.filter((a: Agent) => assignedAgentIds.includes(a.id));
+    }
     return filtered;
-  }, [agents, membershipsQuery.data, membershipsQuery.isSuccess]);
+  }, [agents, membershipsQuery.data, membershipsQuery.isSuccess, isOwnerOrAdmin, assignedAgentIds]);
   const currentUserId = session?.user?.id ?? session?.session?.userId ?? null;
   const sortModeStorageKey = useMemo(() => {
     if (!selectedCompanyId) return null;
@@ -633,11 +643,11 @@ export function SidebarAgents({ streamlined = false }: { streamlined?: boolean }
     <SidebarSection
       label="Agents"
       collapsible={{ open, onOpenChange: setOpen }}
-      headerAction={{
+      headerAction={canAddAgent ? {
         ariaLabel: "New agent",
         icon: Plus,
         onClick: openNewAgent,
-      }}
+      } : undefined}
       menu={{
         ariaLabel: "Agents section actions",
         actions: [

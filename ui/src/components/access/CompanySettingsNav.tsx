@@ -23,6 +23,7 @@ type CompanySettingsTab = (typeof items)[number]["value"];
 
 /** Tab values suppressed when their page is operator-hidden. */
 const hiddenSettingKeyByTab: Partial<Record<CompanySettingsTab, string>> = {
+  general: "company.settings",
   export: "company.export",
   import: "company.import",
   members: "company.members",

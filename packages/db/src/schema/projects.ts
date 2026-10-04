@@ -22,6 +22,7 @@ export const projects = pgTable(
     pausedAt: timestamp("paused_at", { withTimezone: true }),
     executionWorkspacePolicy: jsonb("execution_workspace_policy").$type<Record<string, unknown>>(),
     archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdByUserId: text("created_by_user_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

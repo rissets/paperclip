@@ -239,7 +239,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const hasCustomPromptTemplate = asString(config.promptTemplate, "").trim().length > 0;
   const command = asString(config.command, "pi");
   const rawModel = asString(config.model, "").trim();
-  const model = normalizePiModelId(rawModel);
+  let model = normalizePiModelId(rawModel);
   const thinking = asString(config.thinking, "").trim();
 
   // Parse model into provider and model id
@@ -334,7 +334,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // Materialize custom Pi providers (PAPERCLIP_PI_PROVIDERS) into a managed
   // PI_CODING_AGENT_DIR before runtimeEnv is computed, so both local validation
   // and the spawned Pi process resolve models against the managed models.json.
-  const preparedRuntimeConfig = await preparePiRuntimeConfig({ env });
+  const preparedRuntimeConfig = await preparePiRuntimeConfig({
+    env,
+    mergeHostProviders: true,
+  });
   const localAgentConfigDir = preparedRuntimeConfig.agentConfigDir ?? "";
   if (localAgentConfigDir) {
     env.PI_CODING_AGENT_DIR = localAgentConfigDir;
@@ -396,12 +399,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     });
 
     if (!executionTargetIsRemote) {
-      await ensurePiModelConfiguredAndAvailable({
+      const availableModels = await ensurePiModelConfiguredAndAvailable({
         model,
         command,
         cwd,
         env: runtimeEnv,
       });
+      model = normalizePiModelId(model, availableModels);
     }
 
     const extraArgs = (() => {
@@ -646,8 +650,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       // Use --append-system-prompt to extend Pi's default system prompt
       args.push("--append-system-prompt", renderedSystemPromptExtension);
 
-      if (provider) args.push("--provider", provider);
-      if (modelId) args.push("--model", modelId);
+      const effectiveProvider = parseModelProvider(model) ?? provider;
+      const effectiveModelId = parseModelId(model) ?? modelId;
+      if (effectiveProvider) args.push("--provider", effectiveProvider);
+      if (effectiveModelId) args.push("--model", effectiveModelId);
       if (thinking) args.push("--thinking", thinking);
 
       args.push("--tools", "read,bash,edit,write,grep,find,ls");
@@ -819,8 +825,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         sessionId: resolvedSessionId,
         sessionParams: resolvedSessionParams,
         sessionDisplayId: resolvedSessionId,
-        provider: provider,
-        biller: resolvePiBiller(runtimeEnv, provider),
+        provider: parseModelProvider(model) ?? provider,
+        biller: resolvePiBiller(runtimeEnv, parseModelProvider(model) ?? provider),
         model: model,
         billingType: "unknown",
         costUsd: attempt.parsed.usage.costUsd,
