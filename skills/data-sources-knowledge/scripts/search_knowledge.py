@@ -73,6 +73,12 @@ def parse_args():
         default=os.environ.get("PAPERCLIP_API_KEY"),
         help="Paperclip API Bearer token (defaults to $PAPERCLIP_API_KEY)",
     )
+    parser.add_argument(
+        "--session-token",
+        type=str,
+        default=os.environ.get("PAPERCLIP_SESSION_TOKEN"),
+        help="Session token cookie for board authentication (defaults to $PAPERCLIP_SESSION_TOKEN)",
+    )
     return parser.parse_args()
 
 def main():
@@ -127,9 +133,21 @@ def main():
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 PrimbonAgent/1.0",
     }
     if args.api_key:
         headers["Authorization"] = f"Bearer {args.api_key}"
+    if args.session_token:
+        headers["Cookie"] = f"session_token={args.session_token}"
+        try:
+            from urllib.parse import urlparse
+            p = urlparse(endpoint)
+            headers["Origin"] = f"{p.scheme}://{p.netloc}"
+        except Exception:
+            headers["Origin"] = "http://localhost:3100"
+    if agent_id:
+        headers["X-Agent-ID"] = agent_id
+        headers["X-Paperclip-Agent-ID"] = agent_id
 
     req = urllib.request.Request(endpoint, data=req_data, headers=headers, method="POST")
 

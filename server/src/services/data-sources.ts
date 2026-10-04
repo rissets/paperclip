@@ -1093,6 +1093,19 @@ export class DataSourcesService {
   }
 
   /**
+   * Resolve a data source by UUID or name
+   */
+  async resolveDataSource(companyId: string, idOrName: string): Promise<DataSource | null> {
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(idOrName);
+    const whereCondition = and(
+      eq(dataSources.companyId, companyId),
+      isUuid ? eq(dataSources.id, idOrName) : or(eq(dataSources.name, idOrName), ilike(dataSources.name, idOrName)),
+    );
+    const [found] = await this.db.select().from(dataSources).where(whereCondition).limit(1);
+    return (found as any) || null;
+  }
+
+  /**
    * Run a direct read-only SQL query on an external database data source
    */
   async querySql(
@@ -1101,16 +1114,13 @@ export class DataSourcesService {
     sqlQuery: string,
     limit?: number,
   ): Promise<SqlQueryResult> {
-    const [ds] = await this.db
-      .select()
-      .from(dataSources)
-      .where(and(eq(dataSources.id, dataSourceId), eq(dataSources.companyId, companyId)));
+    const ds = await this.resolveDataSource(companyId, dataSourceId);
 
     if (!ds) {
       throw new Error(`Data source not found: ${dataSourceId}`);
     }
 
-    if (ds.sourceType === "clickhouse") {
+    if (ds.sourceType === "clickhouse" || ds.sourceType === "csv" || ds.sourceType === "excel") {
       return this.queryClickhouse(companyId, sqlQuery, limit);
     }
 

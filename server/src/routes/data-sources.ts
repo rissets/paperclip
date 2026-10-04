@@ -353,8 +353,14 @@ export function dataSourceRoutes(db: Db) {
     "/companies/:companyId/data-sources/:id/query-sql",
     async (req: Request, res: Response) => {
       const companyId = req.params.companyId as string;
-      const id = req.params.id as string;
+      const idOrName = req.params.id as string;
       await assertCompanyAccess(req, companyId, { readOnly: true });
+
+      const targetDs = await dsService.resolveDataSource(companyId, idOrName);
+      if (!targetDs) {
+        throw notFound(`Data source '${idOrName}' tidak ditemukan`);
+      }
+      const id = targetDs.id;
 
       const agentId = getRequestingAgentId(req);
       if (agentId) {
@@ -364,7 +370,7 @@ export function dataSourceRoutes(db: Db) {
         }
         const allowedIds = access.effectiveDataSourceIds || access.dataSourceIds || [];
         if (access.mode === "selected" && !allowedIds.includes(id)) {
-          throw forbidden(`Akses ditolak: Database '${id}' tidak ditugaskan ke agen ini`);
+          throw forbidden(`Akses ditolak: Database '${idOrName}' tidak ditugaskan ke agen ini`);
         }
       }
 
@@ -542,6 +548,17 @@ export function dataSourceRoutes(db: Db) {
 
           const builtInClickhouseNames = new Set([
             "system",
+            "tables",
+            "columns",
+            "databases",
+            "parts",
+            "parts_columns",
+            "query_log",
+            "settings",
+            "functions",
+            "metrics",
+            "events",
+            "asynchronous_metrics",
             "numbers",
             "numbers_mt",
             "zeros",
@@ -556,13 +573,17 @@ export function dataSourceRoutes(db: Db) {
           ]);
 
           // Extract table names referenced in FROM or JOIN clauses (ignoring database prefix if present, e.g. "FROM default.tbl" -> tbl)
-          const referencedTables = Array.from(
+          const rawTableMatches = Array.from(
             cleanSql.matchAll(/(?:from|join)\s+[`"']?([a-zA-Z0-9_]+)[`"']?(?:\.[`"']?([a-zA-Z0-9_]+)[`"']?)?/gi),
-          )
-            .map((m) => (m[2] || m[1]).toLowerCase())
-            .filter((t) => !reservedKeywords.has(t));
+          );
 
-          for (const tbl of referencedTables) {
+          for (const m of rawTableMatches) {
+            const dbPrefix = m[2] ? m[1].toLowerCase() : null;
+            const tbl = (m[2] || m[1]).toLowerCase();
+
+            if (reservedKeywords.has(tbl)) continue;
+            // System and information_schema introspection is read-only and always permitted
+            if (dbPrefix === "system" || dbPrefix === "information_schema") continue;
             if (builtInClickhouseNames.has(tbl)) continue;
             if (cteNames.has(tbl)) continue;
             if (!allowedTableNames.has(tbl)) {

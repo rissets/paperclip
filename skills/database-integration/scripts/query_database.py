@@ -27,13 +27,22 @@ import urllib.error
 def get_env_or_default(key, default=None):
     return os.environ.get(key, default)
 
-def make_request(url, method="GET", payload=None, api_key=None, agent_id=None):
+def make_request(url, method="GET", payload=None, api_key=None, agent_id=None, session_token=None):
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 PrimbonAgent/1.0",
     }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+    if session_token:
+        headers["Cookie"] = f"session_token={session_token}"
+        try:
+            from urllib.parse import urlparse
+            p = urlparse(url)
+            headers["Origin"] = f"{p.scheme}://{p.netloc}"
+        except Exception:
+            headers["Origin"] = "http://localhost:3100"
     if agent_id:
         headers["X-Agent-ID"] = agent_id
         headers["X-Paperclip-Agent-ID"] = agent_id
@@ -88,6 +97,7 @@ def main():
     parser.add_argument("--agent-id", type=str, default=get_env_or_default("PAPERCLIP_AGENT_ID"))
     parser.add_argument("--api-url", type=str, default=get_env_or_default("PAPERCLIP_API_URL", "http://localhost:3100"))
     parser.add_argument("--api-key", type=str, default=get_env_or_default("PAPERCLIP_API_KEY"))
+    parser.add_argument("--session-token", type=str, default=get_env_or_default("PAPERCLIP_SESSION_TOKEN"))
 
     args = parser.parse_args()
     base_url = args.api_url.rstrip("/")
@@ -97,6 +107,8 @@ def main():
     access_mode = get_env_or_default("PAPERCLIP_DATA_SOURCES_MODE", "all")
     assigned_raw = get_env_or_default("PAPERCLIP_ASSIGNED_DATA_SOURCES", "")
     assigned_ids = set([x.strip() for x in assigned_raw.split(",") if x.strip()])
+    assigned_col_raw = get_env_or_default("PAPERCLIP_ASSIGNED_COLLECTIONS", "")
+    assigned_col_ids = set([x.strip() for x in assigned_col_raw.split(",") if x.strip()])
 
     if not company_id:
         print("Error: Company ID is required (set $PAPERCLIP_COMPANY_ID or pass --company-id)", file=sys.stderr)
@@ -114,14 +126,18 @@ def main():
         url = f"{api_prefix}/companies/{company_id}/data-sources"
         if agent_id:
             url += f"?agentId={agent_id}"
-        sources = make_request(url, api_key=args.api_key, agent_id=agent_id)
+        sources = make_request(url, api_key=args.api_key, agent_id=agent_id, session_token=args.session_token)
         
         db_sources = []
         for ds in sources:
             st = ds.get("sourceType", "").lower()
             if st in ["mariadb", "mysql", "postgres", "postgresql", "database"]:
-                if access_mode == "selected" and assigned_ids and ds.get("id") not in assigned_ids:
-                    continue
+                if access_mode == "selected":
+                    col_id = ds.get("collectionId")
+                    allowed_by_ds = ds.get("id") in assigned_ids if assigned_ids else False
+                    allowed_by_col = col_id in assigned_col_ids if (col_id and assigned_col_ids) else False
+                    if not allowed_by_ds and not allowed_by_col and (assigned_ids or assigned_col_ids):
+                        continue
                 meta = ds.get("metadata") or {}
                 db_sources.append({
                     "Database Name": ds.get("name"),
@@ -153,7 +169,7 @@ def main():
     url = f"{api_prefix}/companies/{company_id}/data-sources"
     if agent_id:
         url += f"?agentId={agent_id}"
-    sources = make_request(url, api_key=args.api_key, agent_id=agent_id)
+    sources = make_request(url, api_key=args.api_key, agent_id=agent_id, session_token=args.session_token)
     target_ds = None
     for ds in sources:
         if ds.get("id") == args.db or ds.get("name", "").lower() == args.db.lower():
@@ -164,9 +180,13 @@ def main():
         print(f"Error: Database '{args.db}' not found.", file=sys.stderr)
         sys.exit(1)
 
-    if access_mode == "selected" and assigned_ids and target_ds.get("id") not in assigned_ids:
-        print(f"Error: Akses ditolak. Database '{target_ds.get('name')}' ({target_ds.get('id')}) tidak ditugaskan ke agen ini.", file=sys.stderr)
-        sys.exit(1)
+    if access_mode == "selected":
+        col_id = target_ds.get("collectionId")
+        allowed_by_ds = target_ds.get("id") in assigned_ids if assigned_ids else False
+        allowed_by_col = col_id in assigned_col_ids if (col_id and assigned_col_ids) else False
+        if not allowed_by_ds and not allowed_by_col and (assigned_ids or assigned_col_ids):
+            print(f"Error: Akses ditolak. Database '{target_ds.get('name')}' ({target_ds.get('id')}) tidak ditugaskan ke agen ini.", file=sys.stderr)
+            sys.exit(1)
 
     ds_id = target_ds.get("id")
 
@@ -245,7 +265,7 @@ def main():
             "sql": sql,
             "limit": args.limit
         }
-        res = make_request(url, method="POST", payload=payload, api_key=args.api_key)
+        res = make_request(url, method="POST", payload=payload, api_key=args.api_key, agent_id=agent_id, session_token=args.session_token)
 
         if args.format == "json":
             print(json.dumps(res, indent=2))

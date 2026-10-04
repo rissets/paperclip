@@ -27,13 +27,22 @@ import urllib.error
 def get_env_or_default(key, default=None):
     return os.environ.get(key, default)
 
-def make_request(url, method="GET", payload=None, api_key=None, agent_id=None):
+def make_request(url, method="GET", payload=None, api_key=None, agent_id=None, session_token=None):
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 PrimbonAgent/1.0",
     }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+    if session_token:
+        headers["Cookie"] = f"session_token={session_token}"
+        try:
+            from urllib.parse import urlparse
+            p = urlparse(url)
+            headers["Origin"] = f"{p.scheme}://{p.netloc}"
+        except Exception:
+            headers["Origin"] = "http://localhost:3100"
     if agent_id:
         headers["X-Agent-ID"] = agent_id
         headers["X-Paperclip-Agent-ID"] = agent_id
@@ -94,6 +103,7 @@ def main():
     parser.add_argument("--agent-id", type=str, default=get_env_or_default("PAPERCLIP_AGENT_ID"))
     parser.add_argument("--api-url", type=str, default=get_env_or_default("PAPERCLIP_API_URL", "http://localhost:3100"))
     parser.add_argument("--api-key", type=str, default=get_env_or_default("PAPERCLIP_API_KEY"))
+    parser.add_argument("--session-token", type=str, default=get_env_or_default("PAPERCLIP_SESSION_TOKEN"))
 
     args = parser.parse_args()
     base_url = args.api_url.rstrip("/")
@@ -128,7 +138,7 @@ def main():
         if params:
             url += "?" + "&".join(params)
 
-        sources = make_request(url, api_key=args.api_key, agent_id=agent_id)
+        sources = make_request(url, api_key=args.api_key, agent_id=agent_id, session_token=args.session_token)
         
         tables_list = []
         for ds in sources:
@@ -172,7 +182,7 @@ def main():
     # 2. Describe Table
     if args.describe_table:
         url = f"{api_prefix}/companies/{company_id}/data-sources"
-        sources = make_request(url, api_key=args.api_key)
+        sources = make_request(url, api_key=args.api_key, session_token=args.session_token)
         target = args.describe_table.lower()
         found_table = None
         found_ds = None
@@ -217,13 +227,13 @@ def main():
             print("\n#### Identified Metrics:")
             for m in sem["metrics"]:
                 print(f"- **{m.get('name')}** (Aggregation: `{m.get('aggregation', 'sum')}`) {m.get('unit', '')}")
-        return
+            return
 
     # 3. Direct SQL query (ClickHouse)
     if args.sql:
         url = f"{api_prefix}/companies/{company_id}/data-sources/clickhouse/query"
         payload = {"sql": args.sql, "limit": args.limit}
-        res = make_request(url, method="POST", payload=payload, api_key=args.api_key, agent_id=agent_id)
+        res = make_request(url, method="POST", payload=payload, api_key=args.api_key, agent_id=agent_id, session_token=args.session_token)
         
         if args.format == "json":
             print(json.dumps(res, indent=2))
@@ -250,7 +260,7 @@ def main():
 
         if not ds_id:
             url = f"{api_prefix}/companies/{company_id}/data-sources"
-            sources = make_request(url, api_key=args.api_key, agent_id=agent_id)
+            sources = make_request(url, api_key=args.api_key, agent_id=agent_id, session_token=args.session_token)
             for ds in sources:
                 for tbl in ds.get("tables", []):
                     if tbl.get("id") == args.table or tbl.get("tableName", "").lower() == args.table.lower():
@@ -278,7 +288,7 @@ def main():
             query_payload["filter"] = {k.strip(): v.strip()}
 
         url = f"{api_prefix}/companies/{company_id}/data-sources/{ds_id}/tables/{table_id}/query"
-        res = make_request(url, method="POST", payload=query_payload, api_key=args.api_key, agent_id=agent_id)
+        res = make_request(url, method="POST", payload=query_payload, api_key=args.api_key, agent_id=agent_id, session_token=args.session_token)
 
         if args.format == "json":
             print(json.dumps(res, indent=2))
