@@ -19,23 +19,23 @@ Agents should run the pre-built Python CLI tool directly from bash to inspect sc
 ### A. Discover Structured Tables (Collection-Scoped or Universal)
 Discover tables within a specific collection (ultra-fast, avoids scanning unrelated enterprise datasets):
 ```bash
-python3 skills/data-sources-structured/scripts/query_structured.py --list-tables --collection "<collection_slug_or_id>"
+python3 ~/.pi/agent/skills/data-sources-structured/scripts/query_structured.py --list-tables --collection "<collection_slug_or_id>"
 ```
 
 Or list all tables assigned to this agent:
 ```bash
-python3 skills/data-sources-structured/scripts/query_structured.py --list-tables
+python3 ~/.pi/agent/skills/data-sources-structured/scripts/query_structured.py --list-tables
 ```
 
 ### B. Describe Table Schema, Columns, and Metrics
 ```bash
-python3 skills/data-sources-structured/scripts/query_structured.py --describe-table "<table_name_or_id>"
+python3 ~/.pi/agent/skills/data-sources-structured/scripts/query_structured.py --describe-table "<table_name_or_id>"
 ```
 
 ### C. Run Fast Aggregations (`sum`, `avg`, `count`, `min`, `max`)
 Group by any categorical dimension with optional filters:
 ```bash
-python3 skills/data-sources-structured/scripts/query_structured.py \
+python3 ~/.pi/agent/skills/data-sources-structured/scripts/query_structured.py \
   --table "<table_name_or_id>" \
   --aggregate sum \
   --column "<metric_column>" \
@@ -45,7 +45,7 @@ python3 skills/data-sources-structured/scripts/query_structured.py \
 
 With dimensional filtering:
 ```bash
-python3 skills/data-sources-structured/scripts/query_structured.py \
+python3 ~/.pi/agent/skills/data-sources-structured/scripts/query_structured.py \
   --table "<table_name_or_id>" \
   --aggregate avg \
   --column "<metric_column>" \
@@ -55,7 +55,7 @@ python3 skills/data-sources-structured/scripts/query_structured.py \
 ### D. Execute Custom Read-Only ClickHouse OLAP SQL
 For complex analytical queries, quantiles, time-series distributions, CTEs, or window expressions:
 ```bash
-python3 skills/data-sources-structured/scripts/query_structured.py \
+python3 ~/.pi/agent/skills/data-sources-structured/scripts/query_structured.py \
   --sql "SELECT category_col, count(*), sum(metric_col) AS total FROM <table_name> GROUP BY category_col ORDER BY total DESC"
 ```
 

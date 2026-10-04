@@ -35,17 +35,17 @@ Use the pre-built Python CLI tool directly from bash. It connects directly to th
 ### Targeted Collection Search (Ultra-Fast & Scoped - RECOMMENDED):
 When documents belong to a specific collection (e.g. `timur-telecom`), scope search directly to avoid scanning unrelated enterprise files:
 ```bash
-python3 skills/data-sources-knowledge/scripts/search_knowledge.py --query "<pertanyaan atau topik yang dicari>" --collection "<collection_slug_or_id>" --limit 6
+python3 ~/.pi/agent/skills/data-sources-knowledge/scripts/search_knowledge.py --query "<pertanyaan atau topik yang dicari>" --collection "<collection_slug_or_id>" --limit 6
 ```
 
 ### Basic Search (Across All Assigned Knowledge Documents):
 ```bash
-python3 skills/data-sources-knowledge/scripts/search_knowledge.py --query "<pertanyaan atau topik yang dicari>" --limit 6
+python3 ~/.pi/agent/skills/data-sources-knowledge/scripts/search_knowledge.py --query "<pertanyaan atau topik yang dicari>" --limit 6
 ```
 
 ### Scoped Search (Target Specific Data Source ID):
 ```bash
-python3 skills/data-sources-knowledge/scripts/search_knowledge.py --query "<kata kunci>" --data-source-id "<data-source-id>" --limit 4
+python3 ~/.pi/agent/skills/data-sources-knowledge/scripts/search_knowledge.py --query "<kata kunci>" --data-source-id "<data-source-id>" --limit 4
 ```
 
 ### Output Formats:

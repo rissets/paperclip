@@ -18,22 +18,22 @@ Agents should run the pre-built Python CLI tool directly from bash:
 
 ### A. List Connected External Databases
 ```bash
-python3 skills/database-integration/scripts/query_database.py --list-dbs
+python3 ~/.pi/agent/skills/database-integration/scripts/query_database.py --list-dbs
 ```
 
 ### B. Inspect Tables in a Database
 ```bash
-python3 skills/database-integration/scripts/query_database.py --db "<data_source_id_or_name>" --inspect-tables
+python3 ~/.pi/agent/skills/database-integration/scripts/query_database.py --db "<data_source_id_or_name>" --inspect-tables
 ```
 
 ### C. Describe Table Columns, Data Types, and Searchable Keys
 ```bash
-python3 skills/database-integration/scripts/query_database.py --db "<data_source_id_or_name>" --describe-table "<table_name>"
+python3 ~/.pi/agent/skills/database-integration/scripts/query_database.py --db "<data_source_id_or_name>" --describe-table "<table_name>"
 ```
 
 ### D. Execute Safe Read-Only SQL Query
 ```bash
-python3 skills/database-integration/scripts/query_database.py \
+python3 ~/.pi/agent/skills/database-integration/scripts/query_database.py \
   --db "<data_source_id_or_name>" \
   --query-sql "SELECT id, name, status FROM users WHERE status = 'active' LIMIT 10"
 ```
