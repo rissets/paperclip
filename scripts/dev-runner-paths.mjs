@@ -29,6 +29,9 @@ export function shouldTrackDevServerPath(relativePath) {
   if (segments.includes(".paperclip")) {
     return false;
   }
+  if (segments.includes("data") || segments.includes("uploads")) {
+    return false;
+  }
   if (ignoredTestConfigBasenames.has(basename)) {
     return false;
   }

@@ -117,9 +117,11 @@ const ignoredDirectoryNames = new Set([
   ".turbo",
   ".vite",
   "coverage",
+  "data",
   "dist",
   "node_modules",
   "ui-dist",
+  "uploads",
 ]);
 
 const ignoredRelativePaths = new Set([

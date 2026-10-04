@@ -16,7 +16,8 @@ describe("shouldTrackDevServerPath", () => {
     expect(shouldTrackDevServerPath("packages/shared/src/lib/foo.spec.tsx")).toBe(false);
     expect(shouldTrackDevServerPath("packages/shared/_tests/helpers.ts")).toBe(false);
     expect(shouldTrackDevServerPath("packages/shared/tests/helpers.ts")).toBe(false);
-    expect(shouldTrackDevServerPath("packages/shared/test/helpers.ts")).toBe(false);
+    expect(shouldTrackDevServerPath("server/data/uploads/company-1/test.csv")).toBe(false);
+    expect(shouldTrackDevServerPath("data/uploads/company-1/test.csv")).toBe(false);
     expect(shouldTrackDevServerPath("vitest.config.ts")).toBe(false);
   });
 
