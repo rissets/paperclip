@@ -32,6 +32,7 @@ export interface InstanceGeneralSettings {
   censorUsernameInLogs: boolean;
   feedbackDataSharingPreference: FeedbackDataSharingPreference;
   backupRetention: BackupRetentionPolicy;
+  showWorkingActivityAndReasoning?: boolean;
   /**
    * Execution policy. Absent/`"any"` = unrestricted; `"kubernetes"` forces the
    * Kubernetes sandbox provider and denies local/ssh execution.

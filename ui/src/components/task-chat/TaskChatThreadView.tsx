@@ -25,6 +25,7 @@ import { TaskMessageScroller } from "./TaskMessageScroller";
 import { TaskChatProtocolCard } from "./TaskChatProtocolCard";
 import { TaskChatProtocolActivityRow } from "./TaskChatProtocolActivityRow";
 import { TaskChatPlanPreviewCard } from "./TaskChatPlanPreviewCard";
+import { useGeneralSettings } from "@/hooks/useGeneralSettings";
 
 const EMPTY_ATTACHMENTS: IssueAttachment[] = [];
 
@@ -106,6 +107,7 @@ function renderItem(
   onOpenSkill?: (skillId: string, name: string) => void,
   onOpenBrowser?: (browserId: string) => void,
   conversationMode = false,
+  showWorkingActivityAndReasoning = true,
 ) {
   switch (item.kind) {
     case "browser": return <TaskBrowserActivity browser={item.browser} label={item.label} onOpen={onOpenBrowser} />;
@@ -134,6 +136,7 @@ function renderItem(
           }
           leading={attachedTurnItem.standaloneHeader ? undefined : actions}
           conversationMode={conversationMode}
+          showWorkingActivityAndReasoning={showWorkingActivityAndReasoning}
           renderChild={(child) =>
             renderItem(
               child,
@@ -153,6 +156,7 @@ function renderItem(
               onOpenSkill,
               onOpenBrowser,
               conversationMode,
+              showWorkingActivityAndReasoning,
             )
           }
         />
@@ -201,8 +205,10 @@ function renderItem(
         />
       );
     case "thinking":
+      if (!showWorkingActivityAndReasoning) return null;
       return <TaskChatThinking item={item} />;
     case "tool":
+      if (!showWorkingActivityAndReasoning) return null;
       return <TaskChatToolCard item={item} />;
     case "status":
       return (
@@ -216,6 +222,7 @@ function renderItem(
     case "usage":
       return <TaskChatUsageReadout item={item} />;
     case "activity_phase":
+      if (!showWorkingActivityAndReasoning) return null;
       // Legacy adapter transcripts and native runner transcripts now share the
       // same compact activity treatment. Keeping this decision at the common
       // renderer boundary also gives old persisted runs the current taxonomy,
@@ -241,6 +248,7 @@ function renderItem(
         <TaskChatTurn
           item={item}
           conversationMode={conversationMode}
+          showWorkingActivityAndReasoning={showWorkingActivityAndReasoning}
           renderChild={(child) =>
             renderItem(
               child,
@@ -260,6 +268,7 @@ function renderItem(
               onOpenSkill,
               onOpenBrowser,
               conversationMode,
+              showWorkingActivityAndReasoning,
             )
           }
         />
@@ -331,6 +340,7 @@ export function TaskChatThreadView({
   renderCommentAnnotation,
 }: TaskChatThreadViewProps) {
   const streamlined = useStreamlinedTaskChatPresentation();
+  const { showWorkingActivityAndReasoning } = useGeneralSettings();
   const retryableMarkerId =
     onRetryFailedRun || onTryAgainNoLiveExecutionPath
       ? [...items]
@@ -367,6 +377,7 @@ export function TaskChatThreadView({
               onOpenSkill,
               onOpenBrowser,
               conversationMode,
+              showWorkingActivityAndReasoning,
             ),
           }))
           .filter((entry) => entry.content !== null)
@@ -431,6 +442,7 @@ export function TaskChatThreadView({
                   onOpenSkill,
                   onOpenBrowser,
                   conversationMode,
+                  showWorkingActivityAndReasoning,
                 )}
                 {renderCommentAnnotation && item.kind === "message"
                   ? renderCommentAnnotation(item)
@@ -444,7 +456,7 @@ export function TaskChatThreadView({
     renderInteraction, renderBrief, renderMessageActions, renderQueuedAction,
     onTryAgainNoLiveExecutionPath, tryAgainNoLiveExecutionPathPending,
     retryableMarkerId, onRetryFailedRun, retryFailedRunId, attachments, onOpenSkill, onOpenBrowser,
-    conversationMode, renderCommentAnnotation,
+    conversationMode, renderCommentAnnotation, showWorkingActivityAndReasoning,
   ]);
   const body = (
     <div

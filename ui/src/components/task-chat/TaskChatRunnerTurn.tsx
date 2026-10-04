@@ -1,7 +1,8 @@
 import { useRef, useState, useMemo } from "react";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, Loader2 } from "lucide-react";
 import type { ExecutionProjection } from "@paperclipai/shared";
 import { useSecondTick } from "@/hooks/useSecondTick";
+import { useGeneralSettings } from "@/hooks/useGeneralSettings";
 import { cn } from "@/lib/utils";
 import type {
   TaskChatItem,
@@ -22,6 +23,22 @@ import {
   paperclipRunnerFinalResponse,
   paperclipRunnerTimelineItems,
 } from "./transcript-adapter";
+
+function getActiveActivityLabel(items: readonly TaskChatItem[]): string {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i];
+    if (item.kind === "tool") {
+      return item.name ? `${item.name}…` : "Running tool…";
+    }
+    if (item.kind === "thinking") {
+      return "Thinking…";
+    }
+    if (item.kind === "activity_phase") {
+      return item.summary ? `${item.summary}…` : "Working…";
+    }
+  }
+  return "Working…";
+}
 
 function currentActivityStatusItems(
   items: readonly TaskChatItem[],
@@ -129,6 +146,7 @@ export function TaskChatRunnerTurn({
   continuedAfterSteering = false,
   conversationMode = false,
   onRuntimeRequestDecision,
+  showWorkingActivityAndReasoning: showWorkingActivityProp,
 }: {
   /** Stable identity used to clear replay-latched final text for the next turn. */
   runId?: string | null;
@@ -150,7 +168,10 @@ export function TaskChatRunnerTurn({
     item: TaskChatRuntimeRequestItem,
     decision: TaskChatRuntimeRequestDecision,
   ) => void | Promise<void>;
+  showWorkingActivityAndReasoning?: boolean;
 }) {
+  const { showWorkingActivityAndReasoning: defaultShow } = useGeneralSettings();
+  const showWorkingActivityAndReasoning = showWorkingActivityProp ?? defaultShow;
   const terminal = isTerminalRunStatus(status);
   const [workerExpanded, setWorkerExpanded] = useState(false);
   const yielded = items.some(
@@ -225,7 +246,31 @@ export function TaskChatRunnerTurn({
     >
       {conversationMode ? (
         <>
-          {timelineRows.length > 0 ? (
+          {!showWorkingActivityAndReasoning ? (
+            <>
+              {timelineRows.some((r) => r.kind === "protocol" || r.kind === "plan_document") ? (
+                <div className="flex min-w-0 flex-col gap-2 py-1">
+                  {timelineRows
+                    .filter((r) => r.kind === "protocol" || r.kind === "plan_document")
+                    .map((row) => (
+                      <div key={`${runId ?? "run"}:${row.id}`}>
+                        {row.kind === "plan_document" ? (
+                          <TaskChatPlanPreviewCard source={{ kind: "saved", document: row.document }} />
+                        ) : (
+                          <TaskChatProtocolCard item={row} onRuntimeRequestDecision={onRuntimeRequestDecision} />
+                        )}
+                      </div>
+                    ))}
+                </div>
+              ) : null}
+              {!terminal && !final ? (
+                <div className="flex items-center gap-1.5 py-1 text-xs text-muted-foreground" data-testid="task-chat-simple-loading">
+                  <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+                  <span className="shimmer-text shimmer-text-muted">{getActiveActivityLabel(items)}</span>
+                </div>
+              ) : null}
+            </>
+          ) : timelineRows.length > 0 ? (
             <div className="py-1">
               <button
                 type="button"
@@ -318,7 +363,31 @@ export function TaskChatRunnerTurn({
               Live runner activity is temporarily unavailable. Retrying…
             </div>
           ) : null}
-          {timelineRows.length > 0 ? (
+          {!showWorkingActivityAndReasoning ? (
+            <>
+              {timelineRows.some((r) => r.kind === "protocol" || r.kind === "plan_document") ? (
+                <div className="flex min-w-0 flex-col gap-2 py-1" data-testid="task-chat-turn-timeline">
+                  {timelineRows
+                    .filter((r) => r.kind === "protocol" || r.kind === "plan_document")
+                    .map((row) => (
+                      <div key={`${runId ?? "run"}:${row.id}`}>
+                        {row.kind === "plan_document" ? (
+                          <TaskChatPlanPreviewCard source={{ kind: "saved", document: row.document }} />
+                        ) : (
+                          <TaskChatProtocolCard item={row} onRuntimeRequestDecision={onRuntimeRequestDecision} />
+                        )}
+                      </div>
+                    ))}
+                </div>
+              ) : null}
+              {!terminal && !final ? (
+                <div className="flex items-center gap-1.5 py-1 text-xs text-muted-foreground" data-testid="task-chat-simple-loading">
+                  <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+                  <span className="shimmer-text shimmer-text-muted">{getActiveActivityLabel(items)}</span>
+                </div>
+              ) : null}
+            </>
+          ) : timelineRows.length > 0 ? (
             <div
               className="flex min-w-0 flex-col gap-2 py-1"
               data-testid="task-chat-turn-timeline"
@@ -367,7 +436,9 @@ export function TaskChatRunnerTurn({
           />
         </div>
       ) : null}
-      {!conversationMode && !final && currentActivityItems.length === 0 ? <RunnerCurrentActivityTail status={status} /> : null}
+      {!conversationMode && showWorkingActivityAndReasoning && !final && currentActivityItems.length === 0 ? (
+        <RunnerCurrentActivityTail status={status} />
+      ) : null}
     </div>
   );
 }

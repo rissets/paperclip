@@ -28,12 +28,20 @@ describe("TaskChatLiveTail", () => {
     container.remove();
   });
 
-  function render(items: TaskChatItem[], emptyMessage?: string) {
+  function render(
+    items: TaskChatItem[],
+    emptyMessage?: string,
+    showWorkingActivityAndReasoning?: boolean,
+  ) {
     flushSync(() =>
       root!.render(
         <MemoryRouter>
           <ThemeProvider>
-            <TaskChatLiveTail items={items} emptyMessage={emptyMessage} />
+            <TaskChatLiveTail
+              items={items}
+              emptyMessage={emptyMessage}
+              showWorkingActivityAndReasoning={showWorkingActivityAndReasoning}
+            />
           </ThemeProvider>
         </MemoryRouter>,
       ),
@@ -248,5 +256,17 @@ describe("TaskChatLiveTail", () => {
     render(items, "Waiting to start...");
     expect(container.textContent).not.toContain("Waiting to start...");
     expect(container.textContent).toContain("streaming…");
+  });
+
+  it("hides tool cards and thinking when showWorkingActivityAndReasoning is false and shows simple loading", () => {
+    const items = parse([
+      { kind: "tool_call", ts: TS, name: "Read", toolUseId: "t1", input: { file_path: "src/app.ts" } },
+    ]);
+    render(items, undefined, false);
+
+    expect(container.querySelector('[data-testid="task-chat-activity-phase-toggle"]')).toBeNull();
+    const loading = container.querySelector('[data-testid="task-chat-live-simple-loading"]');
+    expect(loading).not.toBeNull();
+    expect(loading?.textContent).toContain("Read…");
   });
 });

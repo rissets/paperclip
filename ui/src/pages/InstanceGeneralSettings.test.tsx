@@ -264,6 +264,41 @@ describe("InstanceGeneralSettings operator-hidden sections", () => {
 
     expect(container.textContent).toContain("Deployment and auth");
     expect(container.textContent).toContain("Censor username in logs");
+    expect(container.textContent).toContain("Working activity and reasoning");
     expect(container.textContent).toContain("Backup retention");
+  });
+
+  it("toggles working activity and reasoning preference", async () => {
+    mockInstanceSettingsApi.getGeneral.mockResolvedValue({
+      censorUsernameInLogs: false,
+      showWorkingActivityAndReasoning: true,
+      feedbackDataSharingPreference: "not_allowed",
+      backupRetention: { dailyDays: 7, weeklyWeeks: 4, monthlyMonths: 1 },
+    });
+    await renderPage(SELF_HOSTED_HEALTH);
+
+    const toggle = container.querySelector('[aria-label="Toggle working activity and reasoning"]');
+    expect(toggle).not.toBeNull();
+    flushSync(() => {
+      (toggle as HTMLButtonElement).click();
+    });
+
+    await vi.waitFor(() => {
+      expect(mockInstanceSettingsApi.updateGeneral).toHaveBeenCalledWith(
+        expect.objectContaining({
+          showWorkingActivityAndReasoning: false,
+        }),
+        expect.anything(),
+      );
+    });
+  });
+
+  it("hides working activity and reasoning section when hidden by operator", async () => {
+    await renderPage({
+      ...SELF_HOSTED_HEALTH,
+      hiddenSettings: ["instance.general.showWorkingActivityAndReasoning"],
+    });
+
+    expect(container.textContent).not.toContain("Working activity and reasoning");
   });
 });

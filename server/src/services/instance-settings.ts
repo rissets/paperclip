@@ -206,6 +206,7 @@ function normalizeGeneralSettings(raw: unknown): InstanceGeneralSettings {
       feedbackDataSharingPreference:
         parsed.data.feedbackDataSharingPreference ?? DEFAULT_FEEDBACK_DATA_SHARING_PREFERENCE,
       backupRetention: parsed.data.backupRetention ?? DEFAULT_BACKUP_RETENTION,
+      showWorkingActivityAndReasoning: parsed.data.showWorkingActivityAndReasoning ?? true,
       // Absent => unrestricted; only carry through an explicit policy.
       ...(parsed.data.executionMode ? { executionMode: parsed.data.executionMode } : {}),
     };
@@ -214,6 +215,7 @@ function normalizeGeneralSettings(raw: unknown): InstanceGeneralSettings {
     censorUsernameInLogs: false,
     feedbackDataSharingPreference: DEFAULT_FEEDBACK_DATA_SHARING_PREFERENCE,
     backupRetention: DEFAULT_BACKUP_RETENTION,
+    showWorkingActivityAndReasoning: true,
   };
 }
 

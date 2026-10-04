@@ -6,6 +6,7 @@ import { useSecondTick } from "@/hooks/useSecondTick";
 import { formatDurationWords } from "@/lib/issue-chat-messages";
 import { isCommandTool } from "@/lib/transcriptPresentation";
 import { isTerminalRunStatus } from "@/components/task-chat/transcript-adapter";
+import { useGeneralSettings } from "@/hooks/useGeneralSettings";
 
 /**
  * "ran N commands, called M tools" for the live tail's status pill, counted off
@@ -48,6 +49,7 @@ export function TaskChatLiveRunPill({
   startedAtMs,
   finishedAtMs,
   toolSummary,
+  showWorkingActivityAndReasoning: showWorkingActivityProp,
 }: {
   status: string;
   execution?: ExecutionProjection | null;
@@ -56,7 +58,10 @@ export function TaskChatLiveRunPill({
   /** Run finish in ms once terminal; drives the settled elapsed readout. */
   finishedAtMs?: number | null;
   toolSummary: string | null;
+  showWorkingActivityAndReasoning?: boolean;
 }) {
+  const { showWorkingActivityAndReasoning: defaultShow } = useGeneralSettings();
+  const showWorkingActivityAndReasoning = showWorkingActivityProp ?? defaultShow;
   const active = !isTerminalRunStatus(status);
   // One shared page-wide ticker drives the live elapsed readout, matching the
   // default view's `useLiveElapsed`.
@@ -89,7 +94,9 @@ export function TaskChatLiveRunPill({
         {active ? <span className={cn("shimmer-text")}>{verb}</span> : verb}
       </span>
       {suffix ? <span className="text-xs text-muted-foreground/60">{suffix}</span> : null}
-      {toolSummary ? <span className="text-xs text-muted-foreground/40">· {toolSummary}</span> : null}
+      {showWorkingActivityAndReasoning && toolSummary ? (
+        <span className="text-xs text-muted-foreground/40">· {toolSummary}</span>
+      ) : null}
     </div>
   );
 }

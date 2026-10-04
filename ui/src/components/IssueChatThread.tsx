@@ -214,6 +214,7 @@ import {
 } from "../lib/transcriptPresentation";
 import { buildAgentMentionHref } from "@paperclipai/shared";
 import { useComposerStop } from "@/hooks/useComposerStop";
+import { useGeneralSettings } from "@/hooks/useGeneralSettings";
 import { cn, formatDateTime, formatShortDate } from "../lib/utils";
 import { liveBlueBadge } from "../lib/status-colors";
 import {
@@ -1227,6 +1228,10 @@ function IssueChatChainOfThought({
   message: ThreadMessage;
   cotParts: readonly IssueChatCoTPart[];
 }) {
+  const { data: generalSettings } = useGeneralSettings();
+  const showWorkingActivityAndReasoning =
+    generalSettings?.showWorkingActivityAndReasoning ?? true;
+
   const { agentMap } = useContext(IssueChatCtx);
   const custom = message.metadata.custom as Record<string, unknown>;
   const runAgentId =
@@ -1274,12 +1279,33 @@ function IssueChatChainOfThought({
     segmentIndex: myIndex,
     segmentCount: rawSegments.length,
   });
+
   const [expanded, setExpanded] = useState(isActive);
   const liveElapsed = useLiveElapsed(segmentTiming?.startMs, isActive);
 
   useEffect(() => {
     if (isActive) setExpanded(true);
   }, [isActive]);
+
+  if (!showWorkingActivityAndReasoning) {
+    if (!isActive) return null;
+    const currentStatusMessage = readCustomString(custom, "currentStatusMessage");
+    const currentToolName = readCustomString(custom, "currentToolName");
+    const label = currentToolName
+      ? `Using ${currentToolName}…`
+      : currentStatusMessage
+        ? currentStatusMessage
+        : "Working…";
+    return (
+      <div
+        className="flex items-center gap-2 py-1.5 text-xs text-muted-foreground"
+        data-testid="issue-chat-simple-loading"
+      >
+        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" />
+        <span className="shimmer-text shimmer-text-muted">{label}</span>
+      </div>
+    );
+  }
 
   let headerVerb: string;
   let headerSuffix: string | null = null;
@@ -2384,11 +2410,14 @@ function IssueChatAssistantMessage({
     typeof custom.chainOfThoughtLabel === "string"
       ? custom.chainOfThoughtLabel
       : null;
+  const { data: generalSettings } = useGeneralSettings();
+  const showWorkingActivityAndReasoning =
+    generalSettings?.showWorkingActivityAndReasoning ?? true;
   const hasCoT = message.content.some(
     (p) => p.type === "reasoning" || p.type === "tool-call",
   );
   const deleted = Boolean(custom.deletedAt);
-  const isFoldable = !isRunning && !!chainOfThoughtLabel;
+  const isFoldable = !isRunning && !!chainOfThoughtLabel && showWorkingActivityAndReasoning;
   const [folded, setFolded] = useState(isFoldable);
   const [prevFoldKey, setPrevFoldKey] = useState({
     messageId: message.id,
@@ -2719,7 +2748,7 @@ function IssueChatAssistantMessage({
           ) : !folded ? (
             <>
               <div className="space-y-3">
-                <IssueChatAssistantParts message={message} hasCoT={hasCoT} />
+                <IssueChatAssistantParts message={message} hasCoT={showWorkingActivityAndReasoning ? hasCoT : false} />
                 {message.content.length === 0 && waitingText ? (
                   <div className="rounded-lg px-1 py-2">
                     <div className="flex min-w-0 items-center gap-2.5">

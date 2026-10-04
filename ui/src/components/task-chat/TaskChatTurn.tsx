@@ -10,6 +10,8 @@ import type {
 import { TaskChatStatusPill } from "./TaskChatStatusPill";
 import { TaskChatAgentIdentity } from "./TaskChatBubble";
 
+import { useGeneralSettings } from "@/hooks/useGeneralSettings";
+
 interface TaskChatTurnProps {
   item: TaskChatTurnItem;
   renderChild: (child: TaskChatTurnChildItem) => ReactNode;
@@ -26,15 +28,17 @@ interface TaskChatTurnProps {
    */
   leading?: ReactNode;
   conversationMode?: boolean;
+  showWorkingActivityAndReasoning?: boolean;
 }
 
 /** Metric segments after the label: "38s · 3 tools · +34 −3 · 12.3k tokens". */
 export function turnSummaryMetrics(
   summary: TaskChatTurnItem["summary"],
+  showWorkingActivityAndReasoning = true,
 ): string {
   const parts: string[] = [];
   if (summary.durationLabel) parts.push(summary.durationLabel);
-  if (summary.toolCount > 0)
+  if (showWorkingActivityAndReasoning && summary.toolCount > 0)
     parts.push(
       `${summary.toolCount} tool${summary.toolCount === 1 ? "" : "s"}`,
     );
@@ -45,8 +49,11 @@ export function turnSummaryMetrics(
 }
 
 /** "✓ Worked · 38s · 3 tools · +34 −3 · 12.3k tokens" (parts omitted when unknown). */
-export function turnSummaryText(summary: TaskChatTurnItem["summary"]): string {
-  const metrics = turnSummaryMetrics(summary);
+export function turnSummaryText(
+  summary: TaskChatTurnItem["summary"],
+  showWorkingActivityAndReasoning = true,
+): string {
+  const metrics = turnSummaryMetrics(summary, showWorkingActivityAndReasoning);
   const label = summary.failed ? "Stopped" : "Worked";
   return metrics ? `${label} · ${metrics}` : label;
 }
@@ -76,7 +83,10 @@ export function TaskChatTurn({
   timestampPrefix,
   leading,
   conversationMode = false,
+  showWorkingActivityAndReasoning: showWorkingActivityProp,
 }: TaskChatTurnProps) {
+  const { showWorkingActivityAndReasoning: defaultShow } = useGeneralSettings();
+  const showWorkingActivityAndReasoning = showWorkingActivityProp ?? defaultShow;
   const streamlined = useStreamlinedTaskChatPresentation();
   const parentRow = !item.settled && item.liveStatus != null;
   const [standaloneExpanded, setStandaloneExpanded] = useState(false);
@@ -99,6 +109,27 @@ export function TaskChatTurn({
   // to use the run-wide fold below.
   if (item.standaloneHeader) {
     if (conversationMode) {
+      if (!showWorkingActivityAndReasoning) {
+        return (
+          <div
+            data-testid="task-chat-turn"
+            data-settled={item.settled ? "true" : "false"}
+          >
+            {item.finalResponse ? (
+              <div className="w-full" data-testid="task-chat-final-response">
+                <div
+                  className="break-words px-1 py-2 text-sm text-foreground"
+                  data-testid="task-chat-agent-bubble"
+                >
+                  <MarkdownBody softBreaks linkIssueReferences>
+                    {item.finalResponse.text}
+                  </MarkdownBody>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        );
+      }
       return (
         <div
           data-testid="task-chat-turn"
@@ -289,7 +320,7 @@ export function TaskChatTurn({
             ? "Stopped"
             : "Worked"}
       </span>
-      {!item.standaloneHeader && turnSummaryMetrics(item.summary) ? (
+      {!item.standaloneHeader && turnSummaryMetrics(item.summary, showWorkingActivityAndReasoning) ? (
         // Time/tools/tokens is demoted, not deleted (PAP-502): it stays in the
         // DOM (and the accessible tree) but fades in only on hover/focus so the
         // settled line reads as "2:34 PM · ✓ Worked" at rest. Revealed too when
@@ -299,7 +330,7 @@ export function TaskChatTurn({
           data-visible={open ? "true" : "false"}
         >
           <span className="min-w-0 overflow-hidden whitespace-nowrap font-mono text-(length:--text-micro)">
-            {turnSummaryMetrics(item.summary)}
+            {turnSummaryMetrics(item.summary, showWorkingActivityAndReasoning)}
           </span>
         </span>
       ) : null}

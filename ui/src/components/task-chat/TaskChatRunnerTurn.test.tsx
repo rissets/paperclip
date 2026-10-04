@@ -42,6 +42,7 @@ describe("TaskChatRunnerTurn", () => {
     suppressFinal = false,
     continuedAfterSteering = false,
     execution?: ExecutionProjection,
+    showWorkingActivityAndReasoning?: boolean,
   ) =>
     act(() =>
       root.render(
@@ -57,6 +58,7 @@ describe("TaskChatRunnerTurn", () => {
               suppressFinal={suppressFinal}
               continuedAfterSteering={continuedAfterSteering}
               onRuntimeRequestDecision={onRuntimeRequestDecision}
+              showWorkingActivityAndReasoning={showWorkingActivityAndReasoning}
             />
           </ThemeProvider>
         </MemoryRouter>,
@@ -1582,4 +1584,58 @@ describe("TaskChatRunnerTurn", () => {
         ?.textContent,
     ).toContain("I finished the draft.");
   });
+
+  it("hides detailed activity timeline and worker toggle when showWorkingActivityAndReasoning is false", () => {
+    render(
+      [
+        {
+          id: "tool-1",
+          kind: "tool",
+          name: "Read files",
+          rawName: "read_files",
+          target: "src/index.ts",
+          status: "completed",
+        },
+      ],
+      "running",
+      "run-1",
+      undefined,
+      false,
+      false,
+      undefined,
+      false,
+    );
+
+    expect(container.querySelector('[data-testid="task-chat-worker-toggle"]')).toBeNull();
+    expect(container.querySelector('[data-testid="task-chat-turn-timeline"]')).toBeNull();
+    const simpleLoading = container.querySelector('[data-testid="task-chat-simple-loading"]');
+    expect(simpleLoading).not.toBeNull();
+    expect(simpleLoading?.textContent).toContain("Read files…");
+  });
+
+  it("shows activity timeline when showWorkingActivityAndReasoning is true", () => {
+    render(
+      [
+        {
+          id: "tool-1",
+          kind: "tool",
+          name: "Read files",
+          rawName: "read_files",
+          target: "src/index.ts",
+          status: "completed",
+        },
+      ],
+      "running",
+      "run-1",
+      undefined,
+      false,
+      false,
+      undefined,
+      true,
+    );
+
+    expect(container.querySelector('[data-testid="task-chat-turn-timeline"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="task-chat-simple-loading"]')).toBeNull();
+  });
 });
+

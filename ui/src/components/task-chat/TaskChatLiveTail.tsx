@@ -1,5 +1,7 @@
 import type { ReactElement } from "react";
+import { Loader2 } from "lucide-react";
 import { MarkdownBody } from "@/components/MarkdownBody";
+import { useGeneralSettings } from "@/hooks/useGeneralSettings";
 import type { TaskChatItem, TaskChatRuntimeRequestDecision, TaskChatRuntimeRequestItem } from "./task-chat-model";
 import { TaskChatToolCard } from "./TaskChatToolCard";
 import { TaskChatUsageReadout } from "./TaskChatUsageReadout";
@@ -7,6 +9,22 @@ import { TaskChatRunnerActivityGroup } from "./TaskChatRunnerActivityGroup";
 import { TaskChatThinking } from "./TaskChatThinking";
 import { TaskChatProtocolCard } from "./TaskChatProtocolCard";
 import { buildTurnTimelineRows } from "./transcript-adapter";
+
+function getActiveActionLabel(items: readonly TaskChatItem[]): string {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i];
+    if (item.kind === "tool") {
+      return item.name ? `${item.name}…` : "Running tool…";
+    }
+    if (item.kind === "thinking") {
+      return "Thinking…";
+    }
+    if (item.kind === "activity_phase") {
+      return item.summary ? `${item.summary}…` : "Working…";
+    }
+  }
+  return "Working…";
+}
 
 /**
  * Live body for legacy runner transcripts. The adapter drops debug plumbing;
@@ -23,6 +41,7 @@ export function TaskChatLiveTail({
   emptyMessage,
   excludeFinal = false,
   onRuntimeRequestDecision,
+  showWorkingActivityAndReasoning: showWorkingActivityProp,
 }: {
   items: readonly TaskChatItem[];
   /** Shown when nothing renderable has streamed yet (queued / pre-first-token). */
@@ -33,10 +52,42 @@ export function TaskChatLiveTail({
     item: TaskChatRuntimeRequestItem,
     decision: TaskChatRuntimeRequestDecision,
   ) => void | Promise<void>;
+  showWorkingActivityAndReasoning?: boolean;
 }) {
+  const { showWorkingActivityAndReasoning: defaultShow } = useGeneralSettings();
+  const showWorkingActivityAndReasoning = showWorkingActivityProp ?? defaultShow;
+
   const visibleItems = excludeFinal
     ? items.filter((item) => item.kind !== "message" || item.interstitial)
     : items;
+
+  if (!showWorkingActivityAndReasoning) {
+    const protocolRows = visibleItems
+      .filter((item) => item.kind === "protocol")
+      .map((item) => renderTailRow(item, onRuntimeRequestDecision))
+      .filter((row): row is ReactElement => row != null);
+    const activeLabel = getActiveActionLabel(visibleItems);
+
+    if (visibleItems.length === 0 && emptyMessage) {
+      return (
+        <div className="px-1 py-1 text-xs text-muted-foreground/70">{emptyMessage}</div>
+      );
+    }
+
+    return (
+      <div className="flex flex-col gap-2">
+        {protocolRows}
+        <div
+          className="flex items-center gap-2 px-1 py-1 text-xs text-muted-foreground"
+          data-testid="task-chat-live-simple-loading"
+        >
+          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" />
+          <span className="shimmer-text shimmer-text-muted">{activeLabel}</span>
+        </div>
+      </div>
+    );
+  }
+
   const rows = buildTurnTimelineRows(visibleItems, true)
     .map((item) => renderTailRow(item, onRuntimeRequestDecision))
     .filter((row): row is ReactElement => row != null);
