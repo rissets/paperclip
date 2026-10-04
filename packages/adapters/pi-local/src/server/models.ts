@@ -19,32 +19,29 @@ function firstNonEmptyLine(text: string): string {
 function parseModelsOutput(stdout: string): AdapterModel[] {
   const parsed: AdapterModel[] = [];
   const lines = stdout.split(/\r?\n/);
-  
-  // Skip header line if present
-  let startIndex = 0;
-  if (lines.length > 0 && (lines[0].includes("provider") || lines[0].includes("model"))) {
-    startIndex = 1;
-  }
-  
-  for (let i = startIndex; i < lines.length; i++) {
+
+  for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line) continue;
-    
-    // Parse format: "provider   model   context  max-out  thinking  images"
+    if (line.startsWith("bili:") || line.startsWith("warning:") || line.startsWith("info:")) continue;
+
     // Split by 2+ spaces to handle the columnar format
     const parts = line.split(/\s{2,}/);
     if (parts.length < 2) continue;
-    
+
     const provider = parts[0].trim();
     const model = parts[1].trim();
-    
+
     if (!provider || !model) continue;
-    if (provider === "provider" && model === "model") continue; // Skip header
-    
+    if (provider.toLowerCase() === "provider" && model.toLowerCase() === "model") continue; // Skip header
+
     const id = `${provider}/${model}`;
     parsed.push({ id, label: id });
+    if (model !== id) {
+      parsed.push({ id: model, label: `${model} (${provider})` });
+    }
   }
-  
+
   return parsed;
 }
 
@@ -134,6 +131,41 @@ function extractCustomProviderModels(rawProviders: string | undefined): AdapterM
   }
 }
 
+async function loadHostProviderModels(): Promise<AdapterModel[]> {
+  const hostDir = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
+  const modelsPath = path.join(hostDir, "models.json");
+  const models: AdapterModel[] = [];
+
+  try {
+    const raw = await fs.readFile(modelsPath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && parsed.providers && typeof parsed.providers === "object") {
+      for (const [providerId, config] of Object.entries(parsed.providers as Record<string, any>)) {
+        if (!config || typeof config !== "object") continue;
+        if (Array.isArray(config.models)) {
+          for (const m of config.models) {
+            const rawId = asString(m?.id || m?.name, "").trim();
+            if (rawId) {
+              const label = asString(m?.name || m?.label, rawId);
+              models.push({
+                id: `${providerId}/${rawId}`,
+                label: label !== rawId ? `${label} (${providerId})` : `${rawId} (${providerId})`,
+              });
+              models.push({
+                id: rawId,
+                label: label !== rawId ? `${label} (${providerId})` : `${rawId} (${providerId})`,
+              });
+            }
+          }
+        }
+      }
+    }
+  } catch {
+    // models.json not present
+  }
+  return models;
+}
+
 export async function discoverPiModels(input: {
   command?: unknown;
   cwd?: unknown;
@@ -146,6 +178,9 @@ export async function discoverPiModels(input: {
   const customModels = extractCustomProviderModels(
     runtimeEnv.PAPERCLIP_PI_PROVIDERS ?? process.env.PAPERCLIP_PI_PROVIDERS,
   );
+  const isExplicitMissingCommand = command.includes("__paperclip_missing_pi_command__");
+  const hostModels = isExplicitMissingCommand ? [] : await loadHostProviderModels();
+  const fallbackModels = dedupeModels([...customModels, ...hostModels]);
 
   try {
     const result = await runChildProcess(
@@ -162,21 +197,24 @@ export async function discoverPiModels(input: {
     );
 
     if (result.timedOut) {
-      if (customModels.length > 0) return sortModels(dedupeModels(customModels));
+      if (fallbackModels.length > 0) return sortModels(fallbackModels);
       throw new Error("`pi --list-models` timed out.");
     }
     if ((result.exitCode ?? 1) !== 0) {
-      if (customModels.length > 0) return sortModels(dedupeModels(customModels));
+      if (fallbackModels.length > 0) return sortModels(fallbackModels);
       const detail = firstNonEmptyLine(result.stderr) || firstNonEmptyLine(result.stdout);
       throw new Error(detail ? `\`pi --list-models\` failed: ${detail}` : "`pi --list-models` failed.");
     }
 
-    // Pi outputs model list to stderr, but fall back to stdout for older versions
-    const output = result.stderr || result.stdout;
-    const parsedCli = parseModelsOutput(output);
-    return sortModels(dedupeModels([...customModels, ...parsedCli]));
+    // Pi can output models to stdout or stderr depending on version and logging proxies.
+    // Parse both streams to ensure no models are lost.
+    const stdoutModels = parseModelsOutput(result.stdout || "");
+    const stderrModels = parseModelsOutput(result.stderr || "");
+    const parsedCli = [...stdoutModels, ...stderrModels];
+
+    return sortModels(dedupeModels([...fallbackModels, ...parsedCli]));
   } catch (err) {
-    if (customModels.length > 0) return sortModels(dedupeModels(customModels));
+    if (fallbackModels.length > 0) return sortModels(fallbackModels);
     throw err;
   }
 }
