@@ -1,14 +1,14 @@
 ---
 name: database-integration
 description: >
-  Autonomous dynamic querying, multi-table relationship navigation, schema introspection, and entity profiling across
-  connected enterprise relational databases (PostgreSQL, MariaDB, MySQL, SQL Server). Use when answering questions
-  about live database records, multi-table foreign key joins, entity lookups, and transactional data.
+  Query, navigate relationships, and introspect schemas across connected relational databases
+  (PostgreSQL, MariaDB, MySQL, SQL Server). Use when answering questions about live database
+  records, multi-table joins, entity lookups, and transactional data.
 ---
 
 # External Enterprise Database Integration Skill
 
-This skill equips Paperclip agents (such as `DataAgent`, `DatabaseIntegrationAgent`, or any agent assigned database connections) to dynamically inspect relational schemas, navigate foreign-key topologies, formulate dialect-specific SQL, execute safe queries, and synthesize grounded responses.
+This skill equips Primbon agents (such as `DataAgent`, `DatabaseIntegrationAgent`, or any agent assigned database connections) to dynamically inspect relational schemas, navigate foreign-key topologies, formulate dialect-specific SQL, execute safe queries, and synthesize grounded responses.
 
 ---
 

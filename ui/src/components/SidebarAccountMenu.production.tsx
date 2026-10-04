@@ -28,7 +28,7 @@ import { ThemeToggle } from "./ThemeToggle";
 import { SidebarServerInfo } from "./SidebarServerInfo";
 
 const INVITES_PATH = "/company/settings/members?tab=invites";
-const FEEDBACK_URL = "https://paperclip.ing/feedback";
+const FEEDBACK_URL = "https://hellodigi.id/contact";
 
 interface SidebarAccountMenuProps {
   deploymentMode?: DeploymentMode;
@@ -294,13 +294,13 @@ export function SidebarAccountMenu({
                 href={FEEDBACK_URL}
                 target="_blank"
                 rel="noreferrer"
-                aria-label="Share feedback"
+                aria-label="Contact Primbon"
                 className="flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground/50 transition-colors hover:bg-accent/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <Flag className="h-4 w-4" aria-hidden="true" />
               </a>
             </TooltipTrigger>
-            <TooltipContent side="top">Share feedback</TooltipContent>
+            <TooltipContent side="top">Contact Primbon</TooltipContent>
           </Tooltip>
         ) : null}
       </div>

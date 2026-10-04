@@ -7,7 +7,7 @@ description: >
 
 # Universal Data Sources & Enterprise Retrieval Skill
 
-This skill equips Paperclip agents to discover, inspect, and route queries across all enterprise data sources available to the company.
+This skill equips Primbon agents to discover, inspect, and route queries across all enterprise data sources available to the company.
 
 ---
 

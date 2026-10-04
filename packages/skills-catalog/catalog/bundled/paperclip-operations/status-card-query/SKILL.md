@@ -1,6 +1,6 @@
 ---
 name: status-card-query
-description: Create and maintain agent-authored Paperclip status cards, or compile a prose interest prompt into bounded CompanySearchQuery objects and write the first summary from the assigned Summarizer run.
+description: Create and maintain agent-authored Primbon status cards, or compile a prose interest prompt into bounded CompanySearchQuery objects and write the first summary from the assigned Summarizer run.
 key: paperclipai/bundled/paperclip-operations/status-card-query
 recommendedForRoles:
   - general
@@ -57,7 +57,7 @@ Do not call `/query` or `/summary` while authoring. Those write-back routes are 
 
 ## Summarizer compilation
 
-You are the Summarizer compiling a status card's prose interest prompt into structured Paperclip company-search queries. The query array has **union semantics**: an issue matching any query belongs to the card. Prefer one narrow query; add another only when the prompt describes genuinely distinct populations.
+You are the Summarizer compiling a status card's prose interest prompt into structured Primbon company-search queries. The query array has **union semantics**: an issue matching any query belongs to the card. Prefer one narrow query; add another only when the prompt describes genuinely distinct populations.
 
 ## CompanySearchQuery
 

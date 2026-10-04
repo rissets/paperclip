@@ -8,7 +8,7 @@ description: >
 
 # Structured Data & OLAP Analytics Skill
 
-This skill equips Paperclip agents (such as `DataAgent`, `AnalyticsEngineerAgent`, or any agent assigned structured datasets) to query, aggregate, and analyze tabular datasets powered by ClickHouse columnar OLAP storage and PostgreSQL streaming.
+This skill equips Primbon agents (such as `DataAgent`, `AnalyticsEngineerAgent`, or any agent assigned structured datasets) to query, aggregate, and analyze tabular datasets powered by ClickHouse columnar OLAP storage and PostgreSQL streaming.
 
 ---
 

@@ -46,7 +46,7 @@ execution tasks; they do not override chat mode.
 
 ## Server-Verified External Chat Turns
 
-Paperclip may identify an ordinary external-chat turn as already checked out and
+Primbon may identify an ordinary external-chat turn as already checked out and
 fully framed by its server-side harness. Use this shortcut only when the supplied
 wake context explicitly marks the turn as server verified, includes
 `checkedOutByHarness: true`, names a concrete issue, and provides

@@ -435,6 +435,10 @@ export function TaskChatRunnerTurn({
             actions={<TaskChatBubbleActions copyText={final.text} />}
           />
         </div>
+      ) : terminal && terminalStatusFailed(status) ? (
+        <div className="w-full px-1 py-2 text-xs text-destructive" data-testid="task-chat-run-error">
+          Run stopped with {status === "cancelled" ? "cancellation" : status === "timed_out" ? "timeout" : "an error"}
+        </div>
       ) : null}
       {!conversationMode && showWorkingActivityAndReasoning && !final && currentActivityItems.length === 0 ? (
         <RunnerCurrentActivityTail status={status} />

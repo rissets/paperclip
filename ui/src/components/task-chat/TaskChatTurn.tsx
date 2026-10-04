@@ -186,6 +186,10 @@ export function TaskChatTurn({
                 </MarkdownBody>
               </div>
             </div>
+          ) : item.settled && item.summary.failed ? (
+            <div className="w-full px-1 py-2 text-xs text-destructive">
+              Run stopped with an error
+            </div>
           ) : null}
         </div>
       );
@@ -244,6 +248,10 @@ export function TaskChatTurn({
                 {item.finalResponse.text}
               </MarkdownBody>
             </div>
+          </div>
+        ) : item.settled && item.summary.failed ? (
+          <div className="w-full px-1 py-2 text-xs text-destructive">
+            Run stopped with an error
           </div>
         ) : null}
       </div>

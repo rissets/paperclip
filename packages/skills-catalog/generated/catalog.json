@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "packageName": "@paperclipai/skills-catalog",
   "packageVersion": "0.3.1",
-  "generatedAt": "2026-08-11T15:05:34.526Z",
+  "generatedAt": "2026-10-04T18:59:55.098Z",
   "skills": [
     {
       "id": "paperclipai:bundled:docs:doc-maintenance",
@@ -45,7 +45,7 @@
       "category": "paperclip-operations",
       "slug": "issue-triage",
       "name": "issue-triage",
-      "description": "Triage Paperclip inbox issues that are stale, blocked, in-review, or assigned-but-not-progressing, and decide a single next action per issue (resume, reassign, unblock, escalate, or close).",
+      "description": "Triage Primbon inbox issues that are stale, blocked, in-review, or assigned-but-not-progressing, and decide a single next action per issue (resume, reassign, unblock, escalate, or close).",
       "path": "catalog/bundled/paperclip-operations/issue-triage",
       "entrypoint": "SKILL.md",
       "trustLevel": "markdown_only",
@@ -67,11 +67,11 @@
         {
           "path": "SKILL.md",
           "kind": "skill",
-          "sizeBytes": 4042,
-          "sha256": "df5bdc8bf5e017b7ba5f70a4b5323fad51d0c323278f386580f26cf43ad09160"
+          "sizeBytes": 4040,
+          "sha256": "df9bf6ba09f649ac7d29027c5b75a9c9080680fe13b0ef1db2bbd673af4d4bdd"
         }
       ],
-      "contentHash": "sha256:88dc13560371fb364963782cb4f6eeb4090fcde92ee3774479428ed6b90e11c1"
+      "contentHash": "sha256:a6ff68616dddd89d0b8efb9aedaf3cad4bf115042ce47e065c1c752cc0360334"
     },
     {
       "id": "paperclipai:bundled:paperclip-operations:reflection-coach",
@@ -102,11 +102,11 @@
         {
           "path": "SKILL.md",
           "kind": "skill",
-          "sizeBytes": 12028,
-          "sha256": "083d5fa8dc43c3ce7747e89c1afb6f6f42d0603a31808bffc5f8e56735f2d865"
+          "sizeBytes": 12026,
+          "sha256": "ea8d3d84c90b6546cef311a2bc1155d3e2fde64195612330bc2c02b91657f3f6"
         }
       ],
-      "contentHash": "sha256:f2592d81f616628a3eba92636616424f2eed82ec22bb504240a58f6be115e407"
+      "contentHash": "sha256:63a087ba653732bbfcc18ba08fb36943a144f381ce2e3892ab4fd1e65290b247"
     },
     {
       "id": "paperclipai:bundled:paperclip-operations:status-card-query",
@@ -115,7 +115,7 @@
       "category": "paperclip-operations",
       "slug": "status-card-query",
       "name": "status-card-query",
-      "description": "Create and maintain agent-authored Paperclip status cards, or compile a prose interest prompt into bounded CompanySearchQuery objects and write the first summary from the assigned Summarizer run.",
+      "description": "Create and maintain agent-authored Primbon status cards, or compile a prose interest prompt into bounded CompanySearchQuery objects and write the first summary from the assigned Summarizer run.",
       "path": "catalog/bundled/paperclip-operations/status-card-query",
       "entrypoint": "SKILL.md",
       "trustLevel": "markdown_only",
@@ -137,11 +137,11 @@
         {
           "path": "SKILL.md",
           "kind": "skill",
-          "sizeBytes": 6368,
-          "sha256": "0c6140f51d503cbadc98723ce54c0def48e7e31ea159b0935b8ad6369291498a"
+          "sizeBytes": 6364,
+          "sha256": "1cfe8cca5c0bd25d38b2c07ce9e691c6b4459ad6df0881588475572fbd787664"
         }
       ],
-      "contentHash": "sha256:2b6e53bf8491f027afdbd6961ad84f677cfd385a0a6a73616ea84111ca8886ed"
+      "contentHash": "sha256:ac991b142ed61c88131d537e487faa4ae13ef047cf9fe2308dc9ae08b0d60e4b"
     },
     {
       "id": "paperclipai:bundled:paperclip-operations:summarize-status",
@@ -150,7 +150,7 @@
       "category": "paperclip-operations",
       "slug": "summarize-status",
       "name": "summarize-status",
-      "description": "Write a short, colloquial summary for a Paperclip summary slot: open with the 1–3 specific, concrete actions the reader needs to take right now to unblock the work, then a brief plain-language status, streaming progress as it works.",
+      "description": "Write a short, colloquial summary for a Primbon summary slot: open with the 1–3 specific, concrete actions the reader needs to take right now to unblock the work, then a brief plain-language status, streaming progress as it works.",
       "path": "catalog/bundled/paperclip-operations/summarize-status",
       "entrypoint": "SKILL.md",
       "trustLevel": "markdown_only",
@@ -172,11 +172,11 @@
         {
           "path": "SKILL.md",
           "kind": "skill",
-          "sizeBytes": 8877,
-          "sha256": "4cb3d177f5d16e3cc2052d2f80e7fb245ab95e79c1e947abdc84cd4ee3d8c61e"
+          "sizeBytes": 8869,
+          "sha256": "5acc106fd374643ad212845c2696eb3307c30df4368bbb078fa1811fd7ca4121"
         }
       ],
-      "contentHash": "sha256:3e49ee2b8d83d1371fb0f59197bb96c46b64f722540405f46d4a5a756fbe1b89"
+      "contentHash": "sha256:27ae08ab2feddac3c24e2ca48aa97b986c5a7540e14aec314b68be1036b35e97"
     },
     {
       "id": "paperclipai:bundled:paperclip-operations:task-planning",
@@ -185,7 +185,7 @@
       "category": "paperclip-operations",
       "slug": "task-planning",
       "name": "task-planning",
-      "description": "Turn a Paperclip issue or request into a structured implementation plan with child task graph, blockers, owners, and acceptance criteria, then save it as the issue `plan` document.",
+      "description": "Turn a Primbon issue or request into a structured implementation plan with child task graph, blockers, owners, and acceptance criteria, then save it as the issue `plan` document.",
       "path": "catalog/bundled/paperclip-operations/task-planning",
       "entrypoint": "SKILL.md",
       "trustLevel": "markdown_only",
@@ -207,11 +207,11 @@
         {
           "path": "SKILL.md",
           "kind": "skill",
-          "sizeBytes": 4938,
-          "sha256": "9c52a44a30ec8d306119da51bf298e9e3e6c382a9a9559ffd3054bf5e0c75f36"
+          "sizeBytes": 4930,
+          "sha256": "672c79e55e042c79e138b3267e30ffba928b7e71b9ad0c89a1d343485e152d0a"
         }
       ],
-      "contentHash": "sha256:487c3116eead89fef4f71c984329c41836bd69951b7ef9ed8736c69435e02438"
+      "contentHash": "sha256:7f6a85b00fd053eac6ebc58667b1d10087618c248bcf2e0aaa1adc7e3d5ff4e4"
     },
     {
       "id": "paperclipai:bundled:product:paperclip-capsules",

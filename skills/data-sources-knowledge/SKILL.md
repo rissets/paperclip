@@ -1,14 +1,14 @@
 ---
 name: data-sources-knowledge
 description: >
-  Search, retrieve, and synthesize unstructured enterprise knowledge documents (PDF, DOCX, Markdown, Text, HTML)
-  using Hybrid Vector + Lexical BM25 retrieval and TypeSafe Jev verification. Use when answering questions about
-  company policies, standard operating procedures (SOP), SLAs, compliance, guidelines, and technical manuals.
+  Search, retrieve, and synthesize enterprise knowledge documents (PDF, DOCX, Markdown, HTML)
+  using hybrid vector + lexical BM25 retrieval. Use when answering questions about company policies,
+  standard operating procedures (SOP), SLAs, compliance, guidelines, and technical manuals.
 ---
 
 # Knowledge RAG & Semantic Retrieval Skill
 
-This skill equips Paperclip agents (such as `KnowledgeAgent`, `ResearchAgent`, or any agent assigned RAG data sources) to search, retrieve, and synthesize information from company knowledge documents using an ultra-fast Hybrid Retrieval engine (Dense Vector + Lexical BM25).
+This skill equips Primbon agents (such as `KnowledgeAgent`, `ResearchAgent`, or any agent assigned RAG data sources) to search, retrieve, and synthesize information from company knowledge documents using an ultra-fast Hybrid Retrieval engine (Dense Vector + Lexical BM25).
 
 ---
 

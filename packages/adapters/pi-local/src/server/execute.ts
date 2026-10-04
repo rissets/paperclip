@@ -126,6 +126,39 @@ async function ensurePiSkillsInjected(
   }
 }
 
+async function ensureWorkspaceSkillsInjected(
+  cwd: string,
+  onLog: AdapterExecutionContext["onLog"],
+  skillsEntries: Array<{ key: string; runtimeName: string; source: string }>,
+  desiredSkillNames?: string[],
+) {
+  if (!cwd) return;
+  const desiredSet = new Set(desiredSkillNames ?? skillsEntries.map((entry) => entry.key));
+  const selectedEntries = skillsEntries.filter((entry) => desiredSet.has(entry.key));
+  if (selectedEntries.length === 0) return;
+
+  const workspaceSkillsDir = path.join(cwd, "skills");
+  try {
+    await fs.mkdir(workspaceSkillsDir, { recursive: true });
+    for (const entry of selectedEntries) {
+      const target = path.join(workspaceSkillsDir, entry.runtimeName);
+      try {
+        await ensurePaperclipSkillSymlink(entry.source, target);
+      } catch (err) {
+        await onLog(
+          "stderr",
+          `[paperclip] Failed to inject workspace skill "${entry.runtimeName}" into ${workspaceSkillsDir}: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+    }
+  } catch (err) {
+    await onLog(
+      "stderr",
+      `[paperclip] Failed to create workspace skills dir ${workspaceSkillsDir}: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+  }
+}
+
 async function buildPiSkillsDir(config: Record<string, unknown>): Promise<string> {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pi-skills-"));
   const target = path.join(tmp, "skills");
@@ -273,6 +306,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const desiredPiSkillNames = resolveLegacyPaperclipDesiredSkillNames(config, piSkillEntries);
   if (!executionTargetIsRemote) {
     await ensurePiSkillsInjected(onLog, piSkillEntries, desiredPiSkillNames);
+    await ensureWorkspaceSkillsInjected(cwd, onLog, piSkillEntries, desiredPiSkillNames);
   }
 
   // Build environment

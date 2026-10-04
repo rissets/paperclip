@@ -70,7 +70,7 @@ export async function sendEmail(opts: SendEmailOptions): Promise<{ success: bool
   try {
     const transporter = getTransporter();
     const info = await transporter.sendMail({
-      from: `"Paperclip Control Plane" <${config.defaultFrom}>`,
+      from: `"Primbon Control Plane" <${config.defaultFrom}>`,
       to: opts.to,
       subject: opts.subject,
       html: opts.html,
@@ -116,11 +116,11 @@ export async function sendInvitationEmail(opts: InvitationEmailOptions) {
 </head>
 <body>
   <div class="container">
-    <div class="logo">Paperclip · Lokakara</div>
+    <div class="logo">Primbon · Lokakara</div>
     <div class="badge">Invitation</div>
-    <h1>You're invited to join Paperclip</h1>
+    <h1>You're invited to join Primbon</h1>
     <p>Hello${opts.name ? ` ${opts.name}` : ""},</p>
-    <p><strong>${inviter}</strong> has invited you to join the team on Paperclip Control Plane.</p>
+    <p><strong>${inviter}</strong> has invited you to join the team on Primbon Control Plane.</p>
     
     <div class="highlight-box">
       <div class="item-label">Assigned Workspaces</div>
@@ -146,7 +146,7 @@ export async function sendInvitationEmail(opts: InvitationEmailOptions) {
 
   return sendEmail({
     to: opts.email,
-    subject: `You've been invited to join ${companyListStr} on Paperclip`,
+    subject: `You've been invited to join ${companyListStr} on Primbon`,
     html,
   });
 }
@@ -173,11 +173,11 @@ export async function sendPasswordResetEmail(opts: PasswordResetEmailOptions) {
 </head>
 <body>
   <div class="container">
-    <div class="logo">Paperclip · Lokakara</div>
+    <div class="logo">Primbon · Lokakara</div>
     <div class="badge">Security</div>
     <h1>Reset your password</h1>
     <p>Hello${opts.name ? ` ${opts.name}` : ""},</p>
-    <p>We received a request to reset the password for your Paperclip account (<strong>${opts.email}</strong>).</p>
+    <p>We received a request to reset the password for your Primbon account (<strong>${opts.email}</strong>).</p>
 
     <div class="btn-container">
       <a href="${opts.resetUrl}" class="btn" target="_blank">Reset Password</a>
@@ -196,7 +196,7 @@ export async function sendPasswordResetEmail(opts: PasswordResetEmailOptions) {
 
   return sendEmail({
     to: opts.email,
-    subject: "Reset your Paperclip password",
+    subject: "Reset your Primbon password",
     html,
   });
 }

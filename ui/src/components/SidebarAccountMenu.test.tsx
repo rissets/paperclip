@@ -300,9 +300,9 @@ describe("SidebarAccountMenu", () => {
     expect(accountTrigger?.classList).not.toContain("hover:bg-background");
 
     const feedbackButton = container.querySelector<HTMLAnchorElement>(
-      'a[aria-label="Share feedback"]',
+      'a[aria-label="Contact Primbon"]',
     );
-    expect(feedbackButton?.getAttribute("href")).toBe("https://paperclip.ing/feedback");
+    expect(feedbackButton?.getAttribute("href")).toBe("https://hellodigi.id/contact");
     expect(feedbackButton?.getAttribute("target")).toBe("_blank");
     expect(feedbackButton?.classList).toContain("text-muted-foreground/50");
     expect(feedbackButton?.classList).not.toContain("text-border");
@@ -339,9 +339,9 @@ describe("SidebarAccountMenu", () => {
     expect(accountTrigger?.classList).toContain("hover:bg-accent/50");
 
     const feedbackButton = container.querySelector<HTMLAnchorElement>(
-      'a[aria-label="Share feedback"]',
+      'a[aria-label="Contact Primbon"]',
     );
-    expect(feedbackButton?.getAttribute("href")).toBe("https://paperclip.ing/feedback");
+    expect(feedbackButton?.getAttribute("href")).toBe("https://hellodigi.id/contact");
     expect(feedbackButton?.getAttribute("target")).toBe("_blank");
     expect(feedbackButton?.classList).toContain("text-muted-foreground/50");
     expect(feedbackButton?.classList).not.toContain("text-border");
@@ -357,7 +357,7 @@ describe("SidebarAccountMenu", () => {
 
     const popover = document.body.querySelector('[data-slot="popover-content"]');
     expect(popover?.textContent).not.toContain("Feedback");
-    expect(popover?.querySelector('a[href="https://paperclip.ing/feedback"]')).toBeNull();
+    expect(popover?.querySelector('a[href="https://hellodigi.id/contact"]')).toBeNull();
 
     await act(async () => root.unmount());
   });
@@ -384,7 +384,7 @@ describe("SidebarAccountMenu", () => {
     await flushReact();
     await flushReact();
 
-    expect(container.querySelector('a[aria-label="Share feedback"]')).not.toBeNull();
+    expect(container.querySelector('a[aria-label="Contact Primbon"]')).not.toBeNull();
     expect(container.textContent).toContain("Jane Example");
     expect(container.textContent).not.toContain("jane@example.com");
 
@@ -402,7 +402,7 @@ describe("SidebarAccountMenu", () => {
 
     const popover = document.body.querySelector('[data-slot="popover-content"]');
     expect(popover?.textContent).not.toContain("Feedback");
-    expect(popover?.querySelector('a[href="https://paperclip.ing/feedback"]')).toBeNull();
+    expect(popover?.querySelector('a[href="https://hellodigi.id/contact"]')).toBeNull();
 
     // Profile access moved off the action list: the header links to the
     // profile, and the separate view/edit rows are gone. Editing lives on the
@@ -500,7 +500,7 @@ describe("SidebarAccountMenu", () => {
     });
     await flushReact();
 
-    expect(container.querySelector('a[aria-label="Share feedback"]')).toBeNull();
+    expect(container.querySelector('a[aria-label="Contact Primbon"]')).toBeNull();
 
     // Cloud manages invitations in the stack's People settings, reached with a
     // same-tab top-level navigation rather than the in-app router.

@@ -81,10 +81,47 @@ export function parsePiJsonl(stdout: string): ParsedPiOutput {
     if (eventType === "agent_end") {
       const messages = event.messages as Array<Record<string, unknown>> | undefined;
       if (messages && messages.length > 0) {
-        const lastMessage = messages[messages.length - 1];
-        if (lastMessage?.role === "assistant") {
-          const content = lastMessage.content as string | Array<{ type: string; text?: string }>;
-          result.finalMessage = extractTextContent(content);
+        for (let i = messages.length - 1; i >= 0; i--) {
+          const msg = messages[i];
+          if (msg?.role === "assistant") {
+            const content = msg.content as string | Array<{ type: string; text?: string }>;
+            const text = extractTextContent(content);
+            if (text) {
+              result.finalMessage = text;
+              if (!result.messages.includes(text)) {
+                result.messages.push(text);
+              }
+              break;
+            }
+          }
+        }
+      }
+      continue;
+    }
+
+    if (eventType === "message_end") {
+      const message = asRecord(event.message);
+      if (message && message.role === "assistant") {
+        const content = message.content as string | Array<{ type: string; text?: string }>;
+        const text = extractTextContent(content);
+        if (text) {
+          result.finalMessage = text;
+          if (!result.messages.includes(text)) {
+            result.messages.push(text);
+          }
+        }
+
+        const usage = asRecord(message.usage);
+        if (usage) {
+          result.usage.inputTokens += asNumber(usage.input ?? usage.inputTokens, 0);
+          result.usage.outputTokens += asNumber(usage.output ?? usage.outputTokens, 0);
+          result.usage.cachedInputTokens += asNumber(usage.cacheRead ?? usage.cachedInputTokens, 0);
+          const cost = asRecord(usage.cost);
+          if (cost) {
+            result.usage.costUsd += asNumber(cost.total ?? usage.costUsd, 0);
+          } else if (typeof usage.costUsd === "number") {
+            result.usage.costUsd += usage.costUsd;
+          }
         }
       }
       continue;
@@ -225,6 +262,13 @@ export function parsePiJsonl(stdout: string): ParsedPiOutput {
           result.usage.costUsd += asNumber(usage.costUsd, 0);
         }
       }
+    }
+  }
+
+  if (!result.finalMessage && result.messages.length > 0) {
+    const lastMsg = result.messages[result.messages.length - 1];
+    if (lastMsg && lastMsg.trim().length > 0) {
+      result.finalMessage = lastMsg;
     }
   }
 

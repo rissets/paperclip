@@ -260,6 +260,54 @@ describe("parsePiJsonl", () => {
     const parsed = parsePiJsonl(stdout);
     expect(parsed.errors).toEqual([]);
   });
+
+  it("parses message_end assistant message and usage", () => {
+    const stdout = [
+      JSON.stringify({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Answer from message_end" }],
+          usage: { input: 15, output: 25, cacheRead: 5, cost: { total: 0.002 } },
+        },
+      }),
+    ].join("\n");
+
+    const parsed = parsePiJsonl(stdout);
+    expect(parsed.finalMessage).toBe("Answer from message_end");
+    expect(parsed.messages).toContain("Answer from message_end");
+    expect(parsed.usage.inputTokens).toBe(15);
+    expect(parsed.usage.outputTokens).toBe(25);
+    expect(parsed.usage.costUsd).toBe(0.002);
+  });
+
+  it("finds assistant message backwards in agent_end when trailing message is non-assistant", () => {
+    const stdout = [
+      JSON.stringify({
+        type: "agent_end",
+        messages: [
+          { role: "user", content: "hello" },
+          { role: "assistant", content: [{ type: "text", text: "Latest assistant answer" }] },
+          { role: "tool", content: "done" },
+        ],
+      }),
+    ].join("\n");
+
+    const parsed = parsePiJsonl(stdout);
+    expect(parsed.finalMessage).toBe("Latest assistant answer");
+  });
+
+  it("falls back to streamed messages if finalMessage was not explicitly set", () => {
+    const stdout = [
+      JSON.stringify({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "Streamed answer" },
+      }),
+    ].join("\n");
+
+    const parsed = parsePiJsonl(stdout);
+    expect(parsed.finalMessage).toBe("Streamed answer");
+  });
 });
 
 describe("isPiUnknownSessionError", () => {
