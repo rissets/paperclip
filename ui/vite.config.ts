@@ -37,6 +37,7 @@ export default defineConfig(({ mode }) => ({
   },
   server: {
     port: 5173,
+    allowedHosts: true,
     watch: createUiDevWatchOptions(process.cwd()),
     proxy: apiProxy,
   },
