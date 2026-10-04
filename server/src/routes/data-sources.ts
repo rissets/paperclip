@@ -456,6 +456,44 @@ export function dataSourceRoutes(db: Db) {
             }
           }
 
+          function stripSqlCommentsAndStrings(sql: string): string {
+            let result = "";
+            let i = 0;
+            const len = sql.length;
+            while (i < len) {
+              if (sql[i] === "-" && sql[i + 1] === "-") {
+                while (i < len && sql[i] !== "\n") i++;
+                result += " ";
+              } else if (sql[i] === "/" && sql[i + 1] === "*") {
+                i += 2;
+                while (i < len && !(sql[i] === "*" && sql[i + 1] === "/")) i++;
+                i += 2;
+                result += " ";
+              } else if (sql[i] === "'") {
+                i++;
+                while (i < len) {
+                  if (sql[i] === "'" && sql[i + 1] === "'") {
+                    i += 2;
+                  } else if (sql[i] === "'") {
+                    i++;
+                    break;
+                  } else if (sql[i] === "\\") {
+                    i += 2;
+                  } else {
+                    i++;
+                  }
+                }
+                result += " 'str' ";
+              } else {
+                result += sql[i];
+                i++;
+              }
+            }
+            return result;
+          }
+
+          const cleanSql = stripSqlCommentsAndStrings(sqlQuery);
+
           const reservedKeywords = new Set([
             "select", "from", "where", "group", "order", "by", "limit", "offset", "having",
             "union", "join", "inner", "left", "right", "full", "cross", "outer", "on", "as",
@@ -465,7 +503,7 @@ export function dataSourceRoutes(db: Db) {
           // Extract CTE names defined in WITH clauses (e.g. "WITH aggregation AS (...)")
           const cteNames = new Set<string>();
           const withMatches = Array.from(
-            sqlQuery.matchAll(/(?:with|,)\s*[`"']?([a-zA-Z0-9_]+)[`"']?\s+as\s*\(/gi),
+            cleanSql.matchAll(/(?:with|,)\s*[`"']?([a-zA-Z0-9_]+)[`"']?\s+as\s*\(/gi),
           );
           for (const m of withMatches) {
             const name = m[1].toLowerCase();
@@ -476,7 +514,7 @@ export function dataSourceRoutes(db: Db) {
 
           // Extract subquery aliases from FROM or JOIN (e.g. "FROM (...) AS subq")
           const fromSubqueryMatches = Array.from(
-            sqlQuery.matchAll(/(?:from|join)\s*\((?:[^)(]+|\((?:[^)(]+|\([^)(]*\))*\))*\)\s+(?:as\s+)?([a-zA-Z0-9_]+)/gi),
+            cleanSql.matchAll(/\)\s*(?:as\s+)?([a-zA-Z0-9_]+)/gi),
           );
           for (const m of fromSubqueryMatches) {
             const name = m[1].toLowerCase();
@@ -502,8 +540,10 @@ export function dataSourceRoutes(db: Db) {
 
           // Extract table names referenced in FROM or JOIN clauses (ignoring database prefix if present, e.g. "FROM default.tbl" -> tbl)
           const referencedTables = Array.from(
-            sqlQuery.matchAll(/(?:from|join)\s+(?:[`"']?([a-zA-Z0-9_]+)[`"']?\.)?[`"']?([a-zA-Z0-9_]+)[`"']?/gi),
-          ).map((m) => m[2].toLowerCase());
+            cleanSql.matchAll(/(?:from|join)\s+[`"']?([a-zA-Z0-9_]+)[`"']?(?:\.[`"']?([a-zA-Z0-9_]+)[`"']?)?/gi),
+          )
+            .map((m) => (m[2] || m[1]).toLowerCase())
+            .filter((t) => !reservedKeywords.has(t));
 
           for (const tbl of referencedTables) {
             if (builtInClickhouseNames.has(tbl)) continue;

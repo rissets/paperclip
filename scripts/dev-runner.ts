@@ -551,7 +551,100 @@ async function maybePreflightMigrations(options: { interactive?: boolean; autoAp
   await refreshPendingMigrations();
 }
 
+function newestMtimeMs(target: string): number {
+  const stat = statSync(target, { throwIfNoEntry: false });
+  if (!stat) return 0;
+  if (!stat.isDirectory()) return stat.mtimeMs;
+  let newest = stat.mtimeMs;
+  for (const entry of readdirSync(target)) {
+    if (
+      entry === "node_modules" ||
+      entry === ".git" ||
+      entry === "dist" ||
+      entry === ".turbo" ||
+      entry === ".vite"
+    ) {
+      continue;
+    }
+    const childNewest = newestMtimeMs(path.join(target, entry));
+    if (childNewest > newest) newest = childNewest;
+  }
+  return newest;
+}
+
+function pluginSdkIsFresh(): boolean {
+  if (
+    process.env.PAPERCLIP_DEV_FORCE_BUILD === "true" ||
+    process.env.PAPERCLIP_DEV_FORCE_BUILD === "1"
+  ) {
+    return false;
+  }
+  const outputs = [
+    path.join(repoRoot, "packages", "plugins", "sdk", "dist", "index.js"),
+    path.join(repoRoot, "packages", "shared", "dist", "index.js"),
+  ];
+  let oldestOutputMtime = Infinity;
+  for (const output of outputs) {
+    const stat = statSync(output, { throwIfNoEntry: false });
+    if (!stat?.isFile()) return false;
+    if (stat.mtimeMs < oldestOutputMtime) {
+      oldestOutputMtime = stat.mtimeMs;
+    }
+  }
+
+  const sources = [
+    path.join(repoRoot, "packages", "plugins", "sdk", "src"),
+    path.join(repoRoot, "packages", "plugins", "sdk", "package.json"),
+    path.join(repoRoot, "packages", "plugins", "sdk", "tsconfig.json"),
+    path.join(repoRoot, "packages", "shared", "src"),
+    path.join(repoRoot, "packages", "shared", "package.json"),
+    path.join(repoRoot, "packages", "shared", "tsconfig.json"),
+  ];
+
+  return sources.every((source) => newestMtimeMs(source) <= oldestOutputMtime);
+}
+
+function paperclipRunnerIsFresh(): boolean {
+  if (
+    process.env.PAPERCLIP_DEV_FORCE_BUILD === "true" ||
+    process.env.PAPERCLIP_DEV_FORCE_BUILD === "1"
+  ) {
+    return false;
+  }
+  const outputs = [
+    path.join(repoRoot, "packages", "paperclip-runner", "dist", "index.js"),
+    path.join(repoRoot, "packages", "paperclip-runner", "dist", "cli", "acpx-runtime-sidecar.js"),
+    path.join(repoRoot, "packages", "paperclip-runner", "dist", "cli", "opencode-app-server-proxy.js"),
+    path.join(repoRoot, "packages", "paperclip-eval-kernel", "dist", "index.js"),
+  ];
+  let oldestOutputMtime = Infinity;
+  for (const output of outputs) {
+    const stat = statSync(output, { throwIfNoEntry: false });
+    if (!stat?.isFile()) return false;
+    if (stat.mtimeMs < oldestOutputMtime) {
+      oldestOutputMtime = stat.mtimeMs;
+    }
+  }
+
+  const sources = [
+    path.join(repoRoot, "packages", "paperclip-runner", "src"),
+    path.join(repoRoot, "packages", "paperclip-runner", "protocol"),
+    path.join(repoRoot, "packages", "paperclip-runner", "scripts"),
+    path.join(repoRoot, "packages", "paperclip-runner", "package.json"),
+    path.join(repoRoot, "packages", "paperclip-runner", "tsconfig.json"),
+    path.join(repoRoot, "packages", "paperclip-runner", "tsconfig.surfaces.json"),
+    path.join(repoRoot, "packages", "paperclip-eval-kernel", "src"),
+    path.join(repoRoot, "packages", "paperclip-eval-kernel", "package.json"),
+    path.join(repoRoot, "packages", "paperclip-eval-kernel", "tsconfig.json"),
+  ];
+
+  return sources.every((source) => newestMtimeMs(source) <= oldestOutputMtime);
+}
+
 async function buildPluginSdk() {
+  if (pluginSdkIsFresh()) {
+    return;
+  }
   console.log("[paperclip] building plugin sdk...");
   const result = await runPnpm(
     ["--filter", "@paperclipai/plugin-sdk", "build"],
@@ -597,18 +690,31 @@ async function getNativeRunnerRequired(): Promise<boolean> {
 }
 
 async function buildPaperclipRunner() {
-  console.log("[paperclip] building paperclip runner...");
-  const typescriptResult = await runPnpm(
-    ["--filter", "@paperclipai/paperclip-runner", "build:typescript"],
-    { stdio: "inherit" },
-  );
-  if (typescriptResult.signal) {
-    exitForSignal(typescriptResult.signal);
-    return;
+  if (!paperclipRunnerIsFresh()) {
+    console.log("[paperclip] building paperclip runner...");
+    const typescriptResult = await runPnpm(
+      ["--filter", "@paperclipai/paperclip-runner", "build:typescript"],
+      { stdio: "inherit" },
+    );
+    if (typescriptResult.signal) {
+      exitForSignal(typescriptResult.signal);
+      return;
+    }
+    if (typescriptResult.code !== 0) {
+      console.error("[paperclip] paperclip runner build failed");
+      process.exit(typescriptResult.code);
+    }
   }
-  if (typescriptResult.code !== 0) {
-    console.error("[paperclip] paperclip runner build failed");
-    process.exit(typescriptResult.code);
+
+  // Fast-path: if the native binary is already fresh on disk, avoid the extra pnpm child process.
+  if (
+    !paperclipRunnerBinaryNeedsBuild({
+      repoRoot,
+      nativeRunnerRequired: true,
+      configuredBinary: env.PAPERCLIP_RUNNER_BINARY,
+    })
+  ) {
+    return;
   }
 
   if (
@@ -634,19 +740,6 @@ async function buildPaperclipRunner() {
     console.error("[paperclip] paperclip runner native binary build failed");
     process.exit(binaryResult.code);
   }
-}
-
-function newestMtimeMs(target: string): number {
-  const stat = statSync(target, { throwIfNoEntry: false });
-  if (!stat) return 0;
-  if (!stat.isDirectory()) return stat.mtimeMs;
-  let newest = stat.mtimeMs;
-  for (const entry of readdirSync(target)) {
-    if (entry === "node_modules" || entry === ".git" || entry === "dist") continue;
-    const childNewest = newestMtimeMs(path.join(target, entry));
-    if (childNewest > newest) newest = childNewest;
-  }
-  return newest;
 }
 
 function uiBundleIsFresh(): boolean {

@@ -387,7 +387,63 @@ async function maybePreflightMigrations(options = {}) {
   await refreshPendingMigrations();
 }
 
+function newestMtimeMs(target) {
+  const stat = statSync(target, { throwIfNoEntry: false });
+  if (!stat) return 0;
+  if (!stat.isDirectory()) return stat.mtimeMs;
+  let newest = stat.mtimeMs;
+  for (const entry of readdirSync(target)) {
+    if (
+      entry === "node_modules" ||
+      entry === ".git" ||
+      entry === "dist" ||
+      entry === ".turbo" ||
+      entry === ".vite"
+    ) {
+      continue;
+    }
+    const childNewest = newestMtimeMs(path.join(target, entry));
+    if (childNewest > newest) newest = childNewest;
+  }
+  return newest;
+}
+
+function pluginSdkIsFresh() {
+  if (
+    process.env.PAPERCLIP_DEV_FORCE_BUILD === "true" ||
+    process.env.PAPERCLIP_DEV_FORCE_BUILD === "1"
+  ) {
+    return false;
+  }
+  const outputs = [
+    path.join(repoRoot, "packages", "plugins", "sdk", "dist", "index.js"),
+    path.join(repoRoot, "packages", "shared", "dist", "index.js"),
+  ];
+  let oldestOutputMtime = Infinity;
+  for (const output of outputs) {
+    const stat = statSync(output, { throwIfNoEntry: false });
+    if (!stat?.isFile()) return false;
+    if (stat.mtimeMs < oldestOutputMtime) {
+      oldestOutputMtime = stat.mtimeMs;
+    }
+  }
+
+  const sources = [
+    path.join(repoRoot, "packages", "plugins", "sdk", "src"),
+    path.join(repoRoot, "packages", "plugins", "sdk", "package.json"),
+    path.join(repoRoot, "packages", "plugins", "sdk", "tsconfig.json"),
+    path.join(repoRoot, "packages", "shared", "src"),
+    path.join(repoRoot, "packages", "shared", "package.json"),
+    path.join(repoRoot, "packages", "shared", "tsconfig.json"),
+  ];
+
+  return sources.every((source) => newestMtimeMs(source) <= oldestOutputMtime);
+}
+
 async function buildPluginSdk() {
+  if (pluginSdkIsFresh()) {
+    return;
+  }
   console.log("[paperclip] building plugin sdk...");
   const result = await runPnpm(
     ["--filter", "@paperclipai/plugin-sdk", "build"],
