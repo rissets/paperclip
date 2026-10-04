@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type {
   SuggestedQueryTemplate,
   TableRelation,
@@ -114,6 +116,24 @@ export class AiReasoningService {
       process.env.OPENAI_API_KEY ||
       "";
 
+    if (!this.routerApiKey) {
+      try {
+        const hostDir = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
+        const hostModelsPath = path.join(hostDir, "models.json");
+        if (fs.existsSync(hostModelsPath)) {
+          const raw = JSON.parse(fs.readFileSync(hostModelsPath, "utf8"));
+          if (raw?.providers?.rissets?.apiKey) {
+            this.routerApiKey = raw.providers.rissets.apiKey;
+          }
+          if (raw?.providers?.rissets?.baseUrl) {
+            this.routerBaseUrl = raw.providers.rissets.baseUrl;
+          }
+        }
+      } catch {
+        // host models.json not present
+      }
+    }
+
     this.defaultModel = "rissets/neural/deepseek-v4.1-flash";
   }
 
@@ -161,21 +181,23 @@ export class AiReasoningService {
       let rawOutput: string | null = null;
       let execError: string | null = null;
 
-      // 1. Run through Pi CLI with agent configuration
-      try {
-        rawOutput = await this.runViaPiCli(currentPrompt, model, instructionsPath);
-      } catch (err: any) {
-        execError = err.message;
-        console.warn(`[${agentName}] Iteration ${iteration} Pi execution failed: ${err.message}. Trying direct router fallback.`);
-      }
-
-      // 2. Fallback to router HTTP if Pi CLI had issues
-      if (!rawOutput) {
+      // 1. Prioritize direct HTTP router inference if API key is available (fast 1-3s vs CLI process overhead)
+      if (this.routerApiKey) {
         try {
           rawOutput = await this.runViaRouterHttp(currentPrompt, model);
         } catch (err: any) {
+          execError = `Router HTTP failed: ${err.message}`;
+          console.warn(`[${agentName}] Iteration ${iteration} Router HTTP failed: ${err.message}. Trying Pi CLI fallback.`);
+        }
+      }
+
+      // 2. Fall back to Pi CLI if router HTTP did not return an output
+      if (!rawOutput) {
+        try {
+          rawOutput = await this.runViaPiCli(currentPrompt, model, instructionsPath);
+        } catch (err: any) {
           execError = (execError ? `${execError}; ` : "") + err.message;
-          console.warn(`[${agentName}] Iteration ${iteration} Router execution failed: ${err.message}`);
+          console.warn(`[${agentName}] Iteration ${iteration} Pi execution failed: ${err.message}`);
         }
       }
 
@@ -1113,7 +1135,7 @@ Instructions:
     instructionsPath?: string,
   ): Promise<string> {
     return new Promise((resolve, reject) => {
-      const args: string[] = ["--model", model, "--no-session"];
+      const args: string[] = ["--model", model, "--no-session", "--no-extensions"];
 
       if (instructionsPath && fs.existsSync(instructionsPath)) {
         args.push("--append-system-prompt", instructionsPath);
@@ -1134,8 +1156,8 @@ Instructions:
 
       const timer = setTimeout(() => {
         proc.kill("SIGKILL");
-        reject(new Error("Pi execution timed out (90s)"));
-      }, 90000);
+        reject(new Error("Pi execution timed out (45s)"));
+      }, 45000);
 
       proc.stdout.on("data", (chunk) => {
         stdout += chunk.toString();
