@@ -134,8 +134,8 @@ export function AuthPage() {
             {mode === "forgot_password"
               ? "Reset your password"
               : mode === "sign_in"
-                ? "Sign in to Paperclip"
-                : "Create your Paperclip account"}
+                ? "Sign in to Primbon"
+                : "Create your Primbon account"}
           </h1>
           <p className="mt-1 text-sm text-muted-foreground">
             {mode === "forgot_password"

@@ -293,6 +293,20 @@ export function SidebarAccountMenu({
           </Tooltip>
         ) : null}
       </div>
+      {!rail ? (
+        <div className="mt-1 flex items-center justify-between px-2 pt-0.5 text-(length:--text-micro) text-muted-foreground/60">
+          <span className="truncate font-medium tracking-tight">Primbon by hellodigi</span>
+        </div>
+      ) : (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <div className="mt-1 flex justify-center py-0.5">
+              <span className="size-1.5 rounded-full bg-muted-foreground/40" />
+            </div>
+          </TooltipTrigger>
+          <TooltipContent side="right">Primbon by hellodigi</TooltipContent>
+        </Tooltip>
+      )}
     </div>
   );
 }

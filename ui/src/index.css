@@ -1413,6 +1413,38 @@ select:where(:not([multiple]):not(.appearance-none)):where(:not([size]), [size="
   transform-origin: 50% 50%;
 }
 
+@keyframes primbon-pulse-facet {
+  0%, 100% {
+    opacity: 0.45;
+    transform: scale(0.97);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.02);
+  }
+}
+
+.primbon-anim-facet-h {
+  animation: primbon-pulse-facet 2.2s ease-in-out infinite;
+  transform-origin: 50% 50%;
+}
+.primbon-anim-facet-c1 {
+  animation: primbon-pulse-facet 2.2s ease-in-out infinite 0.3s;
+  transform-origin: 50% 50%;
+}
+.primbon-anim-facet-c2 {
+  animation: primbon-pulse-facet 2.2s ease-in-out infinite 0.6s;
+  transform-origin: 50% 50%;
+}
+.primbon-anim-facet-f1 {
+  animation: primbon-pulse-facet 2.2s ease-in-out infinite 0.15s;
+  transform-origin: 50% 50%;
+}
+.primbon-anim-facet-f2 {
+  animation: primbon-pulse-facet 2.2s ease-in-out infinite 0.45s;
+  transform-origin: 50% 50%;
+}
+
 @keyframes paperclip-thinking-draw {
   0% {
     stroke-dasharray: 0 85.717;
@@ -2917,6 +2949,8 @@ span.paperclip-mention-chip[data-mention-kind="external-object"] {
    * allow ui/src/components/IssueColumns.tsx — accentColor fallback also feeds pickTextColorForPillBg() contrast math (lib/color-contrast.ts), which needs a real hex string to compute luminance
    * allow ui/src/components/CompanyPatternIcon.tsx — canvas 2D fillStyle built from a runtime-computed template literal, not a static literal at all
    * allow ui/src/components/onboarding/PillGuy.tsx — inline rendering of the approved pill-1 dormant/alive brand SVG assets; their fixed eye, body, tuft, and gradient fills are the illustration artwork rather than themeable interface colors
+   * allow ui/src/components/PrimbonLogo.tsx — Primbon brand mark SVG artwork (gradient stop colors)
+   * allow ui/src/components/PrimbonLockup.tsx — Primbon brand lockup SVG artwork (gradient stop colors)
    * allow ui/src/components/ui/scroll-area.tsx — rounded-[inherit] is a CSS keyword, not a literal value; nothing to extract
    * allow ui/src/components/ui/dialog.tsx — tw-animate-css plugin utilities (zoom-in-[0.97], zoom-out-[0.97], slide-in-from-top-[1%], slide-out-to-top-[1%], animate-in, animate-out, fade-in-0, fade-out-0) are dead/no-op classes today (the tw-animate-css plugin is not installed and no matching @utility exists in this file; confirmed via grep of the built storybook-static CSS — none of these class names emit any rule); nothing to tokenize without visually changing a currently-inert class
    * allow ui/src/components/ui/alert-dialog.tsx — same tw-animate-css dead-class situation as dialog.tsx (zoom-out-[0.97], zoom-in-[0.97])

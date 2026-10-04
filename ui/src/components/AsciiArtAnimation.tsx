@@ -4,30 +4,32 @@ const CHARS = [" ", ".", "·", "▪", "▫", "○"] as const;
 const TARGET_FPS = 24;
 const FRAME_INTERVAL_MS = 1000 / TARGET_FPS;
 
-const PAPERCLIP_SPRITES = [
+const PRIMBON_SPRITES = [
   [
-    "  ╭────╮ ",
-    " ╭╯╭──╮│ ",
-    " │ │  ││ ",
-    " │ │  ││ ",
-    " │ │  ││ ",
-    " │ │  ││ ",
-    " │ ╰──╯│ ",
-    " ╰─────╯ ",
+    " ╭────╮   ▪ ",
+    " │ ╭──╯  ╱│ ",
+    " ├───┼───┤│ ",
+    " │╱  ╰──╮││ ",
+    " ▪   ╰───╯  ",
   ],
   [
-    " ╭─────╮ ",
-    " │╭──╮╰╮ ",
-    " ││  │ │ ",
-    " ││  │ │ ",
-    " ││  │ │ ",
-    " ││  │ │ ",
-    " │╰──╯ │ ",
-    " ╰────╯  ",
+    " ┌────┐   ■ ",
+    " │ ┌──┘  ╱│ ",
+    " ├───┼───┤│ ",
+    " │╱  └──┐││ ",
+    " ■   └───┘  ",
+  ],
+  [
+    " ┏━━━━┓   ◆ ",
+    " ┃ ┏━━┛  ╱┃ ",
+    " ┣━━━╋━━━┫┃ ",
+    " ┃╱  ┗━━┓┃┃ ",
+    " ◆   ┗━━━┛  ",
   ],
 ] as const;
 
-type PaperclipSprite = (typeof PAPERCLIP_SPRITES)[number];
+const PAPERCLIP_SPRITES = PRIMBON_SPRITES;
+type PaperclipSprite = (typeof PRIMBON_SPRITES)[number];
 
 interface Clip {
   x: number;

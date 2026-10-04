@@ -68,10 +68,10 @@ const LIVE_COMPLETION_ENVELOPE = createCodexTaskEnvelope({
   criteria: LIVE_COMPLETION_CONTRACT.criterionIds.map((id) => ({ id, requirement: "Complete the current requested action." })),
 });
 const LIVE_BASE_INSTRUCTIONS = [
-  "You are operating one mock Paperclip issue through typed semantic tools.",
-  "Use only the tools exposed in this thread; never call a Paperclip REST API.",
+  "You are operating one mock Primbon issue through typed semantic tools.",
+  "Use only the tools exposed in this thread; never call a Primbon REST API.",
   "Treat every tool result as authoritative mock state and use it in your next response.",
-  "The user conversation and provider are real, but all Paperclip records are mock records.",
+  "The user conversation and provider are real, but all Primbon records are mock records.",
   "Do not discover skills, credentials, endpoints, or hidden control-plane capabilities.",
 ].join(" ");
 const CODEX_PERMISSION_PROFILE = "paperclip-runner-workspace-only";

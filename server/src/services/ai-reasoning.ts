@@ -317,7 +317,7 @@ export class AiReasoningService {
       })
       .join("\n");
 
-    const initialPrompt = `You are Paperclip's built-in Structured Ingestion Agent.
+    const initialPrompt = `You are Primbon's built-in Structured Ingestion Agent.
 Analyze this newly onboarded table for business semantic profiling, entity discovery, and cross-table relations.
 
 Target Table: ${tableName}
@@ -567,7 +567,7 @@ Respond with ONLY valid JSON (no markdown formatting, no code block backticks):
       )
       .join("\n\n---\n\n");
 
-    const initialPrompt = `You are Paperclip's built-in Knowledge Ingestion Agent.
+    const initialPrompt = `You are Primbon's built-in Knowledge Ingestion Agent.
 Your mission is to perform deep semantic document analysis, domain taxonomy classification, key entities extraction, passage synthesis, target agent affinity determination, and semantic retrieval query generation for unstructured knowledge base onboarding.
 
 Document Name: ${fileName}
@@ -743,7 +743,7 @@ Respond with ONLY valid JSON (no markdown formatting, no code block backticks):
       return `- Table '${t.tableName}' (Rows: ${t.rowCount}):\n  Columns: ${colList.join(", ")}${moreStr}`;
     }).join("\n\n");
 
-    const initialPrompt = `You are Paperclip's built-in Database Ingestion Agent.
+    const initialPrompt = `You are Primbon's built-in Database Ingestion Agent.
 Your mission is to handle live relational database connections, catalog introspection, business entity discovery, table role classification, cross-table relationship synthesis, and analytical SQL query generation.
 
 Database Engine: ${dbType}
