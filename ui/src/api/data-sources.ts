@@ -56,6 +56,18 @@ export const dataSourcesApi = {
       `/companies/${encodeURIComponent(companyId)}/data-sources/${encodeURIComponent(id)}`,
     ),
 
+  reprocess: (companyId: string, id: string) =>
+    api.post<{ success: boolean; data: DataSource }>(
+      `/companies/${encodeURIComponent(companyId)}/data-sources/${encodeURIComponent(id)}/reprocess`,
+      {},
+    ),
+
+  reprocessStuck: (companyId: string) =>
+    api.post<{ success: boolean; count: number; data: DataSource[] }>(
+      `/companies/${encodeURIComponent(companyId)}/data-sources/reprocess-stuck`,
+      {},
+    ),
+
   queryTable: (
     companyId: string,
     dataSourceId: string,

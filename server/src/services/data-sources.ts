@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { eq, ne, and, or, ilike, desc, sql, isNull, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
@@ -495,6 +497,82 @@ export class DataSourcesService {
       .where(and(eq(dataSources.id, id), eq(dataSources.companyId, companyId)))
       .returning();
     return !!deleted;
+  }
+
+  /**
+   * Reprocess a single data source by re-running its onboarding pipeline
+   */
+  async reprocess(companyId: string, id: string): Promise<DataSource> {
+    const ds = await this.getById(companyId, id);
+    if (!ds) {
+      throw new Error(`Data source not found: ${id}`);
+    }
+
+    if (!ds.storagePath || !fs.existsSync(ds.storagePath)) {
+      throw new Error(`File sumber fisik tidak ditemukan di disk: ${ds.storagePath || "kosong"}`);
+    }
+
+    // Clean up existing tables, records, chunks
+    await this.db.delete(dataSourceRecords).where(eq(dataSourceRecords.dataSourceId, id));
+    await this.db.delete(dataSourceTables).where(eq(dataSourceTables.dataSourceId, id));
+    await this.db.delete(dataSourceChunks).where(eq(dataSourceChunks.dataSourceId, id));
+
+    // Reset status to processing
+    await this.db
+      .update(dataSources)
+      .set({ status: "processing", updatedAt: new Date() })
+      .where(and(eq(dataSources.id, id), eq(dataSources.companyId, companyId)));
+
+    const fileBuffer = fs.readFileSync(ds.storagePath);
+    const file = {
+      buffer: fileBuffer,
+      originalname: ds.fileName || `${ds.name}.csv`,
+      mimetype: ds.mimeType || "application/octet-stream",
+      size: ds.fileSize || fileBuffer.length,
+    };
+
+    const ext = path.extname(ds.fileName || "").toLowerCase().replace(".", "") || "csv";
+
+    const { OnboardingOrchestratorService } = await import("./onboarding-orchestrator.js");
+    const orchestrator = new OnboardingOrchestratorService(this.db);
+
+    const reprocessed = await (orchestrator as any).executeOnboardingPipeline(
+      companyId,
+      ds,
+      file,
+      { collectionId: ds.collectionId ?? undefined, async: false, skipCorrelation: false },
+      ds.name,
+      ext,
+      ds.sourceType,
+    );
+
+    return reprocessed;
+  }
+
+  /**
+   * Reprocess all data sources in a company that are currently stuck or in error status
+   */
+  async reprocessStuck(companyId: string): Promise<DataSource[]> {
+    const stuck = await this.db
+      .select({ id: dataSources.id })
+      .from(dataSources)
+      .where(
+        and(
+          eq(dataSources.companyId, companyId),
+          or(eq(dataSources.status, "processing"), eq(dataSources.status, "error")),
+        ),
+      );
+
+    const results: DataSource[] = [];
+    for (const item of stuck) {
+      try {
+        const res = await this.reprocess(companyId, item.id);
+        results.push(res);
+      } catch (err: any) {
+        console.error(`[DataSourcesService] Failed to reprocess ${item.id}:`, err.message);
+      }
+    }
+    return results;
   }
 
   /**

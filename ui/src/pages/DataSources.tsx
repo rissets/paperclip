@@ -24,6 +24,7 @@ import {
   FolderPlus,
   Network,
 } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { useCompany } from "@/context/CompanyContext";
 import { useUserRbac } from "@/hooks/useUserRbac";
 import { dataSourcesApi } from "@/api/data-sources";
@@ -201,6 +202,20 @@ export function DataSources() {
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => dataSourcesApi.delete(selectedCompanyId!, id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["data-sources", selectedCompanyId] });
+    },
+  });
+
+  const reprocessMutation = useMutation({
+    mutationFn: (id: string) => dataSourcesApi.reprocess(selectedCompanyId!, id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["data-sources", selectedCompanyId] });
+    },
+  });
+
+  const reprocessStuckMutation = useMutation({
+    mutationFn: () => dataSourcesApi.reprocessStuck(selectedCompanyId!),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["data-sources", selectedCompanyId] });
     },
@@ -422,6 +437,19 @@ export function DataSources() {
             <Zap className="h-3.5 w-3.5 text-amber-500" />
             {syncClickhouseMutation.isPending ? "Syncing OLAP..." : "Sync ClickHouse"}
           </button>
+          {dataSources.some((d) => d.status === "processing" || d.status === "error") && (
+            <button
+              onClick={() => reprocessStuckMutation.mutate()}
+              disabled={reprocessStuckMutation.isPending}
+              title="Reprocess all data sources currently stuck in processing or error"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs font-medium text-amber-600 dark:text-amber-400 shadow-sm transition-colors hover:bg-amber-500/20 disabled:opacity-50"
+            >
+              <RefreshCw className={cn("h-3.5 w-3.5", reprocessStuckMutation.isPending && "animate-spin")} />
+              {reprocessStuckMutation.isPending
+                ? "Reprocessing..."
+                : `Reprocess Stuck (${dataSources.filter((d) => d.status === "processing" || d.status === "error").length})`}
+            </button>
+          )}
           <button
             onClick={() => backfillMutation.mutate()}
             disabled={backfillMutation.isPending}
@@ -935,17 +963,36 @@ export function DataSources() {
                   </div>
 
                   <div className="mt-4 flex items-center justify-between border-t border-border pt-3">
-                    <button
-                      onClick={() => {
-                        if (confirm(`Delete data source '${ds.name}'?`)) {
-                          deleteMutation.mutate(ds.id);
-                        }
-                      }}
-                      className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-destructive transition-colors"
-                      title="Delete data source"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={() => {
+                          if (confirm(`Delete data source '${ds.name}'?`)) {
+                            deleteMutation.mutate(ds.id);
+                          }
+                        }}
+                        className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-destructive transition-colors"
+                        title="Delete data source"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                      <button
+                        onClick={() => {
+                          reprocessMutation.mutate(ds.id);
+                        }}
+                        disabled={reprocessMutation.isPending && (reprocessMutation.variables as any) === ds.id}
+                        className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-primary transition-colors disabled:opacity-50"
+                        title="Reprocess data source (re-run AI analysis & sync)"
+                      >
+                        <RefreshCw
+                          className={cn(
+                            "h-4 w-4",
+                            reprocessMutation.isPending &&
+                              (reprocessMutation.variables as any) === ds.id &&
+                              "animate-spin text-primary",
+                          )}
+                        />
+                      </button>
+                    </div>
                     <Link
                       to={`/data-sources/${ds.id}`}
                       className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"

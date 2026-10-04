@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useParams, Link } from "react-router-dom";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Database,
   FileSpreadsheet,
@@ -12,6 +12,7 @@ import {
   AlertCircle,
   Loader2,
   Play,
+  RefreshCw,
   Server,
   GitBranch,
   Key,
@@ -36,11 +37,13 @@ import {
 import { useCompany } from "@/context/CompanyContext";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { dataSourcesApi } from "@/api/data-sources";
+import { cn } from "@/lib/utils";
 import type { SqlQueryResult, StructuredQueryResult } from "@paperclipai/shared";
 
 export function DataSourceDetail() {
   const { id } = useParams<{ id: string }>();
   const { selectedCompanyId } = useCompany();
+  const queryClient = useQueryClient();
 
   const [activeTab, setActiveTab] = useState<string>("schema");
   const [selectedTableIndex, setSelectedTableIndex] = useState(0);
@@ -107,6 +110,14 @@ export function DataSourceDetail() {
         dataSourceId: id,
         limit: 5,
       }),
+  });
+
+  const reprocessMutation = useMutation({
+    mutationFn: () => dataSourcesApi.reprocess(selectedCompanyId!, id!),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["data-source", selectedCompanyId, id] });
+      queryClient.invalidateQueries({ queryKey: ["data-sources", selectedCompanyId] });
+    },
   });
 
   if (!selectedCompanyId || !id) {
@@ -276,6 +287,23 @@ export function DataSourceDetail() {
                 </div>
               )}
             </div>
+          </div>
+
+          <div className="flex items-center gap-2 self-start sm:self-center">
+            <button
+              onClick={() => reprocessMutation.mutate()}
+              disabled={reprocessMutation.isPending}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-xs font-medium text-foreground shadow-sm transition-colors hover:bg-muted disabled:opacity-50"
+              title="Reprocess data source (re-run AI analysis & sync)"
+            >
+              <RefreshCw
+                className={cn(
+                  "h-3.5 w-3.5",
+                  reprocessMutation.isPending && "animate-spin text-primary",
+                )}
+              />
+              {reprocessMutation.isPending ? "Reprocessing..." : "Reprocess"}
+            </button>
           </div>
         </div>
       </div>

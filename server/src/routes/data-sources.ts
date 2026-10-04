@@ -294,6 +294,23 @@ export function dataSourceRoutes(db: Db) {
     res.json({ success: true, id });
   });
 
+  // 4b. Reprocess single data source
+  router.post("/companies/:companyId/data-sources/:id/reprocess", async (req: Request, res: Response) => {
+    const companyId = req.params.companyId as string;
+    const id = req.params.id as string;
+    await assertCanManageDataSources(req, companyId);
+    const result = await dsService.reprocess(companyId, id);
+    res.json({ success: true, data: result });
+  });
+
+  // 4c. Reprocess all stuck/error data sources
+  router.post("/companies/:companyId/data-sources/reprocess-stuck", async (req: Request, res: Response) => {
+    const companyId = req.params.companyId as string;
+    await assertCanManageDataSources(req, companyId);
+    const results = await dsService.reprocessStuck(companyId);
+    res.json({ success: true, count: results.length, data: results });
+  });
+
   // 5. Query structured table
   router.post(
     "/companies/:companyId/data-sources/:id/tables/:tableId/query",
