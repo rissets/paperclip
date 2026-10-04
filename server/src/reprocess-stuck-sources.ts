@@ -14,7 +14,7 @@ import { DataSourceCollectionsService } from "./services/data-source-collections
 
 async function run() {
   const config = loadConfig();
-  const dbUrl = config.database.url;
+  const dbUrl = config.databaseUrl || process.env.DATABASE_URL;
   if (!dbUrl) throw new Error("DATABASE_URL is not configured");
 
   console.log(`[Reprocess] Connecting to DB: ${dbUrl.replace(/:[^:@]+@/, ":***@")}`);
