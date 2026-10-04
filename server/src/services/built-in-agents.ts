@@ -691,6 +691,7 @@ const DEFINITIONS = validateBuiltInAgentDefinitions([
     defaultSkillKeys: [
       "paperclipai/paperclip/data-sources-structured",
       "paperclipai/paperclip/database-integration",
+      "paperclipai/paperclip/diagram-chart-rendering",
       "paperclipai/paperclip/data-sources",
       "paperclipai/paperclip/paperclip",
     ],
@@ -719,6 +720,7 @@ const DEFINITIONS = validateBuiltInAgentDefinitions([
     defaultBudgetMonthlyCents: 0,
     defaultSkillKeys: [
       "paperclipai/paperclip/data-sources-knowledge",
+      "paperclipai/paperclip/diagram-chart-rendering",
       "paperclipai/paperclip/data-sources",
       "paperclipai/paperclip/paperclip",
     ],

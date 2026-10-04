@@ -68,7 +68,23 @@ python3 skills/data-sources-structured/scripts/query_structured.py \
    ```
 2. **Multi-Stage Common Table Expressions (CTEs)**:
    You can freely structure queries using CTEs (`WITH <cte_name> AS (...) SELECT ... FROM <cte_name>`).
-3. **Dynamic Schema Introspection First**:
+3. **Excel serial dates (numbers like 45123)**:
+   Columns named `month`, `date`, etc. imported from Excel may hold serial day numbers (Float64/String).
+   `toDate()` takes ONE argument (or 2 with timezone) - `toDate(1899, 12, 30)` is INVALID.
+   Use: `toDate('1899-12-30') + toInt32(col)` then `toStartOfMonth(...)`:
+   ```sql
+   SELECT toStartOfMonth(toDate('1899-12-30') + toInt32(month)) AS m, sum(net_revenue_usd) FROM <table> GROUP BY m ORDER BY m
+   ```
+   Check the column type first; if it is a real date string use `parseDateTimeBestEffortOrNull(col)` instead.
+4. **Never reference a column you have not verified.** A column that exists in one table
+   (e.g. `package_id` in `18_subscriber_package_assignment`) may not exist in another
+   (`23_subscriber_revenue_monthly`). Verify with `--describe-table <table>` or
+   `DESCRIBE "<table>"` / `SELECT name FROM system.columns WHERE table = '<table>'`
+   (system tables are allowed), and JOIN on the shared key (e.g. `subscriber_id`) to get missing attributes.
+5. **Quote table names that start with digits** with backticks or double quotes: `` `23_subscriber_revenue_monthly` ``.
+6. **On any ClickHouse error, read the message, re-describe the table, fix the query, and retry** (max 3 attempts) before reporting failure.
+7. **Charts**: when a visual helps, follow the `diagram-chart-rendering` skill and emit a ```mermaid block.
+8. **Dynamic Schema Introspection First**:
    Always run `--describe-table <table_name>` first to discover the exact column names, data types, and semantic metrics before constructing custom analytical queries.
 
 ---
