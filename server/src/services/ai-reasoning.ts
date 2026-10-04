@@ -1214,8 +1214,14 @@ Instructions:
     }
 
     const data = (await res.json()) as any;
-    const content = data?.choices?.[0]?.message?.content;
-    return typeof content === "string" ? content.trim() : null;
+    const msg = data?.choices?.[0]?.message;
+    const content =
+      typeof msg?.content === "string" && msg.content.trim()
+        ? msg.content.trim()
+        : typeof msg?.reasoning === "string" && msg.reasoning.trim()
+          ? msg.reasoning.trim()
+          : null;
+    return content;
   }
 
   private extractJson(raw: string): any | null {
