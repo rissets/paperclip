@@ -8,21 +8,27 @@ description: >
 
 # Structured Data & OLAP Analytics Skill
 
-This skill equips Primbon agents (such as `DataAgent`, `AnalyticsEngineerAgent`, or any agent assigned structured datasets) to query, aggregate, and analyze tabular datasets powered by ClickHouse columnar OLAP storage and PostgreSQL streaming.
+This skill equips agents assigned structured datasets to query, aggregate, and analyze tabular data stored in ClickHouse or PostgreSQL. Source names, table names, and columns must be discovered from the current agent's live assignment and schema; this skill deliberately contains no tenant-specific source or table names.
+
+## 0. Access and Assignment Rules
+
+- Treat the sources returned for the current agent as the complete allowlist. Discover them at runtime with `--list-tables`; never rely on a source/table name remembered from another task.
+- This is a read-only analysis skill. Do not create, edit, delete, connect, or assign a data source, and do not change agent access metadata through an API, SQL, or script. An owner assigns sources from the agent's **Data Sources** menu. If the needed source is missing, ask the owner to assign it there, then rediscover the list.
+- Use only tables and columns returned by the current assignment and `--describe-table`. Do not infer access from a collection name mentioned in conversation.
 
 ---
 
 ## 1. Primary Action Tool: `query_structured.py`
 
-Agents should run the pre-built Python CLI tool directly from bash to inspect schemas, execute aggregations, and run SQL queries:
+Agents should use the pre-built Python CLI tool to inspect schemas and query only the assigned datasets:
 
 ### A. Discover Structured Tables (Collection-Scoped or Universal)
-Discover tables within a specific collection (ultra-fast, avoids scanning unrelated enterprise datasets):
+Discover tables within a collection when the user has identified one:
 ```bash
 python3 ~/.pi/agent/skills/data-sources-structured/scripts/query_structured.py --list-tables --collection "<collection_slug_or_id>"
 ```
 
-Or list all tables assigned to this agent:
+Or list all tables assigned to this agent (preferred when the request does not name a collection):
 ```bash
 python3 ~/.pi/agent/skills/data-sources-structured/scripts/query_structured.py --list-tables
 ```
@@ -82,16 +88,42 @@ python3 ~/.pi/agent/skills/data-sources-structured/scripts/query_structured.py \
    `DESCRIBE "<table>"` / `SELECT name FROM system.columns WHERE table = '<table>'`
    (system tables are allowed), and JOIN on the shared key (e.g. `subscriber_id`) to get missing attributes.
 5. **Quote table names that start with digits** with backticks or double quotes: `` `23_subscriber_revenue_monthly` ``.
-6. **On any ClickHouse error, read the message, re-describe the table, fix the query, and retry** (max 3 attempts) before reporting failure.
+6. **On a ClickHouse error, classify it before retrying**. Re-describe only for an unknown table or column; correct a syntax/dialect issue using the schema already fetched. Retry one corrected query at most once.
 7. **Charts**: when a visual helps, follow the `diagram-chart-rendering` skill and emit a ```mermaid block.
 8. **Dynamic Schema Introspection First**:
-   Always run `--describe-table <table_name>` first to discover the exact column names, data types, and semantic metrics before constructing custom analytical queries.
+   Always run `--describe-table <table_name_or_id>` for each table selected for the analysis. Do not describe every table in a large collection unless the user asks for a catalog.
 
 ---
 
-## 2. Response Standard for Structured Data
+## 2. Efficient Query Plan for Large Sources
+
+1. List the assigned tables once. Use row counts, semantic metrics, and the user's question to select the smallest relevant set; do not print or inspect the full catalog in the answer.
+2. Describe only those tables. Confirm the timestamp, entity key, metric columns, types, and any semantic aggregation guidance.
+3. Plan one bounded query before running it: project only needed columns, filter the requested date range and entity scope as early as possible, aggregate in ClickHouse, and return grouped results rather than raw records. Avoid `SELECT *` and repeated full-table probes.
+4. For large time-series tables, first compute the requested grain (for example, per hour or per entity/day). If comparing event and baseline windows, restrict the scan to both windows and aggregate each window before joining. Join on the verified entity key and time bucket; never join solely on timestamp.
+5. Prefer `--aggregate` for simple supported aggregates. It can use the structured-result cache. Custom `--sql` is for analyses that need SQL features beyond that API and may execute a fresh scan.
+6. Keep the response result compact with a meaningful `--limit`. A row limit does not reduce the scan needed for an aggregate, so use filters and aggregation as well.
+
+### ClickHouse Dialect and Query-Shaping Rules
+
+- For date arithmetic, use `addDays(ts, n)` / `addHours(ts, n)` or ClickHouse interval syntax. Do not generate `toIntervalDays`; ClickHouse 26.8 exposes singular `toIntervalDay` and `toIntervalHour` functions.
+- Do not put an aggregate alias in `GROUP BY`. Group only by source dimensions; if a later step needs an aggregate such as `min(ts)`, compute it in one CTE and reference it from an outer query.
+- Do not join an event subset back to an entire fact table using timestamp alone. Carry the entity key and bound the fact-table time range to the event and comparison windows before aggregation.
+- For String timestamps, parse only after verifying the schema, and apply the requested time range as early as the stored type allows.
+- The query CLI waits up to 70 seconds for the API, just beyond ClickHouse's 60-second server execution limit. If a query reaches that limit, reduce its time range, entities, joins, or intermediate grain before retrying; do not immediately rerun the same SQL.
+
+---
+
+## 3. Response Standard for Structured Data
 
 1. **Direct Executive Answer**: Lead with the computed number or key finding (e.g., *"Total omzet untuk kategori X adalah **Rp 1.450.000.000**"*).
 2. **Markdown Data Table**: Present grouped results in cleanly formatted Markdown tables with proper units and number formatting.
 3. **Engine & Provenance Note**: State whether the query was executed via ClickHouse OLAP Engine or PostgreSQL streaming:
    > *Query dieksekusi secara teroptimasi menggunakan ClickHouse OLAP Engine.*
+4. **No Repeated Progress Text**: Do not expose internal reasoning or repeat the same progress/update paragraph. Return one concise result after the query completes, with assumptions and any limitation stated once.
+
+## 4. Error Recovery
+
+- Classify an error before retrying. For an unknown column, re-describe only the affected table. For a SQL dialect or alias error, fix the SQL using the schema already obtained; do not repeat schema discovery.
+- Retry a corrected query at most once. Never submit an identical failed query again. For timeout/resource-limit errors, narrow the scan or simplify the plan; do not increase the timeout or fan out repeated queries.
+- If a query remains invalid or exceeds the server limit after one correction, report the exact blocker and the smaller scope needed to continue.

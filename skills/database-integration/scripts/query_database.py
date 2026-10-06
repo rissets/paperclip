@@ -21,6 +21,7 @@ import os
 import sys
 import json
 import argparse
+import time
 import urllib.request
 import urllib.error
 
@@ -78,6 +79,65 @@ def print_markdown_table(headers, rows):
             row_vals = [str(r)]
         print("| " + " | ".join(row_vals) + " |")
 
+def run_durable_query_job(
+    api_prefix,
+    company_id,
+    data_source_id,
+    sql,
+    row_limit,
+    statement_timeout_ms,
+    *,
+    api_key=None,
+    agent_id=None,
+    session_token=None,
+    poll_interval_seconds=1.0,
+):
+    """Submit a bounded read-only query and retrieve its durable result."""
+    if not isinstance(row_limit, int) or row_limit < 1 or row_limit > 1000:
+        raise ValueError("Query row limit must be between 1 and 1000")
+    if not isinstance(statement_timeout_ms, int) or statement_timeout_ms < 1000 or statement_timeout_ms > 60000:
+        raise ValueError("Query timeout must be between 1000 and 60000 milliseconds")
+
+    endpoint = f"{api_prefix}/companies/{company_id}/data-sources/{data_source_id}/query-jobs"
+    auth = {
+        "api_key": api_key,
+        "agent_id": agent_id,
+        "session_token": session_token,
+    }
+    submitted = make_request(
+        endpoint,
+        method="POST",
+        payload={"sql": sql, "rowLimit": row_limit, "statementTimeoutMs": statement_timeout_ms},
+        **auth,
+    )
+    job = submitted.get("data", submitted) if isinstance(submitted, dict) else {}
+    job_id = job.get("id") if isinstance(job, dict) else None
+    if not job_id:
+        raise RuntimeError("Datasource query job response did not include a job ID")
+
+    status_url = f"{endpoint}/{job_id}"
+    result_url = f"{status_url}/result"
+    cancel_url = f"{status_url}/cancel"
+    wait_deadline = time.monotonic() + statement_timeout_ms / 1000 + 15
+
+    while True:
+        response = make_request(status_url, **auth)
+        job = response.get("data", response) if isinstance(response, dict) else {}
+        status = job.get("status") if isinstance(job, dict) else None
+        if status == "succeeded":
+            result = make_request(result_url, **auth)
+            return result.get("data", result) if isinstance(result, dict) else result
+        if status in ("failed", "cancelled"):
+            detail = job.get("lastError") if isinstance(job, dict) else None
+            raise RuntimeError(detail or f"Datasource query job {status}")
+        if time.monotonic() >= wait_deadline:
+            try:
+                make_request(cancel_url, method="POST", payload={}, **auth)
+            except Exception:
+                pass
+            raise TimeoutError("Timed out waiting for the datasource query job; a cancellation was requested")
+        time.sleep(max(0, poll_interval_seconds))
+
 def main():
     parser = argparse.ArgumentParser(
         description="Interact with connected enterprise relational databases (PostgreSQL, MariaDB, MySQL).",
@@ -91,6 +151,12 @@ def main():
 
     parser.add_argument("--db", type=str, help="Database Data Source ID or Name (required for inspect/describe/query)")
     parser.add_argument("--limit", type=int, default=50, help="Maximum number of rows returned")
+    parser.add_argument(
+        "--statement-timeout-ms",
+        type=int,
+        default=30000,
+        help="Maximum external database execution time in milliseconds (1000-60000)",
+    )
     parser.add_argument("--format", choices=["table", "json"], default="table", help="Output format")
 
     parser.add_argument("--company-id", type=str, default=get_env_or_default("PAPERCLIP_COMPANY_ID"))
@@ -260,12 +326,21 @@ def main():
             print(f"Error: Only read-only queries (SELECT, WITH, SHOW, DESCRIBE, EXPLAIN) are allowed.", file=sys.stderr)
             sys.exit(1)
 
-        url = f"{api_prefix}/companies/{company_id}/data-sources/{ds_id}/query-sql"
-        payload = {
-            "sql": sql,
-            "limit": args.limit
-        }
-        res = make_request(url, method="POST", payload=payload, api_key=args.api_key, agent_id=agent_id, session_token=args.session_token)
+        try:
+            res = run_durable_query_job(
+                api_prefix,
+                company_id,
+                ds_id,
+                sql,
+                args.limit,
+                args.statement_timeout_ms,
+                api_key=args.api_key,
+                agent_id=agent_id,
+                session_token=args.session_token,
+            )
+        except (RuntimeError, TimeoutError, ValueError) as error:
+            print(f"Error: {error}", file=sys.stderr)
+            sys.exit(1)
 
         if args.format == "json":
             print(json.dumps(res, indent=2))
@@ -278,7 +353,10 @@ def main():
 
         print(f"### Hasil Query Database ({len(rows)} baris):\n")
         print_markdown_table(columns, rows)
-        print(f"\n> *Query dieksekusi di database **{target_ds.get('name')}** (limit: {args.limit})*")
+        print(
+            f"\n> *Query job selesai di database **{target_ds.get('name')}** "
+            f"(limit: {args.limit}, timeout: {args.statement_timeout_ms // 1000}s)*"
+        )
 
 if __name__ == "__main__":
     main()

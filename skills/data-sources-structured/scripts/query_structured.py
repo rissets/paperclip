@@ -27,7 +27,7 @@ import urllib.error
 def get_env_or_default(key, default=None):
     return os.environ.get(key, default)
 
-def make_request(url, method="GET", payload=None, api_key=None, agent_id=None, session_token=None):
+def make_request(url, method="GET", payload=None, api_key=None, agent_id=None, session_token=None, timeout_seconds=20):
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json",
@@ -51,7 +51,7 @@ def make_request(url, method="GET", payload=None, api_key=None, agent_id=None, s
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
 
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         err = e.read().decode("utf-8", errors="ignore")
@@ -233,7 +233,18 @@ def main():
     if args.sql:
         url = f"{api_prefix}/companies/{company_id}/data-sources/clickhouse/query"
         payload = {"sql": args.sql, "limit": args.limit}
-        res = make_request(url, method="POST", payload=payload, api_key=args.api_key, agent_id=agent_id, session_token=args.session_token)
+        # ClickHouse enforces its own 60-second execution ceiling. Keep the
+        # client connected slightly longer so it receives the real server
+        # error/result instead of timing out and encouraging a duplicate retry.
+        res = make_request(
+            url,
+            method="POST",
+            payload=payload,
+            api_key=args.api_key,
+            agent_id=agent_id,
+            session_token=args.session_token,
+            timeout_seconds=70,
+        )
         
         if args.format == "json":
             print(json.dumps(res, indent=2))
@@ -288,7 +299,15 @@ def main():
             query_payload["filter"] = {k.strip(): v.strip()}
 
         url = f"{api_prefix}/companies/{company_id}/data-sources/{ds_id}/tables/{table_id}/query"
-        res = make_request(url, method="POST", payload=query_payload, api_key=args.api_key, agent_id=agent_id, session_token=args.session_token)
+        res = make_request(
+            url,
+            method="POST",
+            payload=query_payload,
+            api_key=args.api_key,
+            agent_id=agent_id,
+            session_token=args.session_token,
+            timeout_seconds=70,
+        )
 
         if args.format == "json":
             print(json.dumps(res, indent=2))
