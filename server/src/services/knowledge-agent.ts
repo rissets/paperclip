@@ -2,6 +2,7 @@ import type { Db } from "@paperclipai/db";
 import { DataSourcesService } from "./data-sources.js";
 import { TypeSafeJevService } from "./typesafe-jev.js";
 import { aiReasoningService } from "./ai-reasoning.js";
+import { RagModelService } from "./rag-models.js";
 import type { SpecialistExecution, Citation } from "@paperclipai/shared";
 
 export class KnowledgeAgentService {
@@ -19,12 +20,23 @@ export class KnowledgeAgentService {
   async answer(
     companyId: string,
     query: string,
-    options?: { dataSourceId?: string; collectionId?: string },
+    options?: {
+      dataSourceId?: string;
+      dataSourceIds?: string[];
+      collectionId?: string;
+      agentId?: string;
+      authzFingerprint?: string;
+    },
   ): Promise<SpecialistExecution> {
     const searchResults = await this.dataSourcesService.searchKnowledge(companyId, query, {
       dataSourceId: options?.dataSourceId,
+      dataSourceIds: options?.dataSourceIds,
       collectionId: options?.collectionId,
-      limit: 6,
+      agentId: options?.agentId,
+      authzFingerprint: options?.authzFingerprint,
+      // Retrieve a wider candidate pool before the dedicated reranker and
+      // deterministic JEV answerability gate narrow it for synthesis.
+      limit: 20,
     });
 
     if (searchResults.length === 0) {
@@ -39,11 +51,29 @@ export class KnowledgeAgentService {
     // 1. Evaluate with TypeSafe Jev Decision Plane (Re-ranking & Answerability Check)
     let orderedResults = searchResults;
     let answerabilityNote = "";
+    let jevAnswerable = false;
+    let usedModelReranker = false;
 
     try {
+      const modelRerank = await new RagModelService().rerank(
+        query,
+        searchResults.map((r) => ({ id: r.chunkId, text: `${r.title || r.dataSourceName}\n${r.content || r.snippet}` })),
+      );
+      if (modelRerank?.length) {
+        usedModelReranker = true;
+        const byId = new Map(searchResults.map((result) => [result.chunkId, result]));
+        orderedResults = modelRerank.flatMap((entry) => {
+          const result = byId.get(entry.id);
+          return result ? [result] : [];
+        });
+        for (const result of searchResults) {
+          if (!orderedResults.some((entry) => entry.chunkId === result.chunkId)) orderedResults.push(result);
+        }
+      }
+
       const jevEval = await this.jevService.rerankAndVerifyRag(
         query,
-        searchResults.map((r) => ({
+        orderedResults.map((r) => ({
           chunkId: r.chunkId,
           content: r.content || r.snippet,
           sourceName: r.dataSourceName,
@@ -51,7 +81,8 @@ export class KnowledgeAgentService {
         })),
       );
 
-      if (jevEval.topChunkIds.length > 0) {
+      jevAnswerable = jevEval.isAnswerable;
+      if (!usedModelReranker && jevEval.topChunkIds.length > 0) {
         orderedResults = [];
         for (const cid of jevEval.topChunkIds) {
           const match = searchResults.find((r) => r.chunkId === cid);
@@ -64,7 +95,7 @@ export class KnowledgeAgentService {
         }
       }
 
-      answerabilityNote = `\n> *Verifikasi TypeSafe Jev System One (jev-1.13.0): Relevansi terkalibrasi ${(jevEval.confidence * 100).toFixed(0)}%. Dokumen dinilai ${jevEval.isAnswerable ? "cukup menjawab" : "membutuhkan informasi tambahan"}.*\n\n`;
+      answerabilityNote = `\n> *Pemeriksaan TypeSafe Jev: cakupan istilah pertanyaan ${(jevEval.confidence * 100).toFixed(0)}% (heuristik lokal, bukan probabilitas terkalibrasi). Dokumen dinilai ${jevEval.isAnswerable ? "cukup menjawab" : "membutuhkan informasi tambahan"}.*\n\n`;
     } catch {
       // fallback to original order
     }
@@ -76,23 +107,27 @@ export class KnowledgeAgentService {
       snippet: r.snippet,
     }));
 
-    // 2. Dynamic Agentic LLM Synthesis
+    // 2. Dynamic Agentic LLM Synthesis. If evidence evaluation is unavailable
+    // or says the corpus cannot answer the question, return cited excerpts
+    // instead of asking an LLM to fill the evidence gap.
     let synthesizedAnswer = "";
-    try {
-      const llmResponse = await aiReasoningService.synthesizeKnowledgeResponse({
-        userQuery: query,
-        chunks: topResults.map((r) => ({
-          sourceName: r.dataSourceName,
-          title: r.title || undefined,
-          content: r.content || r.snippet,
-          chunkId: r.chunkId,
-        })),
-      });
-      if (llmResponse && llmResponse.length > 20) {
-        synthesizedAnswer = llmResponse;
+    if (jevAnswerable) {
+      try {
+        const llmResponse = await aiReasoningService.synthesizeKnowledgeResponse({
+          userQuery: query,
+          chunks: topResults.map((r) => ({
+            sourceName: r.dataSourceName,
+            title: r.title || undefined,
+            content: r.content || r.snippet,
+            chunkId: r.chunkId,
+          })),
+        });
+        if (llmResponse && llmResponse.length > 20) {
+          synthesizedAnswer = llmResponse;
+        }
+      } catch (err: any) {
+        console.warn("[KnowledgeAgent] LLM synthesis failed, falling back to excerpts:", err.message);
       }
-    } catch (err: any) {
-      console.warn("[KnowledgeAgent] LLM synthesis failed, falling back to excerpts:", err.message);
     }
 
     let summary = "";

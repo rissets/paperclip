@@ -56,6 +56,7 @@ import {
 import { shellQuote } from "@paperclipai/adapter-utils/ssh";
 import { isPiUnknownSessionError, parsePiJsonl } from "./parse.js";
 import { ensurePiModelConfiguredAndAvailable, normalizePiModelId } from "./models.js";
+import { DEFAULT_PI_LOCAL_MODEL } from "../index.js";
 import { preparePiRuntimeConfig } from "./runtime-config.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 
@@ -271,7 +272,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   );
   const hasCustomPromptTemplate = asString(config.promptTemplate, "").trim().length > 0;
   const command = asString(config.command, "pi");
-  const rawModel = asString(config.model, "").trim();
+  const rawModel = asString(config.model, DEFAULT_PI_LOCAL_MODEL).trim() || DEFAULT_PI_LOCAL_MODEL;
   let model = normalizePiModelId(rawModel);
   const thinking = asString(config.thinking, "").trim();
 

@@ -1,0 +1,1 @@
+ALTER TABLE "data_source_upload_sessions" ALTER COLUMN "expected_sha256" DROP NOT NULL;

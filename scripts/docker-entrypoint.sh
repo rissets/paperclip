@@ -45,4 +45,12 @@ if [ -d "$home_dir" ] && [ -n "$(find "$home_dir" \( ! -user node -o ! -group no
     chown -R node:node "$home_dir"
 fi
 
+# The optional datasource overlay shares legacy disk uploads with its worker.
+if [ -n "${DATASOURCE_LOCAL_UPLOAD_DIRECTORY:-}" ]; then
+    mkdir -p "$DATASOURCE_LOCAL_UPLOAD_DIRECTORY"
+    if [ -n "$(find "$DATASOURCE_LOCAL_UPLOAD_DIRECTORY" \( ! -user node -o ! -group node \) -print -quit 2>/dev/null)" ]; then
+        chown -R node:node "$DATASOURCE_LOCAL_UPLOAD_DIRECTORY"
+    fi
+fi
+
 exec gosu node "$@"

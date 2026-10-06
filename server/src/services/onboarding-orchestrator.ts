@@ -1,12 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
-import { eq, and } from "drizzle-orm";
+import { createHash, randomUUID } from "node:crypto";
+import { eq, and, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   dataSources,
   dataSourceTables,
   dataSourceRecords,
-  dataSourceChunks,
+  dataSourceJobs,
   activityLog,
   agents,
   heartbeatRuns,
@@ -26,15 +27,44 @@ import type {
   DataSourceCollection,
 } from "@paperclipai/shared";
 import { StructuredIngestionService } from "./structured-ingestion.js";
-import { KnowledgeIngestionService } from "./knowledge-ingestion.js";
-import { DatabaseIntegrationService } from "./database-integration.js";
+import { KnowledgeIngestionService, type ParsedChunk } from "./knowledge-ingestion.js";
+import { DatabaseIntegrationService, databaseConnectionErrorMessage } from "./database-integration.js";
 import { TypeSafeJevService } from "./typesafe-jev.js";
 import { EnterpriseAgentRosterService } from "./enterprise-agent-roster.js";
 import { DataSourceCollectionsService } from "./data-source-collections.js";
 import { aiReasoningService } from "./ai-reasoning.js";
+import { deleteDataSourceFile, storeDataSourceFile } from "./data-source-object-storage.js";
+import { RagModelService, type EmbeddingSpace } from "./rag-models.js";
+import { DataSourceVectorStore } from "./data-source-vector-store.js";
+import { DataSourceDatabaseConfigService, databaseConfigWithoutPassword, publicDatabaseMetadata } from "./data-source-database-config.js";
+import { assertDataSourceJobLease, DataSourceLeaseLostError, type DataSourceJobLease } from "./data-source-job-lease.js";
+import { payloadTooLarge } from "../errors.js";
+import { getCsvSourceRowCheckpoint } from "./data-source-stream-checkpoint.js";
+
+const DEFAULT_MAX_COMPANY_FILE_STORAGE_BYTES = 100 * 1024 * 1024 * 1024;
+
+function maxCompanyFileStorageBytes(): number {
+  const raw = process.env.DATASOURCE_MAX_COMPANY_FILE_BYTES?.trim();
+  if (!raw) return DEFAULT_MAX_COMPANY_FILE_STORAGE_BYTES;
+  const configured = Number(raw);
+  if (!Number.isSafeInteger(configured) || configured < 0) {
+    throw new Error("DATASOURCE_MAX_COMPANY_FILE_BYTES must be a non-negative safe integer");
+  }
+  return configured;
+}
+
+function getOnboardingFileByteSize(file: OnboardingFileInput): number {
+  const actual = file.buffer?.byteLength ?? (file.filePath ? fs.statSync(file.filePath).size : undefined);
+  const size = actual ?? file.size ?? 0;
+  if (!Number.isSafeInteger(size) || size < 0) {
+    throw payloadTooLarge("Datasource file size is invalid");
+  }
+  return size;
+}
 
 export interface OnboardingFileInput {
-  buffer: Buffer;
+  buffer?: Buffer;
+  filePath?: string;
   originalname: string;
   mimetype?: string;
   size?: number;
@@ -46,6 +76,45 @@ export interface OnboardingOptions {
   async?: boolean;
   collectionId?: string;
   skipCorrelation?: boolean;
+  deferReady?: boolean;
+  jobLease?: DataSourceJobLease;
+  /** Immutable source identity used to reject an unsafe parser resume after file replacement. */
+  csvSourceFingerprint?: string;
+}
+
+function jobScopedTableId(companyId: string, sourceId: string, jobId: string, tableName: string): string {
+  const bytes = createHash("sha256")
+    .update(`paperclip-datasource-job-table:v1:${companyId}:${sourceId}:${jobId}:${tableName}`)
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+type DurableCsvCheckpoint = {
+  version: 1;
+  identityHash: string;
+  tableId: string;
+  byteOffset: number;
+  committedRows: number;
+  nextBatchIndex: number;
+  delimiter: string | null;
+};
+
+function readDurableCsvCheckpoint(value: unknown): DurableCsvCheckpoint | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const checkpoint = value as Partial<DurableCsvCheckpoint>;
+  if (checkpoint.version !== 1
+    || typeof checkpoint.identityHash !== "string" || !/^[a-f0-9]{64}$/.test(checkpoint.identityHash)
+    || typeof checkpoint.tableId !== "string" || !/^[0-9a-f-]{36}$/i.test(checkpoint.tableId)
+    || !Number.isSafeInteger(checkpoint.byteOffset) || checkpoint.byteOffset! < 0
+    || !Number.isSafeInteger(checkpoint.committedRows) || checkpoint.committedRows! < 0
+    || !Number.isSafeInteger(checkpoint.nextBatchIndex) || checkpoint.nextBatchIndex! < 0
+    || !(checkpoint.delimiter === null
+      || (typeof checkpoint.delimiter === "string" && [",", ";", "\t", "|"].includes(checkpoint.delimiter)))) return null;
+  return checkpoint as DurableCsvCheckpoint;
 }
 
 export class OnboardingOrchestratorService {
@@ -57,6 +126,20 @@ export class OnboardingOrchestratorService {
     this.jevService = new TypeSafeJevService();
     this.rosterService = new EnterpriseAgentRosterService(db);
     this.collectionsService = new DataSourceCollectionsService(db);
+  }
+
+  private readFileBuffer(file: OnboardingFileInput): Buffer {
+    if (file.buffer) return file.buffer;
+    if (file.filePath) return fs.readFileSync(file.filePath);
+    throw new Error(`File content is unavailable for ${file.originalname}`);
+  }
+
+  private async mutateFileStage<T>(companyId: string, sourceId: string, options: OnboardingOptions, action: (db: Db) => Promise<T>): Promise<T> {
+    if (!options.jobLease) return action(this.db);
+    return this.db.transaction(async (tx) => {
+      await assertDataSourceJobLease(tx, companyId, sourceId, options.jobLease!);
+      return action(tx as unknown as Db);
+    });
   }
 
   /**
@@ -92,9 +175,22 @@ export class OnboardingOrchestratorService {
     } else {
       // Ambiguous or unusual format: classify with TypeSafe Jev System One
       try {
-        const preview = file.buffer.slice(0, 800).toString("utf-8");
+        const preview = file.buffer
+          ? file.buffer.subarray(0, 800).toString("utf-8")
+          : file.filePath
+            ? fs.openSync(file.filePath, "r")
+            : null;
+        let previewText: string;
+        if (typeof preview === "number") {
+          const previewBuffer = Buffer.alloc(800);
+          const bytesRead = fs.readSync(preview, previewBuffer, 0, previewBuffer.length, 0);
+          fs.closeSync(preview);
+          previewText = previewBuffer.subarray(0, bytesRead).toString("utf-8");
+        } else {
+          previewText = preview || "";
+        }
         const classification = await this.jevService.systemOne(
-          { fileName: file.originalname, snippet: preview },
+          { fileName: file.originalname, snippet: previewText },
           {
             format_triage: {
               type: "choice",
@@ -118,54 +214,113 @@ export class OnboardingOrchestratorService {
     }
 
     const defaultName = options.name?.trim() || file.originalname.replace(/\.[^/.]+$/, "");
+    const fileByteSize = getOnboardingFileByteSize(file);
 
-    // 1. Physical storage backup
+    // 1. Persist the original bytes before creating a source record. In the
+    // Compose data plane this is a company-scoped MinIO object; local installs
+    // retain their existing disk behavior until they opt into S3 storage.
     let storagePath: string | null = null;
-    try {
-      const uploadDir = path.resolve(process.cwd(), "data", "uploads", companyId);
-      fs.mkdirSync(uploadDir, { recursive: true });
-      const targetPath = path.join(uploadDir, `${Date.now()}_${file.originalname}`);
-      fs.writeFileSync(targetPath, file.buffer);
-      storagePath = targetPath;
-    } catch {
-      // Non-critical if filesystem writes fail
+    let storageBackend: "s3" | "local_disk" | null = null;
+    let storageSha256: string | undefined;
+    const storedObject = await storeDataSourceFile({
+      companyId,
+      fileName: file.originalname,
+      contentType: file.mimetype || "application/octet-stream",
+      buffer: file.buffer,
+      filePath: file.filePath,
+    });
+    if (storedObject) {
+      storagePath = storedObject.objectKey;
+      storageBackend = "s3";
+      storageSha256 = storedObject.sha256;
+    } else {
+      try {
+        const uploadDir = path.resolve(process.env.DATASOURCE_LOCAL_UPLOAD_DIRECTORY || path.join(process.cwd(), "data", "uploads"), companyId);
+        fs.mkdirSync(uploadDir, { recursive: true });
+        const targetPath = path.join(uploadDir, `${Date.now()}_${randomUUID()}_${path.basename(file.originalname)}`);
+        if (file.filePath) fs.copyFileSync(file.filePath, targetPath, fs.constants.COPYFILE_EXCL);
+        else fs.writeFileSync(targetPath, this.readFileBuffer(file), { flag: "wx" });
+        storagePath = targetPath;
+        storageBackend = "local_disk";
+      } catch (error) {
+        throw new Error(`Could not persist source file ${file.originalname}: ${error instanceof Error ? error.message : "storage error"}`);
+      }
     }
 
     // 2. Insert initial entry
-    const [initialDs] = await this.db
-      .insert(dataSources)
-      .values({
-        companyId,
-        collectionId: options.collectionId || null,
-        name: defaultName,
-        description: options.description || `Ingested from ${file.originalname}`,
-        sourceType,
-        status: "processing",
-        fileName: file.originalname,
-        fileSize: file.size || file.buffer.length,
-        mimeType: file.mimetype || "application/octet-stream",
-        storagePath,
-        metadata: {
-          startedAt: new Date().toISOString(),
-          extension: ext,
-        },
-      })
-      .returning();
-
-    const pipelinePromise = this.executeOnboardingPipeline(
-      companyId,
-      initialDs,
-      file,
-      options,
-      defaultName,
-      ext,
-      sourceType,
-    );
+    let created: {
+      initialDs: typeof dataSources.$inferSelect;
+      job: typeof dataSourceJobs.$inferSelect | null;
+    };
+    try {
+      created = await this.db.transaction(async (tx) => {
+      const maxCompanyBytes = maxCompanyFileStorageBytes();
+      // Serialize quota checks per company so simultaneous uploads across API
+      // processes cannot both consume the same remaining capacity.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${'datasource-file-quota:' + companyId}, 0))`);
+      const usageRows = await tx.execute(sql<{ totalBytes: string }>`
+        SELECT (
+          COALESCE((SELECT sum(file_size) FROM data_sources
+            WHERE company_id = ${companyId}::uuid AND storage_path IS NOT NULL), 0)
+          + COALESCE((SELECT sum(expected_bytes) FROM data_source_upload_sessions
+            WHERE company_id = ${companyId}::uuid
+              AND status IN ('starting','uploading','completing','verifying')), 0)
+        )::text AS "totalBytes"
+      `);
+      const [usage] = Array.from(usageRows as Iterable<{ totalBytes: string }>);
+      const usedBytes = Number(usage?.totalBytes ?? 0);
+      if (usedBytes + fileByteSize > maxCompanyBytes) {
+        throw payloadTooLarge(
+          `This company has reached its datasource file storage limit (${usedBytes} of ${maxCompanyBytes} bytes used)`,
+          { usedBytes, requestedBytes: fileByteSize, maxBytes: maxCompanyBytes },
+        );
+      }
+      const [source] = await tx
+        .insert(dataSources)
+        .values({
+          companyId,
+          collectionId: options.collectionId || null,
+          name: defaultName,
+          description: options.description || `Ingested from ${file.originalname}`,
+          sourceType,
+          status: "processing",
+          fileName: file.originalname,
+          fileSize: fileByteSize,
+          mimeType: file.mimetype || "application/octet-stream",
+          storagePath,
+          metadata: {
+            startedAt: new Date().toISOString(),
+            extension: ext,
+            storageBackend,
+            storageSha256,
+          },
+        })
+        .returning();
+      if (!options.async) return { initialDs: source, job: null };
+      const [queuedJob] = await tx
+        .insert(dataSourceJobs)
+        .values({
+          companyId,
+          dataSourceId: source.id,
+          jobType: "ingest_file",
+          status: "queued",
+          stage: "queued",
+          idempotencyKey: `file-ingest:${source.id}`,
+        })
+        .returning();
+        return { initialDs: source, job: queuedJob };
+      });
+    } catch (error) {
+      if (storagePath && storageBackend === "s3") {
+        await deleteDataSourceFile(companyId, storagePath).catch(() => {});
+      } else if (storagePath && storageBackend === "local_disk") {
+        fs.rmSync(storagePath, { force: true });
+      }
+      throw error;
+    }
+    const { initialDs, job } = created;
 
     if (options.async) {
-      pipelinePromise.catch((err) => {
-        console.error(`[OnboardingOrchestrator] Async onboarding failed for ${initialDs.id}:`, err);
-      });
       return {
         ...initialDs,
         collectionId: initialDs.collectionId,
@@ -173,10 +328,30 @@ export class OnboardingOrchestratorService {
         status: initialDs.status as any,
         tables: [],
         chunks: [],
+        ingestionJob: job ? {
+          id: job.id,
+          status: job.status as any,
+          stage: job.stage,
+          attempt: job.attempt,
+          maxAttempts: job.maxAttempts,
+          progress: job.progress || {},
+          lastError: job.lastError,
+          createdAt: job.createdAt,
+          updatedAt: job.updatedAt,
+          completedAt: job.completedAt,
+        } : null,
       } as DataSource;
     }
 
-    return await pipelinePromise;
+    return await this.executeOnboardingPipeline(
+      companyId,
+      initialDs,
+      { ...file, buffer: this.readFileBuffer(file) },
+      options,
+      defaultName,
+      ext,
+      sourceType,
+    );
   }
 
   /**
@@ -205,28 +380,39 @@ export class OnboardingOrchestratorService {
       collectionId = collection.id;
     }
 
-    const extractedFiles = this.collectionsService.extractZipEntries(file.buffer);
-    if (extractedFiles.length === 0) {
-      throw new Error(
-        `No supported files found in ${file.originalname}. Supported formats: CSV, TSV, Excel, PDF, DOCX, TXT, MD, JSON.`,
-      );
-    }
-
-    const onboardedSources: DataSource[] = [];
-    for (const extracted of extractedFiles) {
-      try {
-        const ds = await this.onboardSource(companyId, extracted, {
-          collectionId,
-          skipCorrelation: true,
-          async: false,
-        });
-        onboardedSources.push(ds);
-      } catch (err) {
-        console.error(`[OnboardingOrchestrator] Error onboarding extracted file ${extracted.originalname}:`, err);
+    const extracted = await this.collectionsService.extractZipEntries(
+      file.filePath ? { filePath: file.filePath } : { buffer: this.readFileBuffer(file) },
+    );
+    let onboardedSources: DataSource[] = [];
+    try {
+      if (extracted.entries.length === 0) {
+        throw new Error(
+          `No supported files found in ${file.originalname}. Supported formats: CSV, TSV, Excel, PDF, DOCX, TXT, MD, JSON.`,
+        );
       }
+
+      for (const entry of extracted.entries) {
+        try {
+          const ds = await this.onboardSource(companyId, {
+            filePath: entry.filePath,
+            originalname: entry.originalname,
+            mimetype: entry.mimetype,
+            size: entry.size,
+          }, {
+            collectionId,
+            skipCorrelation: true,
+            async: true,
+          });
+          onboardedSources.push(ds);
+        } catch (err) {
+          console.error(`[OnboardingOrchestrator] Error onboarding extracted file ${entry.originalname}:`, err);
+        }
+      }
+    } finally {
+      fs.rmSync(extracted.directory, { recursive: true, force: true });
     }
 
-    // Correlate the collection once all files are ingested
+    // Register the collection now; workers correlate it again as each queued file publishes.
     if (collectionId) {
       try {
         await this.collectionsService.correlateCollection(companyId, collectionId);
@@ -253,6 +439,14 @@ export class OnboardingOrchestratorService {
   ): Promise<DataSource> {
     try {
       if (sourceType === "csv" || sourceType === "excel") {
+        const streamingCsvThreshold = Number(process.env.DATASOURCE_STREAMING_CSV_THRESHOLD_BYTES || 8 * 1024 * 1024);
+        const sourceFileSize = file.size ?? file.buffer?.length ?? (file.filePath ? fs.statSync(file.filePath).size : 0);
+        const isStreamingCsv = sourceType === "csv" && Boolean(file.filePath) && sourceFileSize >= streamingCsvThreshold;
+        const isStreamingExcel = ext === "xlsx" && Boolean(file.filePath) && sourceFileSize >= streamingCsvThreshold;
+        const isStreamingStructuredFile = isStreamingCsv || isStreamingExcel;
+        await options.jobLease?.reportProgress?.(isStreamingCsv ? "csv_profile" : sourceType === "excel" ? "excel_parse" : "csv_parse", {
+          fileBytes: sourceFileSize,
+        });
         // --- 3. STRUCTURED INGESTION SPECIALIST PIPELINE ---
         // Look up the real built-in Structured Ingestion Agent by its metadata key,
         // along with its configured adapterType and adapterConfig (model, instructions)
@@ -318,10 +512,29 @@ export class OnboardingOrchestratorService {
           }
         }
 
-        const tables =
-          sourceType === "csv"
-            ? [StructuredIngestionService.parseCsv(file.buffer.toString("utf-8"), defaultName, { catalogMap })]
-            : StructuredIngestionService.parseExcel(file.buffer, { catalogMap });
+        const tables = isStreamingCsv
+          ? [await StructuredIngestionService.profileCsvFile(file.filePath!, defaultName, {
+            catalogMap,
+            onProgress: (rowsScanned) => options.jobLease?.reportProgress?.("csv_profile", {
+              fileBytes: sourceFileSize,
+              rowsScanned,
+            }),
+          })]
+          : isStreamingExcel
+            ? await StructuredIngestionService.profileExcelFile(file.filePath!, {
+              catalogMap,
+              onProgress: (rowsScanned) => options.jobLease?.reportProgress?.("excel_parse", {
+                fileBytes: sourceFileSize,
+                rowsScanned,
+              }),
+            })
+          : sourceType === "csv"
+            ? [StructuredIngestionService.parseCsv(this.readFileBuffer(file).toString("utf-8"), defaultName, { catalogMap })]
+            : StructuredIngestionService.parseExcel(this.readFileBuffer(file), { catalogMap });
+        await options.jobLease?.reportProgress?.("semantic_mapping", {
+          tableCount: tables.length,
+          totalRows: tables.reduce((total, table) => total + (table.rowCount ?? table.rows.length), 0),
+        });
 
         let totalRows = 0;
         const createdTables: any[] = [];
@@ -336,8 +549,15 @@ export class OnboardingOrchestratorService {
 
         let hasAiReasoned = false;
 
-        for (const tableData of tables) {
-          totalRows += tableData.rows.length;
+        for (const [tableIndex, tableData] of tables.entries()) {
+          const tableRowCount = tableData.rowCount ?? tableData.rows.length;
+          totalRows += tableRowCount;
+          await options.jobLease?.reportProgress?.("semantic_mapping", {
+            tableIndex: tableIndex + 1,
+            tableCount: tables.length,
+            tableName: tableData.tableName,
+            totalRows,
+          });
 
           // 3a. Execute Autonomous Semantic Analysis via Structured Ingestion Agent
           const aiLoopRes = await aiReasoningService.analyzeTable(
@@ -442,6 +662,11 @@ export class OnboardingOrchestratorService {
           // Build table semantic model
           const tableSemanticModel = {
             ...tableData.semanticModel,
+            // Large structured files keep only their bounded semantic preview
+            // in PostgreSQL's JSONB compatibility table. Keep query routing
+            // explicit so ClickHouse unavailability cannot masquerade as a
+            // complete dataset through that preview.
+            queryStore: isStreamingStructuredFile ? "clickhouse_primary" : "postgres_compatibility",
             entities,
             primaryKey: primaryKey.length > 0 ? primaryKey : undefined,
             metrics: primaryMetrics.map((m) => ({
@@ -460,18 +685,21 @@ export class OnboardingOrchestratorService {
           };
 
           // Insert table definition
-          const [tableRow] = await this.db
+          const [tableRow] = await this.mutateFileStage(companyId, initialDs.id, options, (db) => db
             .insert(dataSourceTables)
             .values({
+              ...(options.jobLease ? {
+                id: jobScopedTableId(companyId, initialDs.id, options.jobLease.jobId, tableData.tableName),
+              } : {}),
               dataSourceId: initialDs.id,
               companyId,
               tableName: tableData.tableName,
-              rowCount: tableData.rows.length,
+              rowCount: tableRowCount,
               columnCount: tableData.columns.length,
               schemaDefinition: tableData.columns as any,
               semanticModel: tableSemanticModel as any,
             })
-            .returning();
+            .returning());
 
           createdTables.push(tableRow);
 
@@ -488,7 +716,7 @@ export class OnboardingOrchestratorService {
             }));
 
             if (values.length > 0) {
-              await this.db.insert(dataSourceRecords).values(values);
+              await this.mutateFileStage(companyId, initialDs.id, options, (db) => db.insert(dataSourceRecords).values(values));
             }
           }
 
@@ -496,12 +724,140 @@ export class OnboardingOrchestratorService {
           try {
             const chDdl = (tableSemanticModel as any)?.clickhouseSchema?.createTableDdl;
             if (chDdl) {
-              const { ClickhouseService } = await import("./clickhouse.js");
+              const { ClickhouseService, clickhouseSourceTableName, rewriteClickhouseCreateTableName } = await import("./clickhouse.js");
               const clickhouse = new ClickhouseService();
-              const sanitizedName = tableData.tableName.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
-              await clickhouse.syncTable(sanitizedName, chDdl, tableData.rows, companyId);
+              const sanitizedName = clickhouseSourceTableName(tableRow.id, tableData.tableName);
+              const identifiedDdl = rewriteClickhouseCreateTableName(chDdl, sanitizedName);
+              const identifiedModel = {
+                ...tableSemanticModel,
+                clickhouseTable: sanitizedName,
+                clickhouseSchema: { ...(tableSemanticModel as any).clickhouseSchema, createTableDdl: identifiedDdl },
+              };
+              await this.mutateFileStage(companyId, initialDs.id, options, (db) => db
+                .update(dataSourceTables)
+                .set({ semanticModel: identifiedModel as any, updatedAt: new Date() })
+                .where(and(eq(dataSourceTables.id, tableRow.id), eq(dataSourceTables.companyId, companyId))));
+              tableRow.semanticModel = identifiedModel as any;
+              if (isStreamingStructuredFile) {
+                await options.jobLease?.reportProgress?.("clickhouse_insert", {
+                  tableName: sanitizedName,
+                  totalRows: tableRowCount,
+                  insertedRows: 0,
+                });
+                let csvCheckpoint: DurableCsvCheckpoint | null = null;
+                let csvIdentityHash: string | null = null;
+                if (isStreamingCsv && options.jobLease) {
+                  const tableSchemaFingerprint = createHash("sha256").update(JSON.stringify(tableData.columns.map((column) => ({
+                    name: column.name,
+                    dataType: column.dataType,
+                    clickhouseType: column.clickhouseType,
+                    role: column.role,
+                    semanticCategory: column.semanticCategory,
+                  })))).digest("hex");
+                  csvIdentityHash = createHash("sha256").update(JSON.stringify({
+                    version: 1,
+                    jobId: options.jobLease.jobId,
+                    tableId: tableRow.id,
+                    sourceFingerprint: options.csvSourceFingerprint || `size:${sourceFileSize}`,
+                    tableSchemaFingerprint,
+                  })).digest("hex");
+                  const previousCheckpoint = readDurableCsvCheckpoint(options.jobLease.progress?.csvCheckpoint);
+                  if (options.jobLease.progress?.csvCheckpoint && !previousCheckpoint) {
+                    throw new Error("Durable CSV resume checkpoint is malformed; enqueue a fresh ingestion job");
+                  }
+                  if (previousCheckpoint && (previousCheckpoint.tableId !== tableRow.id
+                    || previousCheckpoint.identityHash !== csvIdentityHash)) {
+                    throw new Error("CSV source or schema changed after its durable checkpoint; enqueue a fresh ingestion job");
+                  }
+                  csvCheckpoint = previousCheckpoint || {
+                    version: 1,
+                    identityHash: csvIdentityHash,
+                    tableId: tableRow.id,
+                    byteOffset: 0,
+                    committedRows: 0,
+                    nextBatchIndex: 0,
+                    delimiter: null,
+                  };
+                  if (!previousCheckpoint) {
+                    await options.jobLease.reportProgress?.("csv_checkpoint", { csvCheckpoint });
+                  }
+                }
+                const rowStream = isStreamingCsv
+                  ? StructuredIngestionService.streamCsvRows(file.filePath!, tableData.columns, csvCheckpoint ? {
+                    byteOffset: csvCheckpoint.byteOffset,
+                    rowsCommitted: csvCheckpoint.committedRows,
+                    delimiter: csvCheckpoint.delimiter || undefined,
+                  } : undefined)
+                  : StructuredIngestionService.streamExcelRows(file.filePath!, tableData.tableName, tableData.columns);
+                const runFencedOperation = options.jobLease
+                  ? async (operation: () => Promise<void>) => this.db.transaction(async (tx) => {
+                    await assertDataSourceJobLease(tx, companyId, initialDs.id, options.jobLease!);
+                    await operation();
+                    await assertDataSourceJobLease(tx, companyId, initialDs.id, options.jobLease!);
+                  })
+                  : undefined;
+                const synced = await clickhouse.syncTableFromStream(
+                  sanitizedName,
+                  identifiedDdl,
+                  rowStream,
+                  companyId,
+                  (insertedRows) => options.jobLease?.reportProgress?.("clickhouse_insert", {
+                    tableName: sanitizedName,
+                    totalRows: tableRowCount,
+                    insertedRows,
+                  }),
+                  runFencedOperation
+                    ? async (_insertedRows, publish) => runFencedOperation(publish)
+                    : undefined,
+                  options.jobLease
+                    ? {
+                      jobId: options.jobLease.jobId,
+                      signal: options.jobLease.signal,
+                      runFencedOperation,
+                      ...(isStreamingCsv && csvCheckpoint ? {
+                        startBatchIndex: csvCheckpoint.nextBatchIndex,
+                        startInsertedCount: csvCheckpoint.committedRows,
+                        getRowCheckpoint: getCsvSourceRowCheckpoint,
+                        onBatchCommitted: async (insertedRows, nextBatchIndex, sourceCheckpoint) => {
+                          const rowCheckpoint = sourceCheckpoint as ReturnType<typeof getCsvSourceRowCheckpoint>;
+                          if (!rowCheckpoint || rowCheckpoint.rowNumber !== insertedRows || !csvIdentityHash) {
+                            throw new Error("CSV parser did not provide a valid checkpoint for the committed ClickHouse batch");
+                          }
+                          const nextCheckpoint: DurableCsvCheckpoint = {
+                            version: 1,
+                            identityHash: csvIdentityHash,
+                            tableId: tableRow.id,
+                            byteOffset: rowCheckpoint.byteOffset,
+                            committedRows: insertedRows,
+                            nextBatchIndex,
+                            delimiter: rowCheckpoint.delimiter,
+                          };
+                          await options.jobLease!.reportProgress?.("csv_checkpoint", { csvCheckpoint: nextCheckpoint });
+                          csvCheckpoint = nextCheckpoint;
+                        },
+                      } : {}),
+                      beforePublish: () => options.jobLease!.reportProgress?.("publishing", {
+                        tableName: sanitizedName,
+                        insertedRows: tableRowCount,
+                      }) ?? Promise.resolve(),
+                      keepBatchTablesOnFailure: (error) => {
+                        const cancellationRequested = options.jobLease!.isCancellationRequested?.() ?? false;
+                        if (error instanceof DataSourceLeaseLostError) return !cancellationRequested;
+                        if (cancellationRequested) return false;
+                        return options.jobLease!.attempt < (options.jobLease!.maxAttempts ?? 3);
+                      },
+                    }
+                    : undefined,
+                );
+                if (synced.insertedCount !== tableRowCount) {
+                  throw new Error(`ClickHouse received ${synced.insertedCount} rows; expected ${tableRowCount}`);
+                }
+              } else {
+                await clickhouse.syncTable(sanitizedName, identifiedDdl, tableData.rows, companyId);
+              }
             }
           } catch (chErr: any) {
+            if (isStreamingCsv || chErr instanceof DataSourceLeaseLostError) throw chErr;
             console.warn(`[ClickhouseSync] Optional OLAP sync skipped: ${chErr.message}`);
           }
         }
@@ -538,7 +894,7 @@ export class OnboardingOrchestratorService {
           );
           if (tableRels.length > 0) {
             const currentModel = (createdTable.semanticModel as any) || {};
-            await this.db
+            await this.mutateFileStage(companyId, initialDs.id, options, (db) => db
               .update(dataSourceTables)
               .set({
                 semanticModel: {
@@ -546,7 +902,7 @@ export class OnboardingOrchestratorService {
                   relationships: tableRels,
                 } as any,
               })
-              .where(eq(dataSourceTables.id, createdTable.id));
+              .where(and(eq(dataSourceTables.id, createdTable.id), eq(dataSourceTables.companyId, companyId))));
           }
         }
 
@@ -590,24 +946,22 @@ export class OnboardingOrchestratorService {
         };
 
         // Update status to 'ready' with semantic profile
-        const [updated] = await this.db
+        const completedMetadata = {
+          ...((initialDs.metadata as Record<string, unknown> | null) || {}),
+          completedAt: new Date().toISOString(),
+          tableCount: tables.length,
+          totalRows,
+          sheetNames: tables.map((t) => t.tableName),
+          onboardedBy: specialistAgentName,
+          semanticProfile,
+          onboardingReasoning: allReasoningSteps,
+          suggestedQueries: allSuggestedQueries,
+        };
+        const updated = options.deferReady ? initialDs : (await this.db
           .update(dataSources)
-          .set({
-            status: "ready",
-            metadata: {
-              completedAt: new Date().toISOString(),
-              tableCount: tables.length,
-              totalRows,
-              sheetNames: tables.map((t) => t.tableName),
-              onboardedBy: specialistAgentName,
-              semanticProfile,
-              onboardingReasoning: allReasoningSteps,
-              suggestedQueries: allSuggestedQueries,
-            },
-            updatedAt: new Date(),
-          })
-          .where(eq(dataSources.id, initialDs.id))
-          .returning();
+          .set({ status: "ready", metadata: completedMetadata, updatedAt: new Date() })
+          .where(and(eq(dataSources.id, initialDs.id), eq(dataSources.companyId, companyId)))
+          .returning())[0];
 
         // 3e. Record heartbeat run + events so the agent's "Latest Run" is visible in the UI.
         //     Only records if we found the real built-in agent — no orphan run rows.
@@ -635,6 +989,7 @@ export class OnboardingOrchestratorService {
 
         const finalDs: DataSource = {
           ...updated,
+          metadata: options.deferReady ? completedMetadata : updated.metadata,
           collectionId: updated.collectionId,
           sourceType: updated.sourceType as any,
           status: updated.status as any,
@@ -653,6 +1008,7 @@ export class OnboardingOrchestratorService {
         return finalDs;
       } else {
         // --- 4. KNOWLEDGE / RAG INGESTION SPECIALIST PIPELINE ---
+        await options.jobLease?.reportProgress?.("document_chunking", { fileBytes: file.size ?? 0 });
         // Look up the real built-in Knowledge Ingestion Agent by its metadata key.
         const allCompanyAgentsK = await this.db
           .select({
@@ -674,31 +1030,112 @@ export class OnboardingOrchestratorService {
         const agentModel = (knowledgeIngestionAgent?.adapterConfig as any)?.model;
         const agentInstructions = (knowledgeIngestionAgent?.adapterConfig as any)?.instructionsFilePath;
 
-        const { chunks, totalWords } = await KnowledgeIngestionService.processDocument(
-          file.originalname,
-          file.buffer,
-          file.mimetype,
-        );
+        const streamTextRag = Boolean(file.filePath)
+          && KnowledgeIngestionService.isStreamableTextDocument(file.originalname);
+        const streamBinaryRag = Boolean(file.filePath)
+          && KnowledgeIngestionService.isStreamableBinaryDocument(file.originalname);
+        const vectorStore = new DataSourceVectorStore(this.db);
+        const ragModelService = new RagModelService();
+        const embeddingBatchSize = 32;
+        let embeddingSpace: EmbeddingSpace | null = null;
+        let embeddingGeneration: string | null = null;
+        let embeddingBackend: string | null = null;
+        let embeddingAvailable = true;
+        let insertedChunks = 0;
+        let chunks: ParsedChunk[] = [];
+        let totalWords = 0;
+        let chunkCount = 0;
+        let documentExtractionQuality: Record<string, unknown> | undefined;
+        const persistChunkBatch = async (chunkBatch: ParsedChunk[]) => {
+          let vectors: number[][] | null = null;
+          if (embeddingAvailable) {
+            const generated = await ragModelService.embed(
+              chunkBatch.map((chunk) => chunk.content),
+              embeddingSpace || undefined,
+            );
+            if (generated.vectors && generated.space) {
+              if (!generated.generation) throw new Error("RAG embedding provider did not report a model generation");
+              if (embeddingSpace && generated.space !== embeddingSpace) {
+                throw new Error("RAG embedding provider changed model space during one document generation");
+              }
+              if (embeddingGeneration && generated.generation !== embeddingGeneration) {
+                throw new Error("RAG embedding model revision changed during one document generation");
+              }
+              embeddingSpace = generated.space;
+              embeddingGeneration = generated.generation;
+              embeddingBackend = generated.backend;
+              vectors = generated.vectors;
+            } else {
+              if (embeddingSpace) {
+                throw new Error("RAG embedding provider became unavailable before this document generation completed");
+              }
+              embeddingAvailable = false;
+            }
+          }
 
-        if (chunks.length > 0) {
-          const chunkValues = chunks.map((c) => ({
+          const chunkValues = chunkBatch.map((chunk, index) => ({
             dataSourceId: initialDs.id,
             companyId,
-            chunkIndex: c.chunkIndex,
-            title: c.title,
-            content: c.content,
-            tokenCount: c.tokenCount,
-            metadata: c.metadata,
-            embedding: c.embedding,
+            chunkIndex: chunk.chunkIndex,
+            title: chunk.title,
+            content: chunk.content,
+            tokenCount: chunk.tokenCount,
+            metadata: {
+              ...chunk.metadata,
+              embeddingSpace,
+              embeddingGeneration,
+              embeddingBackend,
+            },
+            embedding: vectors?.[index] ?? null,
           }));
+          await vectorStore.insertChunks(chunkValues, options.jobLease
+            ? { companyId, sourceId: initialDs.id, lease: options.jobLease }
+            : undefined);
+          insertedChunks += chunkBatch.length;
+          await options.jobLease?.reportProgress?.("vector_write", {
+            ...(chunkCount > 0 ? { chunkCount } : {}),
+            insertedChunks,
+          });
+        };
 
-          const batchSize = 50;
-          for (let i = 0; i < chunkValues.length; i += batchSize) {
-            await this.db.insert(dataSourceChunks).values(chunkValues.slice(i, i + batchSize));
+        if (streamTextRag) {
+          const streamed = await KnowledgeIngestionService.processTextFile(
+            file.filePath!,
+            persistChunkBatch,
+            { signal: options.jobLease?.signal, batchSize: embeddingBatchSize, sampleLimit: 100 },
+          );
+          chunks = streamed.sampleChunks;
+          totalWords = streamed.totalWords;
+          chunkCount = streamed.chunkCount;
+        } else if (streamBinaryRag) {
+          const streamed = await KnowledgeIngestionService.processDocumentFile(
+            file.filePath!,
+            file.originalname,
+            persistChunkBatch,
+            { signal: options.jobLease?.signal, batchSize: embeddingBatchSize, sampleLimit: 100 },
+          );
+          chunks = streamed.sampleChunks;
+          totalWords = streamed.totalWords;
+          chunkCount = streamed.chunkCount;
+          documentExtractionQuality = streamed.extractionQuality;
+        } else {
+          const parsed = await KnowledgeIngestionService.processDocument(
+            file.originalname,
+            this.readFileBuffer(file),
+            file.mimetype,
+          );
+          chunks = parsed.chunks;
+          totalWords = parsed.totalWords;
+          chunkCount = chunks.length;
+          for (let offset = 0; offset < chunks.length; offset += embeddingBatchSize) {
+            await persistChunkBatch(chunks.slice(offset, offset + embeddingBatchSize));
           }
         }
+        await options.jobLease?.reportProgress?.("embedding", { chunkCount });
+        await options.jobLease?.reportProgress?.("vector_write", { chunkCount, insertedChunks });
 
         // 4a. Execute Autonomous Semantic Document Analysis via Knowledge Ingestion Agent
+        const semanticSampleChunks = chunks.slice(0, 100);
         const aiDocRes = await aiReasoningService.analyzeDocument(
           file.originalname,
           chunks.slice(0, 10).map((c) => ({
@@ -732,7 +1169,7 @@ export class OnboardingOrchestratorService {
           const domainResult = await this.jevService.evaluateDocumentDomain(
             file.originalname,
             sampleText,
-            chunks.map((c, idx) => ({ id: `chunk-${idx}`, title: c.title || undefined, content: c.content }))
+            semanticSampleChunks.map((c, idx) => ({ id: `chunk-${idx}`, title: c.title || undefined, content: c.content }))
           );
           finalDomain = domainResult.domain;
           finalEntities = domainResult.entities;
@@ -744,7 +1181,7 @@ export class OnboardingOrchestratorService {
           if (domainResult.reasoningSteps) reasoningSteps.push(...domainResult.reasoningSteps);
         } else if (docProfiles.length === 0) {
           docProfiles = this.jevService.deriveDocumentSemanticProfiles(
-            chunks.map((c, idx) => ({ id: `chunk-${idx}`, title: c.title || undefined, content: c.content })),
+            semanticSampleChunks.map((c, idx) => ({ id: `chunk-${idx}`, title: c.title || undefined, content: c.content })),
             file.originalname
           );
         }
@@ -759,30 +1196,33 @@ export class OnboardingOrchestratorService {
           entities: finalEntities,
           primaryTopics: finalTopics,
           documentProfiles: docProfiles,
-          summary: finalSummary || `Dokumen '${file.originalname}' (${chunks.length} chunks, ${totalWords} kata) dipetakan ke dalam basis pengetahuan RAG oleh ${specialistAgentName}.`,
-          onboardedAt: new Date().toISOString(),
+          summary: finalSummary || `Dokumen '${file.originalname}' (${chunkCount} chunks, ${totalWords} kata) dipetakan ke dalam basis pengetahuan RAG oleh ${specialistAgentName}.`,
+            onboardedAt: new Date().toISOString(),
           suggestedQueries: finalQueries,
           reasoningSteps,
         };
 
         // Update status to 'ready' with semantic profile
-        const [updated] = await this.db
+        const completedMetadata = {
+          ...((initialDs.metadata as Record<string, unknown> | null) || {}),
+          completedAt: new Date().toISOString(),
+          chunkCount,
+          totalWords,
+          embeddingSpace,
+          embeddingGeneration,
+          embeddingBackend,
+          ...(documentExtractionQuality ? { documentExtractionQuality } : {}),
+          embeddingStatus: embeddingAvailable && embeddingSpace ? "ready" : "unavailable",
+          onboardedBy: specialistAgentName,
+          semanticProfile,
+          onboardingReasoning: reasoningSteps,
+          suggestedQueries: finalQueries,
+        };
+        const updated = options.deferReady ? initialDs : (await this.db
           .update(dataSources)
-          .set({
-            status: "ready",
-            metadata: {
-              completedAt: new Date().toISOString(),
-              chunkCount: chunks.length,
-              totalWords,
-              onboardedBy: specialistAgentName,
-              semanticProfile,
-              onboardingReasoning: reasoningSteps,
-              suggestedQueries: finalQueries,
-            },
-            updatedAt: new Date(),
-          })
-          .where(eq(dataSources.id, initialDs.id))
-          .returning();
+          .set({ status: "ready", metadata: completedMetadata, updatedAt: new Date() })
+          .where(and(eq(dataSources.id, initialDs.id), eq(dataSources.companyId, companyId)))
+          .returning())[0];
 
         // 4c. Record heartbeat run so the agent's "Latest Run" is visible in the UI.
         const runId = await this.recordIngestionRun(
@@ -809,11 +1249,12 @@ export class OnboardingOrchestratorService {
 
         const finalDs: DataSource = {
           ...updated,
+          metadata: options.deferReady ? completedMetadata : updated.metadata,
           collectionId: updated.collectionId,
           sourceType: updated.sourceType as any,
           status: updated.status as any,
           semanticProfile,
-          chunks: chunks as any[],
+          chunks: chunks.slice(0, 10) as any[],
         };
 
         if (options.collectionId && !options.skipCorrelation) {
@@ -827,17 +1268,13 @@ export class OnboardingOrchestratorService {
         return finalDs;
       }
     } catch (err: any) {
-      await this.db
-        .update(dataSources)
-        .set({
+      if (!options.deferReady) {
+        await this.db.update(dataSources).set({
           status: "error",
-          metadata: {
-            failedAt: new Date().toISOString(),
-            error: err?.message || String(err),
-          },
+          metadata: { failedAt: new Date().toISOString(), error: err?.message || String(err) },
           updatedAt: new Date(),
-        })
-        .where(eq(dataSources.id, initialDs.id));
+        }).where(and(eq(dataSources.id, initialDs.id), eq(dataSources.companyId, companyId)));
+      }
 
       throw new Error(`Onboarding failed for ${file.originalname}: ${err.message}`);
     }
@@ -887,15 +1324,16 @@ export class OnboardingOrchestratorService {
       options.name?.trim() ||
       `${config.type.toUpperCase()} - ${config.database} (${config.host}:${config.port})`;
 
-    const sanitizedConfig = {
-      ...config,
-      password: config.password ? "••••••••" : "",
-    };
+    const sanitizedConfig = databaseConfigWithoutPassword(config);
+    const sourceId = randomUUID();
+    const credentials = new DataSourceDatabaseConfigService(this.db);
+    const persistedConfig = await credentials.prepare(companyId, sourceId, config);
 
     // 2. Create initial data source record
     const [initialDs] = await this.db
       .insert(dataSources)
       .values({
+        id: sourceId,
         companyId,
         name: defaultName,
         description:
@@ -905,13 +1343,15 @@ export class OnboardingOrchestratorService {
         status: "processing",
         metadata: {
           startedAt: new Date().toISOString(),
-          connectionConfig: sanitizedConfig,
-          rawConfig: config,
+          ...persistedConfig,
           serverVersion: testResult.version,
           onboardedBy: specialistAgentName,
         },
       })
-      .returning();
+      .returning().catch(async (error) => {
+        await credentials.archivePrepared(companyId, persistedConfig);
+        throw error;
+      });
 
     // 3. Launch autonomous introspection & reasoning via Database Ingestion Agent in background
     this.processDatabaseAsync(
@@ -927,11 +1367,12 @@ export class OnboardingOrchestratorService {
       agentInstructions,
       databaseIngestionAgent?.adapterType,
     ).catch((err) => {
-      console.error(`[onboarding-orchestrator] Background database onboarding failed for ${defaultName}:`, err);
+      console.error(`[onboarding-orchestrator] Background database onboarding failed for ${defaultName}:`, databaseConnectionErrorMessage(err, config));
     });
 
     return {
       ...initialDs,
+      metadata: publicDatabaseMetadata(initialDs.metadata),
       sourceType: initialDs.sourceType as any,
       status: initialDs.status as any,
     };
@@ -1028,6 +1469,7 @@ export class OnboardingOrchestratorService {
         // Enhance table semantic model with agent's analyzed table role and per-table topics
         const tableSemantic = {
           ...tableData.semanticModel,
+          sourceSchema: tableData.schemaName,
           tableRole: tableRoles[tableData.tableName] || "dimension_table",
           context: tProf?.context || tableData.semanticModel?.context,
           topics: tProf?.topics || tableData.semanticModel?.topics || [],
@@ -1054,10 +1496,20 @@ export class OnboardingOrchestratorService {
         try {
           const chDdl = (tableSemantic as any)?.clickhouseSchema?.createTableDdl;
           if (chDdl) {
-            const { ClickhouseService } = await import("./clickhouse.js");
+            const { ClickhouseService, clickhouseSourceTableName, rewriteClickhouseCreateTableName } = await import("./clickhouse.js");
             const clickhouse = new ClickhouseService();
-            const sanitizedName = tableData.tableName.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
-            await clickhouse.syncTable(sanitizedName, chDdl, undefined, companyId);
+            const sanitizedName = clickhouseSourceTableName(tableRow.id, tableData.tableName);
+            const identifiedDdl = rewriteClickhouseCreateTableName(chDdl, sanitizedName);
+            const identifiedModel = {
+              ...tableSemantic,
+              clickhouseTable: sanitizedName,
+              clickhouseSchema: { ...(tableSemantic as any).clickhouseSchema, createTableDdl: identifiedDdl },
+            };
+            await this.db
+              .update(dataSourceTables)
+              .set({ semanticModel: identifiedModel as any, updatedAt: new Date() })
+              .where(eq(dataSourceTables.id, tableRow.id));
+            await clickhouse.syncTable(sanitizedName, identifiedDdl, undefined, companyId);
           }
         } catch (chErr: any) {
           console.warn(`[ClickhouseSync] Optional DB schema sync skipped: ${chErr.message}`);
@@ -1102,8 +1554,9 @@ export class OnboardingOrchestratorService {
           status: "ready",
           metadata: {
             completedAt: new Date().toISOString(),
+            ...initialDs.metadata,
             connectionConfig: sanitizedConfig,
-            rawConfig: config,
+            rawConfig: databaseConfigWithoutPassword(config),
             serverVersion,
             tableCount: tables.length,
             totalRows,
@@ -1147,15 +1600,16 @@ export class OnboardingOrchestratorService {
         .set({
           status: "error",
           metadata: {
+            ...initialDs.metadata,
             failedAt: new Date().toISOString(),
-            error: err?.message || String(err),
+            error: databaseConnectionErrorMessage(err, config),
             connectionConfig: sanitizedConfig,
           },
           updatedAt: new Date(),
         })
         .where(eq(dataSources.id, initialDs.id));
 
-      console.error(`[onboarding-orchestrator] Error during database onboarding for ${defaultName}:`, err);
+      console.error(`[onboarding-orchestrator] Error during database onboarding for ${defaultName}:`, databaseConnectionErrorMessage(err, config));
     }
   }
 

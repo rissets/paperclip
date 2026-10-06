@@ -1,6 +1,11 @@
+import { createHash, randomUUID } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import { createRequire } from "node:module";
 import path from "node:path";
-import AdmZip from "adm-zip";
-import { eq, and, desc, sql, inArray } from "drizzle-orm";
+import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { eq, and, asc, desc, sql, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   dataSourceCollections,
@@ -20,9 +25,32 @@ import type {
   UnifiedClickhouseView,
   SuggestedQueryTemplate,
 } from "@paperclipai/shared";
+import { badRequest, payloadTooLarge } from "../errors.js";
+import { ClickhouseService } from "./clickhouse.js";
+
+const require = createRequire(import.meta.url);
+type ZipEntryStream = NodeJS.ReadableStream & AsyncIterable<Buffer> & {
+  path: string;
+  type: string;
+  vars?: { uncompressedSize?: number };
+};
+type ZipParserStream = NodeJS.ReadableStream & AsyncIterable<ZipEntryStream> & {
+  destroy(error?: Error): ZipParserStream;
+};
+const unzipper = require("unzipper") as {
+  Parse(options?: { forceStream?: boolean }): NodeJS.ReadWriteStream & ZipParserStream;
+};
+
+const MiB = 1024 * 1024;
+const GiB = 1024 * MiB;
+const MAX_ZIP_ENTRIES = 2_000;
+const MAX_EXTRACTED_FILES = 500;
+const DEFAULT_MAX_ZIP_EXPANDED_BYTES = GiB;
+const MAX_ZIP_EXPANDED_BYTES = 2 * GiB;
+const MAX_COLLECTION_VIEWS = 100;
 
 export class DataSourceCollectionsService {
-  constructor(private db: Db) {}
+  constructor(private db: Db, private clickhouse = new ClickhouseService()) {}
 
   /**
    * Helper to generate a URL-safe slug from a collection name
@@ -45,62 +73,63 @@ export class DataSourceCollectionsService {
       .where(eq(dataSourceCollections.companyId, companyId))
       .orderBy(desc(dataSourceCollections.createdAt));
 
-    const results: DataSourceCollection[] = [];
+    if (collections.length === 0) return [];
 
-    for (const col of collections) {
-      // Fetch member data sources count & breakdown
-      const memberSources = await this.db
-        .select({
-          id: dataSources.id,
-          sourceType: dataSources.sourceType,
-        })
+    // Aggregate by collection in the database. The old implementation issued
+    // three queries per collection and loaded every table/chunk ID just to
+    // display counts on the datasource landing page.
+    const [sourceCounts, tableCounts, chunkCounts] = await Promise.all([
+      this.db.select({
+        collectionId: dataSources.collectionId,
+        dataSourceCount: sql<number>`count(*)`,
+        documentCount: sql<number>`count(*) filter (where ${dataSources.sourceType} = 'rag_document')`,
+      })
         .from(dataSources)
-        .where(and(eq(dataSources.companyId, companyId), eq(dataSources.collectionId, col.id)));
+        .where(eq(dataSources.companyId, companyId))
+        .groupBy(dataSources.collectionId),
+      this.db.select({
+        collectionId: dataSources.collectionId,
+        tableCount: sql<number>`count(${dataSourceTables.id})`,
+        totalRows: sql<number | string>`coalesce(sum(${dataSourceTables.rowCount}), 0)`,
+      })
+        .from(dataSources)
+        .leftJoin(dataSourceTables, and(
+          eq(dataSourceTables.dataSourceId, dataSources.id),
+          eq(dataSourceTables.companyId, companyId),
+        ))
+        .where(eq(dataSources.companyId, companyId))
+        .groupBy(dataSources.collectionId),
+      this.db.select({
+        collectionId: dataSources.collectionId,
+        totalChunks: sql<number>`count(${dataSourceChunks.id})`,
+      })
+        .from(dataSources)
+        .leftJoin(dataSourceChunks, and(
+          eq(dataSourceChunks.dataSourceId, dataSources.id),
+          eq(dataSourceChunks.companyId, companyId),
+        ))
+        .where(eq(dataSources.companyId, companyId))
+        .groupBy(dataSources.collectionId),
+    ]);
+    const sourceCountByCollection = new Map(sourceCounts.map((row) => [row.collectionId, row]));
+    const tableCountByCollection = new Map(tableCounts.map((row) => [row.collectionId, row]));
+    const chunkCountByCollection = new Map(chunkCounts.map((row) => [row.collectionId, row]));
 
-      const sourceIds = memberSources.map((s) => s.id);
-
-      let tableCount = 0;
-      let totalRows = 0;
-      let documentCount = 0;
-      let totalChunks = 0;
-
-      if (sourceIds.length > 0) {
-        // Count tables & rows
-        const tables = await this.db
-          .select({
-            rowCount: dataSourceTables.rowCount,
-          })
-          .from(dataSourceTables)
-          .where(and(eq(dataSourceTables.companyId, companyId), inArray(dataSourceTables.dataSourceId, sourceIds)));
-
-        tableCount = tables.length;
-        totalRows = tables.reduce((acc, t) => acc + (t.rowCount || 0), 0);
-
-        // Count chunks for document types
-        const chunks = await this.db
-          .select({
-            id: dataSourceChunks.id,
-          })
-          .from(dataSourceChunks)
-          .where(and(eq(dataSourceChunks.companyId, companyId), inArray(dataSourceChunks.dataSourceId, sourceIds)));
-
-        totalChunks = chunks.length;
-        documentCount = memberSources.filter((s) => s.sourceType === "rag_document").length;
-      }
-
-      results.push({
+    return collections.map((col) => {
+      const sourceCountsForCollection = sourceCountByCollection.get(col.id);
+      const tableCountsForCollection = tableCountByCollection.get(col.id);
+      const chunkCountsForCollection = chunkCountByCollection.get(col.id);
+      return {
         ...col,
         semanticProfile: (col.semanticProfile as unknown as CollectionSemanticProfile) || null,
         metadata: col.metadata as Record<string, unknown> | null,
-        dataSourceCount: memberSources.length,
-        tableCount,
-        documentCount,
-        totalRows,
-        totalChunks,
-      });
-    }
-
-    return results;
+        dataSourceCount: Number(sourceCountsForCollection?.dataSourceCount || 0),
+        tableCount: Number(tableCountsForCollection?.tableCount || 0),
+        documentCount: Number(sourceCountsForCollection?.documentCount || 0),
+        totalRows: Number(tableCountsForCollection?.totalRows || 0),
+        totalChunks: Number(chunkCountsForCollection?.totalChunks || 0),
+      };
+    });
   }
 
   /**
@@ -356,15 +385,40 @@ export class DataSourceCollectionsService {
   }
 
   /**
-   * Extract files from an uploaded ZIP buffer in-memory
+   * Stream supported ZIP members to private temporary files. Only bounded
+   * member buffers are kept by the parser; callers must remove directory when
+   * each returned file has been copied into datasource storage.
    */
-  extractZipEntries(
-    buffer: Buffer,
-  ): Array<{ originalname: string; buffer: Buffer; mimetype: string; size: number }> {
-    const zip = new AdmZip(buffer);
-    const entries = zip.getEntries();
-    const extractedFiles: Array<{ originalname: string; buffer: Buffer; mimetype: string; size: number }> = [];
-
+  async extractZipEntries(
+    input: { filePath: string } | { buffer: Buffer },
+    limits: { maxEntryBytes?: number; maxTotalBytes?: number; maxFiles?: number } = {},
+  ): Promise<{
+    directory: string;
+    entries: Array<{ originalname: string; filePath: string; mimetype: string; size: number }>;
+  }> {
+    const configuredExpandedBytes = Number(process.env.DATASOURCE_MAX_ZIP_EXPANDED_BYTES || DEFAULT_MAX_ZIP_EXPANDED_BYTES);
+    if (!Number.isSafeInteger(configuredExpandedBytes) || configuredExpandedBytes <= 0) {
+      throw new Error("DATASOURCE_MAX_ZIP_EXPANDED_BYTES must be a positive safe integer");
+    }
+    const maxTotalBytes = Math.min(limits.maxTotalBytes ?? configuredExpandedBytes, MAX_ZIP_EXPANDED_BYTES);
+    const maxFiles = Math.min(limits.maxFiles ?? MAX_EXTRACTED_FILES, MAX_EXTRACTED_FILES);
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-datasource-zip-"));
+    const extractedFiles: Array<{ originalname: string; filePath: string; mimetype: string; size: number }> = [];
+    const usedNames = new Set<string>();
+    let totalExpandedBytes = 0;
+    let archiveEntryCount = 0;
+    const drainWithinArchiveLimit = async (entry: ZipEntryStream) => {
+      for await (const chunk of entry) {
+        totalExpandedBytes += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(String(chunk));
+        if (totalExpandedBytes > maxTotalBytes) {
+          throw payloadTooLarge(`ZIP archive expands beyond its ${maxTotalBytes}-byte total limit`);
+        }
+      }
+    };
+    const inputStream = "filePath" in input
+      ? fs.createReadStream(input.filePath, { highWaterMark: 64 * 1024 })
+      : Readable.from([input.buffer]);
+    const parser = inputStream.pipe(unzipper.Parse({ forceStream: true }));
     const allowedExtensions = new Set([
       "csv",
       "tsv",
@@ -378,46 +432,108 @@ export class DataSourceCollectionsService {
       "json",
     ]);
 
-    for (const entry of entries) {
-      if (entry.isDirectory) continue;
+    try {
+      for await (const entry of parser) {
+        archiveEntryCount += 1;
+        if (archiveEntryCount > MAX_ZIP_ENTRIES) {
+          await drainWithinArchiveLimit(entry);
+          throw payloadTooLarge(`ZIP archive contains more than ${MAX_ZIP_ENTRIES} entries`);
+        }
+        const announcedBytes = Number(entry.vars?.uncompressedSize);
+        if (Number.isFinite(announcedBytes) && announcedBytes > maxTotalBytes - totalExpandedBytes) {
+          throw payloadTooLarge(`ZIP archive expands beyond its ${maxTotalBytes}-byte total limit`);
+        }
+        if (entry.type === "Directory") {
+          await drainWithinArchiveLimit(entry);
+          continue;
+        }
 
-      const normalizedPath = entry.entryName.replace(/\\/g, "/");
-      // Skip system/hidden mac files
-      if (
-        normalizedPath.startsWith("__MACOSX/") ||
-        normalizedPath.includes("/.") ||
-        path.basename(normalizedPath).startsWith(".")
-      ) {
-        continue;
+        const normalizedPath = entry.path.replace(/\\/g, "/");
+        const segments = normalizedPath.split("/");
+        if (normalizedPath.includes("\0") || normalizedPath.startsWith("/")
+          || /^[a-z]:/i.test(normalizedPath) || segments.some((segment) => segment === "..")) {
+          await drainWithinArchiveLimit(entry);
+          throw badRequest("ZIP archive contains an unsafe member path");
+        }
+        // Skip system/hidden mac files.
+        if (segments.includes("__MACOSX") || segments.some((segment) => segment.startsWith("."))) {
+          await drainWithinArchiveLimit(entry);
+          continue;
+        }
+
+        const basename = path.posix.basename(normalizedPath);
+        const ext = basename.split(".").pop()?.toLowerCase() || "";
+        if (!allowedExtensions.has(ext)) {
+          await drainWithinArchiveLimit(entry);
+          continue;
+        }
+        if (extractedFiles.length >= maxFiles) {
+          await drainWithinArchiveLimit(entry);
+          throw payloadTooLarge(`ZIP archive contains more than ${maxFiles} supported datasource files`);
+        }
+
+        const envName = ext === "csv" || ext === "tsv"
+          ? "DATASOURCE_MAX_CSV_UPLOAD_BYTES"
+          : "DATASOURCE_MAX_FILE_UPLOAD_BYTES";
+        const defaultEntryBytes = ext === "csv" || ext === "tsv" ? GiB : 100 * MiB;
+        const maximumEntryBytes = ext === "csv" || ext === "tsv" ? 2 * GiB : 100 * MiB;
+        const configuredEntryBytes = Number(process.env[envName] || defaultEntryBytes);
+        if (!Number.isSafeInteger(configuredEntryBytes) || configuredEntryBytes <= 0) {
+          throw new Error(`${envName} must be a positive safe integer`);
+        }
+        const entryLimit = Math.min(limits.maxEntryBytes ?? configuredEntryBytes, maximumEntryBytes);
+        if (Number.isFinite(announcedBytes) && announcedBytes > entryLimit) {
+          await drainWithinArchiveLimit(entry);
+          throw payloadTooLarge(`ZIP member ${basename} exceeds its ${entryLimit}-byte datasource limit`);
+        }
+
+        let outputBytes = 0;
+        const outputPath = path.join(directory, `${randomUUID()}.${ext}`);
+        const byteLimit = new Transform({
+          transform(chunk: Buffer, _encoding, callback) {
+            outputBytes += chunk.length;
+            totalExpandedBytes += chunk.length;
+            if (outputBytes > entryLimit) {
+              callback(payloadTooLarge(`ZIP member ${basename} exceeds its ${entryLimit}-byte datasource limit`));
+              return;
+            }
+            if (totalExpandedBytes > maxTotalBytes) {
+              callback(payloadTooLarge(`ZIP archive expands beyond its ${maxTotalBytes}-byte total limit`));
+              return;
+            }
+            callback(null, chunk);
+          },
+        });
+        await pipeline(entry, byteLimit, fs.createWriteStream(outputPath, { flags: "wx", mode: 0o600 }));
+
+        let originalname = basename;
+        if (usedNames.has(originalname.toLocaleLowerCase("en-US"))) {
+          const extension = path.posix.extname(basename);
+          const stem = basename.slice(0, basename.length - extension.length);
+          originalname = `${stem}-${randomUUID().slice(0, 8)}${extension}`;
+        }
+        usedNames.add(originalname.toLocaleLowerCase("en-US"));
+
+        let mimetype = "application/octet-stream";
+        if (ext === "csv") mimetype = "text/csv";
+        else if (ext === "tsv" || ext === "txt") mimetype = "text/plain";
+        else if (ext === "pdf") mimetype = "application/pdf";
+        else if (ext === "xlsx") mimetype = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+        else if (ext === "xls") mimetype = "application/vnd.ms-excel";
+        else if (ext === "docx") mimetype = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+        else if (ext === "md") mimetype = "text/markdown";
+        else if (ext === "json") mimetype = "application/json";
+
+        extractedFiles.push({ originalname, filePath: outputPath, mimetype, size: outputBytes });
       }
-
-      const basename = path.basename(normalizedPath);
-      const ext = basename.split(".").pop()?.toLowerCase() || "";
-
-      if (!allowedExtensions.has(ext)) {
-        continue;
-      }
-
-      const fileBuffer = entry.getData();
-      let mimetype = "application/octet-stream";
-      if (ext === "csv") mimetype = "text/csv";
-      else if (ext === "tsv" || ext === "txt") mimetype = "text/plain";
-      else if (ext === "pdf") mimetype = "application/pdf";
-      else if (ext === "xlsx") mimetype = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-      else if (ext === "xls") mimetype = "application/vnd.ms-excel";
-      else if (ext === "docx") mimetype = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-      else if (ext === "md") mimetype = "text/markdown";
-      else if (ext === "json") mimetype = "application/json";
-
-      extractedFiles.push({
-        originalname: basename,
-        buffer: fileBuffer,
-        mimetype,
-        size: fileBuffer.length,
-      });
+    } catch (error) {
+      parser.destroy();
+      inputStream.destroy();
+      fs.rmSync(directory, { recursive: true, force: true });
+      throw error;
     }
 
-    return extractedFiles;
+    return { directory, entries: extractedFiles };
   }
 
   /**
@@ -437,13 +553,39 @@ export class DataSourceCollectionsService {
 
     // 1. Fetch all data sources in the collection
     const memberSources = await this.db
-      .select()
+      .select({
+        id: dataSources.id,
+        companyId: dataSources.companyId,
+        collectionId: dataSources.collectionId,
+        name: dataSources.name,
+        sourceType: dataSources.sourceType,
+        status: dataSources.status,
+        metadata: dataSources.metadata,
+        createdAt: dataSources.createdAt,
+      })
       .from(dataSources)
-      .where(and(eq(dataSources.companyId, companyId), eq(dataSources.collectionId, collectionId)));
+      .where(and(eq(dataSources.companyId, companyId), eq(dataSources.collectionId, collectionId)))
+      .orderBy(asc(dataSources.createdAt), asc(dataSources.id));
 
     const sourceIds = memberSources.map((s) => s.id);
 
     if (sourceIds.length === 0) {
+      const priorViews = ((col.semanticProfile as unknown as CollectionSemanticProfile | null)?.unifiedClickhouseViews || [])
+        .map((view) => view.viewName)
+        .filter((name) => /^pcv_[a-f0-9]{24}$/.test(name));
+      if (priorViews.length > 0) {
+        try {
+          if ((await this.clickhouse.isHealthy()).ok) {
+            const database = await this.clickhouse.ensureCompanyDatabase(companyId);
+            for (const viewName of priorViews) {
+              await this.clickhouse.execute(`DROP VIEW IF EXISTS \`${viewName}\``, database).catch(() => {});
+            }
+          }
+        } catch {
+          // The empty collection profile still publishes even when ClickHouse
+          // is down; orphan cleanup retries on the next explicit correlation.
+        }
+      }
       const emptyProfile: CollectionSemanticProfile = {
         domain: "General",
         primaryTopics: [],
@@ -469,147 +611,236 @@ export class DataSourceCollectionsService {
     }
 
     // 2. Fetch all tables and column definitions across all structured sources in this collection
-    const tables = await this.db
-      .select()
-      .from(dataSourceTables)
-      .where(and(eq(dataSourceTables.companyId, companyId), inArray(dataSourceTables.dataSourceId, sourceIds)));
+    const MAX_COLLECTION_ANALYSIS_TABLES = 500;
+    const [tableCountResult, sampledTables] = await Promise.all([
+      this.db.select({ count: sql<number>`count(*)` })
+        .from(dataSourceTables)
+        .innerJoin(dataSources, and(
+          eq(dataSources.id, dataSourceTables.dataSourceId),
+          eq(dataSources.companyId, companyId),
+        ))
+        .where(and(
+          eq(dataSourceTables.companyId, companyId),
+          eq(dataSources.collectionId, collectionId),
+        )),
+      this.db.select({
+        id: dataSourceTables.id,
+        dataSourceId: dataSourceTables.dataSourceId,
+        companyId: dataSourceTables.companyId,
+        tableName: dataSourceTables.tableName,
+        rowCount: dataSourceTables.rowCount,
+        columnCount: dataSourceTables.columnCount,
+        schemaDefinition: dataSourceTables.schemaDefinition,
+        semanticModel: dataSourceTables.semanticModel,
+        createdAt: dataSourceTables.createdAt,
+        updatedAt: dataSourceTables.updatedAt,
+      })
+        .from(dataSourceTables)
+        .innerJoin(dataSources, and(
+          eq(dataSources.id, dataSourceTables.dataSourceId),
+          eq(dataSources.companyId, companyId),
+        ))
+        .where(and(
+          eq(dataSourceTables.companyId, companyId),
+          eq(dataSources.collectionId, collectionId),
+        ))
+        .orderBy(asc(dataSourceTables.createdAt), asc(dataSourceTables.id))
+        .limit(MAX_COLLECTION_ANALYSIS_TABLES + 1),
+    ]);
+    const totalTableCount = Number(tableCountResult[0]?.count || 0);
+    const tablesTruncated = sampledTables.length > MAX_COLLECTION_ANALYSIS_TABLES;
+    const tables = sampledTables.slice(0, MAX_COLLECTION_ANALYSIS_TABLES);
+    const columnNames = (schema: unknown): string[] => Array.isArray(schema)
+      ? schema.map((column) => typeof column === "string" ? column : String((column as { name?: unknown })?.name || "")).filter(Boolean)
+      : [];
 
-    // Fetch sample records for each table to verify value overlap
+    // Read at most 100 sample rows per table in one bounded-result query. The
+    // previous per-table loop made collection correlation perform N database
+    // round trips and loaded every RAG chunk into application memory.
     const tableSamples = new Map<string, Array<Record<string, unknown>>>();
-    for (const t of tables) {
-      const samples = await this.db
-        .select({ data: dataSourceRecords.data })
+    for (const table of tables) tableSamples.set(table.id, []);
+    if (tables.length > 0) {
+      const rankedSamples = this.db
+        .select({
+          tableId: dataSourceRecords.tableId,
+          data: dataSourceRecords.data,
+          sampleRank: sql<number>`row_number() over (partition by ${dataSourceRecords.tableId} order by ${dataSourceRecords.rowIndex})`.as("sample_rank"),
+        })
         .from(dataSourceRecords)
-        .where(and(eq(dataSourceRecords.tableId, t.id), eq(dataSourceRecords.companyId, companyId)))
-        .limit(100);
-
-      tableSamples.set(t.id, samples.map((s) => s.data));
+        .where(and(
+          eq(dataSourceRecords.companyId, companyId),
+          inArray(dataSourceRecords.tableId, tables.map((table) => table.id)),
+        ))
+        .as("ranked_datasource_samples");
+      const sampleRows = await this.db
+        .select({ tableId: rankedSamples.tableId, data: rankedSamples.data })
+        .from(rankedSamples)
+        .where(sql`${rankedSamples.sampleRank} <= 100`)
+        .orderBy(rankedSamples.tableId, rankedSamples.sampleRank);
+      for (const sample of sampleRows) {
+        tableSamples.get(sample.tableId)?.push(sample.data);
+      }
     }
 
     // 3. CROSS-TABLE FOREIGN KEY & RELATIONSHIP DISCOVERY
     const discoveredRelationships: TableRelation[] = [];
-    const discoveredPairKeys = new Set<string>();
-
-    for (let i = 0; i < tables.length; i++) {
-      for (let j = 0; j < tables.length; j++) {
-        if (i === j) continue;
-        const tableA = tables[i];
-        const tableB = tables[j];
-
-        const colsA = (tableA.schemaDefinition as any[]) || [];
-        const colsB = (tableB.schemaDefinition as any[]) || [];
-        const samplesA = tableSamples.get(tableA.id) || [];
-        const samplesB = tableSamples.get(tableB.id) || [];
-
-        for (const colA of colsA) {
-          const colAName = (typeof colA === "string" ? colA : colA.name || "").toLowerCase().trim();
-          if (!colAName) continue;
-
-          for (const colB of colsB) {
-            const colBName = (typeof colB === "string" ? colB : colB.name || "").toLowerCase().trim();
-            if (!colBName) continue;
-
-            // Relationship heuristics:
-            // Match Case 1: Exact column name match for foreign key patterns (e.g. `customer_id` == `customer_id`)
-            // Match Case 2: Primary key `id` on Table A matches `{tableA_singular}_id` on Table B
-            // Match Case 3: Common enterprise domain patterns (e.g. `site_id`, `bts_id`, `msisdn`, `kode_area`)
-            const singularTableA = tableA.tableName.toLowerCase().replace(/s$/, "");
-            const singularTableB = tableB.tableName.toLowerCase().replace(/s$/, "");
-
-            const isExactFkMatch =
-              colAName === colBName &&
-              (colAName.endsWith("_id") ||
-                colAName.endsWith("_code") ||
-                colAName.endsWith("_no") ||
-                colAName.startsWith("kode_") ||
-                colAName.startsWith("id_") ||
-                ["id", "nik", "msisdn", "nip", "email", "phone"].includes(colAName));
-
-            const isPkToFkMatch =
-              (colAName === "id" && colBName === `${singularTableA}_id`) ||
-              (colBName === "id" && colAName === `${singularTableB}_id`);
-
-            const isNormalizedMatch =
-              colAName.replace(/_/g, "") === colBName.replace(/_/g, "") &&
-              (colAName.includes("id") || colAName.includes("code") || colAName.includes("key"));
-
-            if (isExactFkMatch || isPkToFkMatch || isNormalizedMatch) {
-              // Check sample value intersection if samples are available
-              const valuesA = new Set(
-                samplesA
-                  .map((r) => r[colA.name || colAName])
-                  .filter((v) => v !== null && v !== undefined && String(v).trim() !== "")
-                  .map(String),
-              );
-
-              const valuesB = new Set(
-                samplesB
-                  .map((r) => r[colB.name || colBName])
-                  .filter((v) => v !== null && v !== undefined && String(v).trim() !== "")
-                  .map(String),
-              );
-
-              let overlapCount = 0;
-              for (const val of valuesA) {
-                if (valuesB.has(val)) overlapCount++;
-              }
-
-              // Value overlap confirmed OR matching standard naming convention
-              const hasOverlap = valuesA.size > 0 && valuesB.size > 0 ? overlapCount > 0 : true;
-
-              if (hasOverlap) {
-                const relationKey = `${tableA.tableName}.${colA.name || colAName}->${tableB.tableName}.${colB.name || colBName}`;
-                const reverseKey = `${tableB.tableName}.${colB.name || colBName}->${tableA.tableName}.${colA.name || colAName}`;
-
-                if (!discoveredPairKeys.has(relationKey) && !discoveredPairKeys.has(reverseKey)) {
-                  discoveredPairKeys.add(relationKey);
-
-                  // Determine relation type
-                  let relationType: "one_to_many" | "many_to_one" | "one_to_one" = "many_to_one";
-                  if (colAName === "id" || colA.isPrimaryKey) {
-                    relationType = "one_to_many";
-                  } else if (colBName === "id" || colB.isPrimaryKey) {
-                    relationType = "many_to_one";
-                  }
-
-                  discoveredRelationships.push({
-                    sourceTable: tableA.tableName,
-                    sourceColumn: colA.name || colAName,
-                    targetTable: tableB.tableName,
-                    targetColumn: colB.name || colBName,
-                    relationType,
-                  });
-                }
-              }
-            }
-          }
-        }
+    const MAX_RELATION_CANDIDATES = 20_000;
+    const MAX_DISCOVERED_RELATIONSHIPS = 500;
+    type RelationColumn = { table: typeof tables[number]; column: Record<string, unknown>; name: string; normalized: string; tableIndex: number };
+    const relationColumns: RelationColumn[] = [];
+    const columnsByName = new Map<string, RelationColumn[]>();
+    const columnsByNormalizedName = new Map<string, RelationColumn[]>();
+    for (const [tableIndex, table] of tables.entries()) {
+      for (const rawColumn of Array.isArray(table.schemaDefinition) ? table.schemaDefinition : []) {
+        const column = typeof rawColumn === "string" ? { name: rawColumn } : rawColumn as Record<string, unknown>;
+        const name = String(column.name || "").trim();
+        if (!name) continue;
+        const lowerName = name.toLowerCase();
+        const candidate = { table, column, name, normalized: lowerName.replace(/_/g, ""), tableIndex };
+        relationColumns.push(candidate);
+        const exactGroup = columnsByName.get(lowerName) || [];
+        exactGroup.push(candidate);
+        columnsByName.set(lowerName, exactGroup);
+        const normalizedGroup = columnsByNormalizedName.get(candidate.normalized) || [];
+        normalizedGroup.push(candidate);
+        columnsByNormalizedName.set(candidate.normalized, normalizedGroup);
       }
     }
 
+    const candidateRelations = new Map<string, { left: RelationColumn; right: RelationColumn }>();
+    const addCandidateRelation = (first: RelationColumn, second: RelationColumn) => {
+      if (first.table.id === second.table.id || candidateRelations.size >= MAX_RELATION_CANDIDATES) return;
+      const [left, right] = first.tableIndex < second.tableIndex ? [first, second] : [second, first];
+      const key = `${left.table.id}\0${left.name}\0${right.table.id}\0${right.name}`;
+      candidateRelations.set(key, { left, right });
+    };
+    const isExactForeignKeyName = (name: string) => name.endsWith("_id") || name.endsWith("_code")
+      || name.endsWith("_no") || name.startsWith("kode_") || name.startsWith("id_")
+      || ["nik", "msisdn", "nip", "email", "phone"].includes(name);
+
+    // Match named keys through indexes instead of comparing every column in
+    // every table against every other column (O(tables² * columns²)). Bare
+    // id-to-id is deliberately excluded because it creates noisy Cartesian
+    // relationship graphs for ordinary primary keys.
+    for (const [name, group] of columnsByName) {
+      if (name === "id" || !isExactForeignKeyName(name)) continue;
+      for (let leftIndex = 0; leftIndex < group.length; leftIndex++) {
+        for (let rightIndex = leftIndex + 1; rightIndex < group.length; rightIndex++) {
+          addCandidateRelation(group[leftIndex]!, group[rightIndex]!);
+          if (candidateRelations.size >= MAX_RELATION_CANDIDATES) break;
+        }
+        if (candidateRelations.size >= MAX_RELATION_CANDIDATES) break;
+      }
+      if (candidateRelations.size >= MAX_RELATION_CANDIDATES) break;
+    }
+    for (const [normalized, group] of columnsByNormalizedName) {
+      if (!(normalized.includes("id") || normalized.includes("code") || normalized.includes("key"))) continue;
+      for (let leftIndex = 0; leftIndex < group.length; leftIndex++) {
+        for (let rightIndex = leftIndex + 1; rightIndex < group.length; rightIndex++) {
+          if (group[leftIndex]!.name.toLowerCase() !== group[rightIndex]!.name.toLowerCase()) {
+            addCandidateRelation(group[leftIndex]!, group[rightIndex]!);
+          }
+          if (candidateRelations.size >= MAX_RELATION_CANDIDATES) break;
+        }
+        if (candidateRelations.size >= MAX_RELATION_CANDIDATES) break;
+      }
+      if (candidateRelations.size >= MAX_RELATION_CANDIDATES) break;
+    }
+    for (const primaryKey of relationColumns.filter((entry) => entry.name.toLowerCase() === "id" || entry.column.isPrimaryKey === true)) {
+      const singularTable = primaryKey.table.tableName.toLowerCase().replace(/s$/, "");
+      for (const foreignKey of columnsByName.get(`${singularTable}_id`) || []) {
+        addCandidateRelation(primaryKey, foreignKey);
+        if (candidateRelations.size >= MAX_RELATION_CANDIDATES) break;
+      }
+      if (candidateRelations.size >= MAX_RELATION_CANDIDATES) break;
+    }
+
+    const valuesByTableColumn = new Map<string, Set<string>>();
+    const sampleValues = (candidate: RelationColumn) => {
+      const key = `${candidate.table.id}\0${candidate.name}`;
+      const cached = valuesByTableColumn.get(key);
+      if (cached) return cached;
+      const values = new Set((tableSamples.get(candidate.table.id) || [])
+        .map((row) => row[candidate.name])
+        .filter((value) => value !== null && value !== undefined && String(value).trim() !== "")
+        .map(String));
+      valuesByTableColumn.set(key, values);
+      return values;
+    };
+
+    const discoveredPairKeys = new Set<string>();
+    for (const { left: columnA, right: columnB } of candidateRelations.values()) {
+      if (discoveredRelationships.length >= MAX_DISCOVERED_RELATIONSHIPS) break;
+      const valuesA = sampleValues(columnA);
+      const valuesB = sampleValues(columnB);
+      let overlapCount = 0;
+      for (const value of valuesA) if (valuesB.has(value)) overlapCount += 1;
+      const hasOverlap = valuesA.size > 0 && valuesB.size > 0 ? overlapCount > 0 : true;
+      if (!hasOverlap) continue;
+
+      const relationKey = `${columnA.table.id}.${columnA.name}->${columnB.table.id}.${columnB.name}`;
+      if (discoveredPairKeys.has(relationKey)) continue;
+      discoveredPairKeys.add(relationKey);
+      const columnAName = columnA.name.toLowerCase();
+      const columnBName = columnB.name.toLowerCase();
+      let relationType: "one_to_many" | "many_to_one" | "one_to_one" = "many_to_one";
+      if (columnAName === "id" || columnA.column.isPrimaryKey === true) relationType = "one_to_many";
+      else if (columnBName === "id" || columnB.column.isPrimaryKey === true) relationType = "many_to_one";
+      discoveredRelationships.push({
+        sourceTable: columnA.table.tableName,
+        sourceTableId: columnA.table.id,
+        sourceColumn: columnA.name,
+        targetTable: columnB.table.tableName,
+        targetTableId: columnB.table.id,
+        targetColumn: columnB.name,
+        relationType,
+      });
+    }
+
     // 4. CROSS-DOCUMENT & RAG CORRELATION
-    const documentSources = memberSources.filter((s) => s.sourceType === "rag_document");
-    const documentChunks = await this.db
+    const allDocumentSources = memberSources.filter((s) => s.sourceType === "rag_document");
+    const documentSources = allDocumentSources.slice(0, MAX_COLLECTION_ANALYSIS_TABLES);
+    const documentsTruncated = allDocumentSources.length > documentSources.length;
+    const rankedDocumentChunks = this.db
       .select({
         id: dataSourceChunks.id,
         dataSourceId: dataSourceChunks.dataSourceId,
         title: dataSourceChunks.title,
         content: dataSourceChunks.content,
         metadata: dataSourceChunks.metadata,
+        chunkRank: sql<number>`row_number() over (partition by ${dataSourceChunks.dataSourceId} order by ${dataSourceChunks.chunkIndex})`.as("chunk_rank"),
       })
       .from(dataSourceChunks)
-      .where(and(eq(dataSourceChunks.companyId, companyId), inArray(dataSourceChunks.dataSourceId, sourceIds)));
+      .where(and(eq(dataSourceChunks.companyId, companyId), inArray(dataSourceChunks.dataSourceId, documentSources.map((source) => source.id))))
+      .as("ranked_datasource_chunks");
+    const documentChunks = await this.db
+      .select({
+        id: rankedDocumentChunks.id,
+        dataSourceId: rankedDocumentChunks.dataSourceId,
+        title: rankedDocumentChunks.title,
+        content: rankedDocumentChunks.content,
+        metadata: rankedDocumentChunks.metadata,
+      })
+      .from(rankedDocumentChunks)
+      .where(sql`${rankedDocumentChunks.chunkRank} <= 5`)
+      .orderBy(rankedDocumentChunks.dataSourceId, rankedDocumentChunks.chunkRank);
+    const chunksBySource = new Map<string, typeof documentChunks>();
+    for (const chunk of documentChunks) {
+      const sourceChunks = chunksBySource.get(chunk.dataSourceId) || [];
+      sourceChunks.push(chunk);
+      chunksBySource.set(chunk.dataSourceId, sourceChunks);
+    }
 
     const docProfilesMap = new Map<string, { id: string; title: string; entities: Set<string>; text: string }>();
 
     for (const doc of documentSources) {
-      const chunksForDoc = documentChunks.filter((c) => c.dataSourceId === doc.id);
-      const combinedText = chunksForDoc.map((c) => c.content).join(" ");
+      const chunksForDoc = chunksBySource.get(doc.id) || [];
+      const combinedText = chunksForDoc.map((chunk) => chunk.content.slice(0, 2_000)).join(" ").slice(0, 10_000);
       const semantic = (doc.metadata as any)?.semanticProfile;
 
       const entities = new Set<string>();
       if (Array.isArray(semantic?.entities)) {
-        for (const e of semantic.entities) entities.add(String(e).toLowerCase());
+        for (const e of semantic.entities.slice(0, 100)) entities.add(String(e).toLowerCase());
       }
 
       // Keyword / entity extraction from text
@@ -629,8 +860,8 @@ export class DataSourceCollectionsService {
     const crossDocumentCorrelations: CrossDocumentCorrelation[] = [];
     const docList = Array.from(docProfilesMap.values());
 
-    for (let i = 0; i < docList.length; i++) {
-      for (let j = i + 1; j < docList.length; j++) {
+    for (let i = 0; i < docList.length && crossDocumentCorrelations.length < 1_000; i++) {
+      for (let j = i + 1; j < docList.length && crossDocumentCorrelations.length < 1_000; j++) {
         const docA = docList[i];
         const docB = docList[j];
 
@@ -655,55 +886,174 @@ export class DataSourceCollectionsService {
 
     // 5. CROSS-MODAL LINKING (RAG Documents <-> Structured Tables)
     const crossModalCorrelations: CrossModalCorrelation[] = [];
-    for (const doc of docList) {
-      for (const table of tables) {
-        const matchingEntities: string[] = [];
-        const cols = (table.schemaDefinition as any[]) || [];
-        const samples = tableSamples.get(table.id) || [];
-
-        for (const ent of doc.entities) {
-          // Check if entity matches any column name or sample value in the table
-          const matchesCol = cols.some((c) => (c.name || "").toLowerCase().includes(ent));
-          const matchesSample = samples.some((s) =>
-            Object.values(s).some((val) => String(val).toLowerCase().includes(ent)),
-          );
-
-          if (matchesCol || matchesSample) {
-            matchingEntities.push(ent);
-          }
+    const genericEntityTokens = new Set([
+      "about", "after", "agent", "analytics", "based", "company", "customer", "customers", "data", "document",
+      "enterprise", "from", "general", "information", "network", "record", "source", "table", "that", "this", "with",
+    ]);
+    const entityTokens = (value: string) => [...new Set((value.toLocaleLowerCase("en-US").match(/[\p{L}\p{N}]{3,}/gu) || [])
+      .flatMap((token) => token.endsWith("s") && token.length > 4 ? [token, token.slice(0, -1)] : [token])
+      .filter((token) => !genericEntityTokens.has(token)))];
+    const tableIdsByToken = new Map<string, Set<string>>();
+    for (const table of tables) {
+      const tokens = new Set<string>();
+      for (const name of columnNames(table.schemaDefinition)) {
+        for (const token of entityTokens(name.slice(0, 256))) tokens.add(token);
+      }
+      for (const row of tableSamples.get(table.id) || []) {
+        for (const value of Object.values(row)) {
+          for (const token of entityTokens(String(value ?? "").slice(0, 256))) tokens.add(token);
         }
-
-        if (matchingEntities.length > 0) {
-          crossModalCorrelations.push({
-            documentId: doc.id,
-            documentTitle: doc.title,
-            tableId: table.id,
-            tableName: table.tableName,
-            sharedEntities: matchingEntities.slice(0, 6),
-            correlationDescription: `Dokumen "${doc.title}" berelasi secara konteks dengan tabel "${table.tableName}" melalui entitas [${matchingEntities.slice(0, 4).join(", ")}].`,
-          });
-        }
+      }
+      for (const token of tokens) {
+        const ids = tableIdsByToken.get(token) || new Set<string>();
+        ids.add(table.id);
+        tableIdsByToken.set(token, ids);
       }
     }
 
-    // 6. SYNTHESIZE UNIFIED CLICKHOUSE VIEWS
+    const crossModalPairs = new Map<string, { doc: typeof docList[number]; tableId: string; entities: Set<string> }>();
+    const MAX_CROSS_MODAL_PAIRS = 5_000;
+    for (const doc of docList) {
+      for (const entity of doc.entities) {
+        const tokens = entityTokens(entity);
+        if (tokens.length === 0) continue;
+        const initialCandidates = tableIdsByToken.get(tokens[0]!);
+        if (!initialCandidates) continue;
+        for (const tableId of initialCandidates) {
+          if (!tokens.every((token) => tableIdsByToken.get(token)?.has(tableId))) continue;
+          const pairKey = `${doc.id}\0${tableId}`;
+          let pair = crossModalPairs.get(pairKey);
+          if (!pair && crossModalPairs.size < MAX_CROSS_MODAL_PAIRS) {
+            pair = { doc, tableId, entities: new Set<string>() };
+            crossModalPairs.set(pairKey, pair);
+          }
+          pair?.entities.add(entity);
+        }
+      }
+    }
+    const tableNameById = new Map(tables.map((table) => [table.id, table.tableName]));
+    for (const pair of crossModalPairs.values()) {
+      const tableName = tableNameById.get(pair.tableId);
+      if (!tableName) continue;
+      const matchingEntities = Array.from(pair.entities).slice(0, 6);
+      crossModalCorrelations.push({
+        documentId: pair.doc.id,
+        documentTitle: pair.doc.title,
+        tableId: pair.tableId,
+        tableName,
+        sharedEntities: matchingEntities,
+        correlationDescription: `Dokumen "${pair.doc.title}" berelasi secara konteks dengan tabel "${tableName}" melalui entitas [${matchingEntities.slice(0, 4).join(", ")}].`,
+      });
+    }
+
+    // 6. Deploy bounded, company-scoped ClickHouse views for materialized
+    // structured sources. Keep semantic relationship candidates visible when
+    // their tables are not available in ClickHouse, but never call those views
+    // deployed or authorize SQL against them.
     const unifiedClickhouseViews: UnifiedClickhouseView[] = [];
-    const collectionSlug = col.slug.replace(/[^a-z0-9_]/g, "_");
+    const quoteClickhouseIdentifier = (name: string) => `\`${name.replaceAll("`", "``")}\``;
+    const companyDatabase = this.clickhouse.getCompanyDatabase(companyId);
+    let clickhouseReady = false;
+    let clickhouseReadinessChecked = false;
+    let deployedViewCount = 0;
+    const sourceById = new Map(memberSources.map((source) => [source.id, source]));
+    const tableById = new Map(tables.map((table) => [table.id, table]));
+    const priorProfile = col.semanticProfile as unknown as CollectionSemanticProfile | null;
+    const priorGeneratedViews = (priorProfile?.unifiedClickhouseViews || [])
+      .map((view) => view.viewName)
+      .filter((name) => /^pcv_[a-f0-9]{24}$/.test(name));
 
     for (const rel of discoveredRelationships) {
-      const viewName = `view_${collectionSlug}_${rel.sourceTable}_${rel.targetTable}`.replace(/[^a-z0-9_]/g, "_");
-      const joinSql = `CREATE OR REPLACE VIEW ${viewName} AS
-SELECT s.*, t.*
-FROM ${rel.sourceTable} s
-LEFT JOIN ${rel.targetTable} t
-  ON s.${rel.sourceColumn} = t.${rel.targetColumn};`;
+      const relationIdentity = `${rel.sourceTableId || rel.sourceTable}.${rel.sourceColumn}->${rel.targetTableId || rel.targetTable}.${rel.targetColumn}`;
+      const viewName = `pcv_${createHash("sha256").update(`${collectionId}:${relationIdentity}`).digest("hex").slice(0, 24)}`;
+      const sourceTable = rel.sourceTableId ? tableById.get(rel.sourceTableId) : undefined;
+      const targetTable = rel.targetTableId ? tableById.get(rel.targetTableId) : undefined;
+      const source = sourceTable ? sourceById.get(sourceTable.dataSourceId) : undefined;
+      const target = targetTable ? sourceById.get(targetTable.dataSourceId) : undefined;
+      const sourceClickhouseName = (sourceTable?.semanticModel as Record<string, unknown> | null)?.clickhouseTable;
+      const targetClickhouseName = (targetTable?.semanticModel as Record<string, unknown> | null)?.clickhouseTable;
+      const sourceColumns = columnNames(sourceTable?.schemaDefinition);
+      const targetColumns = columnNames(targetTable?.schemaDefinition);
+      const sourceReady = source?.status === "ready" && ["csv", "excel"].includes(source.sourceType);
+      const targetReady = target?.status === "ready" && ["csv", "excel"].includes(target.sourceType);
+      const hasSafeMaterializedTables = sourceReady && targetReady
+        && typeof sourceClickhouseName === "string" && /^[a-zA-Z0-9_]+$/.test(sourceClickhouseName)
+        && typeof targetClickhouseName === "string" && /^[a-zA-Z0-9_]+$/.test(targetClickhouseName)
+        && sourceColumns.includes(rel.sourceColumn) && targetColumns.includes(rel.targetColumn);
+
+      let deploymentStatus: "deployed" | "not_deployed" | "failed" = "not_deployed";
+      let deploymentMessage: string | undefined;
+      let joinSql = "";
+
+      if (!hasSafeMaterializedTables) {
+        deploymentMessage = "Both related structured tables must be ready and materialized in ClickHouse.";
+      } else if (deployedViewCount >= MAX_COLLECTION_VIEWS) {
+        deploymentMessage = `Collection view limit reached (${MAX_COLLECTION_VIEWS}).`;
+      } else {
+        if (!clickhouseReadinessChecked) {
+          clickhouseReadinessChecked = true;
+          try {
+            clickhouseReady = (await this.clickhouse.isHealthy()).ok;
+            if (clickhouseReady) await this.clickhouse.ensureCompanyDatabase(companyId);
+          } catch {
+            clickhouseReady = false;
+          }
+        }
+        if (!clickhouseReady) {
+          deploymentStatus = "failed";
+          deploymentMessage = "ClickHouse is unavailable; run collection correlation again after it recovers.";
+        } else {
+          const projectColumns = (table: typeof tables[number], alias: "s" | "t") => {
+            const tableColumns = columnNames(table.schemaDefinition);
+            return tableColumns.map((column) => {
+              const outputName = `${alias}_${table.id.slice(0, 8)}__${column}`;
+              return `${alias}.${quoteClickhouseIdentifier(column)} AS ${quoteClickhouseIdentifier(outputName)}`;
+            });
+          };
+          const selectColumns = [
+            ...projectColumns(sourceTable!, "s"),
+            ...projectColumns(targetTable!, "t"),
+          ];
+          joinSql = `CREATE OR REPLACE VIEW ${quoteClickhouseIdentifier(viewName)} AS\nSELECT ${selectColumns.join(",\n       ")}\nFROM ${quoteClickhouseIdentifier(companyDatabase)}.${quoteClickhouseIdentifier(sourceClickhouseName as string)} AS s\nLEFT JOIN ${quoteClickhouseIdentifier(companyDatabase)}.${quoteClickhouseIdentifier(targetClickhouseName as string)} AS t\n  ON s.${quoteClickhouseIdentifier(rel.sourceColumn)} = t.${quoteClickhouseIdentifier(rel.targetColumn)};`;
+          try {
+            if (!clickhouseReady) throw new Error("ClickHouse is unavailable");
+            await this.clickhouse.execute(joinSql, companyDatabase);
+            deploymentStatus = "deployed";
+            deployedViewCount += 1;
+          } catch {
+            deploymentStatus = "failed";
+            deploymentMessage = "ClickHouse could not create this view; run collection correlation again after fixing the source table.";
+          }
+        }
+      }
 
       unifiedClickhouseViews.push({
         viewName,
         description: `Unified join view combining ${rel.sourceTable} and ${rel.targetTable} on ${rel.sourceColumn} = ${rel.targetColumn}.`,
         joinSql,
         sourceTables: [rel.sourceTable, rel.targetTable],
+        sourceTableIds: [rel.sourceTableId, rel.targetTableId].filter((id): id is string => Boolean(id)),
+        deploymentStatus,
+        deploymentMessage,
       });
+    }
+
+    if (!clickhouseReadinessChecked && priorGeneratedViews.length > 0) {
+      clickhouseReadinessChecked = true;
+      try {
+        clickhouseReady = (await this.clickhouse.isHealthy()).ok;
+        if (clickhouseReady) await this.clickhouse.ensureCompanyDatabase(companyId);
+      } catch {
+        clickhouseReady = false;
+      }
+    }
+
+    if (clickhouseReady) {
+      const currentViewNames = new Set(unifiedClickhouseViews.map((view) => view.viewName));
+      for (const staleViewName of priorGeneratedViews) {
+        if (currentViewNames.has(staleViewName)) continue;
+        await this.clickhouse.execute(`DROP VIEW IF EXISTS ${quoteClickhouseIdentifier(staleViewName)}`, companyDatabase).catch(() => {});
+      }
     }
 
     // 7. MULTI-TABLE SUGGESTED ANALYTICAL QUERIES
@@ -714,12 +1064,13 @@ LEFT JOIN ${rel.targetTable} t
         title: `Join Analisis ${rel.sourceTable} & ${rel.targetTable}`,
         query: `Bagaimana perbandingan data antara ${rel.sourceTable} dan ${rel.targetTable} berdasarkan ${rel.sourceColumn}?`,
         category: "aggregation",
-        sqlSnippet: `SELECT s.${rel.sourceColumn}, count(*) as total_records
-FROM ${rel.sourceTable} s
-JOIN ${rel.targetTable} t ON s.${rel.sourceColumn} = t.${rel.targetColumn}
-GROUP BY s.${rel.sourceColumn}
-ORDER BY total_records DESC
-LIMIT 10;`,
+        sqlSnippet: unifiedClickhouseViews.find((view) => view.deploymentStatus === "deployed"
+          && view.sourceTableIds?.includes(rel.sourceTableId || "")
+          && view.sourceTableIds?.includes(rel.targetTableId || ""))
+          ? `SELECT * FROM ${quoteClickhouseIdentifier(unifiedClickhouseViews.find((view) => view.deploymentStatus === "deployed"
+            && view.sourceTableIds?.includes(rel.sourceTableId || "")
+            && view.sourceTableIds?.includes(rel.targetTableId || ""))!.viewName)} LIMIT 10;`
+          : "",
         description: `Menggabungkan data ${rel.sourceTable} dengan ${rel.targetTable} menggunakan foreign key ${rel.sourceColumn}.`,
       });
     }
@@ -761,7 +1112,16 @@ LIMIT 10;`,
       inferredDomain = "Data Analytics & Cross-Table Intelligence";
     }
 
-    const summary = `Collection "${col.name}" terdiri dari ${memberSources.length} sumber data (${tables.length} tabel tabular, ${documentSources.length} dokumen RAG). Terdeteksi ${discoveredRelationships.length} relasi foreign key antar-file, ${crossDocumentCorrelations.length} korelasi dokumen, dan ${crossModalCorrelations.length} tautan dokumen-tabel.`;
+    const boundedAnalysisReachedLimit = tablesTruncated || documentsTruncated
+      || candidateRelations.size >= MAX_RELATION_CANDIDATES
+      || discoveredRelationships.length >= MAX_DISCOVERED_RELATIONSHIPS
+      || crossDocumentCorrelations.length >= 1_000
+      || crossModalPairs.size >= MAX_CROSS_MODAL_PAIRS
+      || deployedViewCount >= MAX_COLLECTION_VIEWS;
+    const analysisLimitNote = boundedAnalysisReachedLimit
+      ? ` Hasil korelasi dibatasi oleh safety caps: maksimum ${MAX_COLLECTION_ANALYSIS_TABLES} tabel/dokumen, ${MAX_RELATION_CANDIDATES} pasangan relasi kandidat, ${MAX_DISCOVERED_RELATIONSHIPS} relasi, 1.000 korelasi dokumen, 5.000 korelasi lintas-modal, dan ${MAX_COLLECTION_VIEWS} view per proses.`
+      : "";
+    const summary = `Collection "${col.name}" terdiri dari ${memberSources.length} sumber data (${totalTableCount} tabel tabular, ${allDocumentSources.length} dokumen RAG). Terdeteksi ${discoveredRelationships.length} kandidat relasi foreign key, ${deployedViewCount} ClickHouse view terpasang, ${crossDocumentCorrelations.length} korelasi dokumen, dan ${crossModalCorrelations.length} tautan dokumen-tabel.${analysisLimitNote}`;
 
     const finalProfile: CollectionSemanticProfile = {
       domain: inferredDomain,

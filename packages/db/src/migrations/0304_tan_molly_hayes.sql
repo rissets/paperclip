@@ -1,0 +1,1 @@
+ALTER TABLE "data_sources" ALTER COLUMN "file_size" SET DATA TYPE bigint;

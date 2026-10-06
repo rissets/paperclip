@@ -51,7 +51,7 @@ export class TypeSafeJevService {
     this.apiKey =
       config?.apiKey ||
       process.env.TYPESAFE_API_KEY ||
-      "apikey_2175770293d0b2bb4d7aad207229b074c260_3910962778a389e67c61d1e9a3a37f716f9435fd5d6370b15d3f2a0b88f94df8";
+      "";
     this.defaultModel =
       config?.model ||
       process.env.DEFAULT_SYSTEMONE_MODEL ||
@@ -69,8 +69,8 @@ export class TypeSafeJevService {
     const start = Date.now();
     const model = options?.model || this.defaultModel;
 
-    // Fast-path circuit breaker: if remote endpoint recently timed out or failed, use instant fallback
-    if (Date.now() - TypeSafeJevService.lastFailureTime < 30000) {
+    // Unconfigured deployments stay local; never send an unauthenticated provider request.
+    if (!this.apiKey || Date.now() - TypeSafeJevService.lastFailureTime < 30000) {
       return this.fallbackDecision(state, questions);
     }
 
@@ -2298,17 +2298,20 @@ export class TypeSafeJevService {
 
     scored.sort((a, b) => b.score - a.score);
     const topChunkIds = scored.map((s) => s.chunkId);
-    const hasGoodMatches = scored.some((s) => s.matchedUnique >= 1);
-    const confidence = hasGoodMatches ? 0.95 : 0.45;
-    const isAnswerable = hasGoodMatches;
+    const bestMatchedUnique = scored.reduce((best, item) => Math.max(best, item.matchedUnique), 0);
+    const requiredMatches = qTokens.length > 0 ? Math.max(1, Math.ceil(qTokens.length * 0.4)) : Number.POSITIVE_INFINITY;
+    const isAnswerable = bestMatchedUnique >= requiredMatches;
+    // This local fallback measures literal query-token coverage. It is not a
+    // calibrated probability and must not be presented as model confidence.
+    const confidence = qTokens.length > 0 ? bestMatchedUnique / qTokens.length : 0;
 
     return {
       topChunkIds,
       confidence,
       isAnswerable,
       answerabilityNote: isAnswerable
-        ? `Found ${topChunkIds.length} relevant passages mapped to query context.`
-        : "Low token relevance detected across available document passages.",
+        ? `The strongest passage covers ${bestMatchedUnique} of ${qTokens.length} substantive query terms.`
+        : "The available passages do not cover enough substantive query terms to support an answer.",
     };
   }
 }

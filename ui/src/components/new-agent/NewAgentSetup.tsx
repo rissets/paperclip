@@ -3,6 +3,7 @@ import { useAgentAppearanceDraft } from "../../hooks/useAgentAppearanceDraft";
 import { AiConnectionField, aiProviderForAdapter } from "../ai-connections/AiConnectionField";
 import type { AiConnectionBinding } from "@paperclipai/shared";
 import { DEFAULT_CODEX_LOCAL_MODEL } from "@paperclipai/adapter-codex-local";
+import { DEFAULT_PI_LOCAL_MODEL } from "@paperclipai/adapter-pi-local";
 import {
   SETUP_CREDENTIAL_KEYS,
   SETUP_LOGIN_HINTS,
@@ -138,7 +139,7 @@ function Setup({
   const [screen, setScreen] = useState<"connect" | "runtime" | "saved">(
     createdAgentId ? "saved" : connectionAdapter ? "connect" : "runtime",
   );
-  const [model, setModel] = useState("");
+  const [model, setModel] = useState(brandType === "pi_local" ? DEFAULT_PI_LOCAL_MODEL : "");
   const efforts = isRunner ? [] : setupEfforts(adapterType, model);
   const [effort, setEffort] = useState("");
   const [modelOpen, setModelOpen] = useState(false);
@@ -336,7 +337,9 @@ function Setup({
       ...defaultCreateValues,
       adapterType,
       model:
-        model || (brandType === "codex_local" ? DEFAULT_CODEX_LOCAL_MODEL : ""),
+        model || (brandType === "pi_local"
+          ? DEFAULT_PI_LOCAL_MODEL
+          : brandType === "codex_local" ? DEFAULT_CODEX_LOCAL_MODEL : ""),
       thinkingEffort: effort,
       dangerouslyBypassSandbox: adapterType === "codex_local",
       envBindings: nextConnection?.env ?? {},

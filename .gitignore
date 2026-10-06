@@ -9,6 +9,8 @@ server/ui-dist/
 packages/paperclip-runner/runner/target/
 ui/storybook-static/
 .env
+.env.data-plane
+docker/.env.host-runtime
 *.tsbuildinfo
 drizzle/meta/
 .vite/

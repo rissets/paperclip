@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, integer, timestamp, index, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, integer, bigint, timestamp, index, jsonb } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 
 export const dataSourceCollections = pgTable(
@@ -33,7 +33,7 @@ export const dataSources = pgTable(
     sourceType: text("source_type").notNull(), // 'csv' | 'excel' | 'rag_document'
     status: text("status").notNull().default("onboarding"), // 'onboarding' | 'processing' | 'ready' | 'error'
     fileName: text("file_name"),
-    fileSize: integer("file_size"),
+    fileSize: bigint("file_size", { mode: "number" }),
     mimeType: text("mime_type"),
     storagePath: text("storage_path"),
     metadata: jsonb("metadata").$type<Record<string, unknown>>(),
@@ -55,7 +55,7 @@ export const dataSourceTables = pgTable(
     dataSourceId: uuid("data_source_id").notNull().references(() => dataSources.id, { onDelete: "cascade" }),
     companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
     tableName: text("table_name").notNull(),
-    rowCount: integer("row_count").notNull().default(0),
+    rowCount: bigint("row_count", { mode: "number" }).notNull().default(0),
     columnCount: integer("column_count").notNull().default(0),
     schemaDefinition: jsonb("schema_definition").notNull().$type<any[]>(),
     semanticModel: jsonb("semantic_model").$type<Record<string, unknown>>(),

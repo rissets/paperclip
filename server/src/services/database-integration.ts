@@ -1,5 +1,11 @@
 import postgres from "postgres";
 import mysql from "mysql2/promise";
+import { init as initializeSqlParser, parse as parseSql } from "@guanmingchiu/sqlparser-ts";
+import { redactSensitiveText } from "../redaction.js";
+import {
+  createExternalQueryAbortError,
+  throwIfExternalQueryAborted,
+} from "./external-query-abort.js";
 import type {
   DatabaseConnectionConfig,
   DatabaseConnectionTestResult,
@@ -16,10 +22,103 @@ import type {
 
 export interface InspectedTableResult {
   tableName: string;
+  schemaName?: string;
   rowCount: number;
   columnCount: number;
   schemaDefinition: ColumnDefinition[];
   semanticModel: TableSemanticModel;
+}
+
+type ExternalSqlDialect = "postgresql" | "mysql";
+
+// Initialize once before accepting datasource SQL. Parsing is local; no SQL is
+// sent to a third party and parser failures are handled closed below.
+await initializeSqlParser();
+
+const FORBIDDEN_SQL_AST_NODES = new Set([
+  "AlterTable", "AttachDatabase", "Call", "Commit", "Copy", "CreateDatabase", "CreateFunction",
+  "CreateIndex", "CreateSchema", "CreateTable", "CreateTrigger", "CreateView", "Deallocate",
+  "Delete", "DetachDatabase", "Do", "Drop", "Execute", "Grant", "Insert", "Install",
+  "Kill", "LoadData", "Lock", "LockTables", "Merge", "Pragma", "Prepare", "RefreshMaterializedView",
+  "Replace", "Revoke", "Rollback", "Set", "Shutdown", "Transaction", "Truncate", "Uninstall",
+  "UnlockTables", "Update", "Use", "Vacuum",
+]);
+const FORBIDDEN_SQL_FUNCTIONS = new Set([
+  "benchmark", "get_lock", "last_insert_id", "load_file", "lo_export", "lo_import", "nextval",
+  "pg_advisory_lock", "pg_advisory_lock_shared", "pg_advisory_unlock", "pg_advisory_unlock_all",
+  "pg_advisory_unlock_shared", "pg_advisory_xact_lock", "pg_advisory_xact_lock_shared",
+  "pg_cancel_backend", "pg_logical_emit_message", "pg_notify", "pg_reload_conf", "pg_rotate_logfile",
+  "pg_terminate_backend", "pg_try_advisory_lock", "pg_try_advisory_lock_shared", "pg_try_advisory_xact_lock",
+  "pg_try_advisory_xact_lock_shared", "pg_write_binary_file", "pg_write_file", "release_all_locks",
+  "release_lock", "setval", "sleep", "sys_eval", "sys_exec",
+]);
+
+function sqlFunctionName(value: unknown): string | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const lastPart = value[value.length - 1];
+  if (!lastPart || typeof lastPart !== "object") return null;
+  const identifier = (lastPart as Record<string, unknown>).Identifier;
+  if (!identifier || typeof identifier !== "object") return null;
+  const name = (identifier as Record<string, unknown>).value;
+  return typeof name === "string" ? name.toLowerCase() : null;
+}
+
+function astContainsForbiddenSql(value: unknown, seen = new Set<object>()): boolean {
+  if (!value || typeof value !== "object") return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) return value.some((entry) => astContainsForbiddenSql(entry, seen));
+
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (FORBIDDEN_SQL_AST_NODES.has(key)) return true;
+    if (key === "Function" && record[key] && typeof record[key] === "object") {
+      const functionName = sqlFunctionName((record[key] as Record<string, unknown>).name);
+      if (functionName && FORBIDDEN_SQL_FUNCTIONS.has(functionName)) return true;
+    }
+    if ((key === "into" || key === "locking_read") && record[key] != null) return true;
+    if (key === "locks" && Array.isArray(record[key]) && record[key].length > 0) return true;
+    if (astContainsForbiddenSql(record[key], seen)) return true;
+  }
+  return false;
+}
+
+function isReadOnlyQueryStatement(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const statement = value as Record<string, unknown>;
+  const query = statement.Query;
+  if (!query || typeof query !== "object" || Array.isArray(query)) return false;
+  const body = (query as Record<string, unknown>).body;
+  if (!body || typeof body !== "object" || Array.isArray(body)) return false;
+  const queryBody = body as Record<string, unknown>;
+  return Object.hasOwn(queryBody, "Select") || Object.hasOwn(queryBody, "SetOperation");
+}
+
+export function databaseConnectionErrorMessage(error: unknown, config: DatabaseConnectionConfig): string {
+  let message = error instanceof Error ? error.message : "Database adapter failed";
+  if (config.password) {
+    message = message.replaceAll(config.password, "[redacted]");
+    const encoded = encodeURIComponent(config.password);
+    if (encoded !== config.password) message = message.replaceAll(encoded, "[redacted]");
+  }
+  return redactSensitiveText(message).slice(0, 2000);
+}
+
+export function validateReadOnlySqlQuery(sqlQuery: string, dialect: ExternalSqlDialect = "postgresql"): string {
+  const cleanedSql = sqlQuery.trim();
+  if (!cleanedSql) throw new Error("SQL query cannot be empty");
+  if (Buffer.byteLength(cleanedSql, "utf8") > 64 * 1024) throw new Error("SQL query exceeds the 64 KiB limit");
+  const normalizedSql = cleanedSql.replace(/;+$/, "");
+  let parsed: unknown;
+  try {
+    parsed = parseSql(normalizedSql, dialect);
+  } catch {
+    throw new Error("Security Violation: SQL must be a valid single read-only SELECT query for the connected database.");
+  }
+  if (!Array.isArray(parsed) || parsed.length !== 1 || !isReadOnlyQueryStatement(parsed[0]) || astContainsForbiddenSql(parsed)) {
+    throw new Error("Security Violation: Only a single read-only SELECT query is permitted.");
+  }
+  return normalizedSql;
 }
 
 export class DatabaseIntegrationService {
@@ -67,7 +166,7 @@ export class DatabaseIntegrationService {
     } catch (err: any) {
       return {
         success: false,
-        error: err.message || "Failed to connect to database",
+        error: databaseConnectionErrorMessage(err, config) || "Failed to connect to database",
         latencyMs: Date.now() - start,
       };
     }
@@ -101,7 +200,11 @@ export class DatabaseIntegrationService {
       `;
 
       const allowedTables = config.allowedTables?.map((t) => t.toLowerCase());
+      const allowedSchemas = config.allowedSchemas?.map((schema) => schema.toLowerCase());
       const selectedTables = tablesQuery.filter((t: any) => {
+        if (allowedSchemas && allowedSchemas.length > 0 && !allowedSchemas.includes(String(t.table_schema).toLowerCase())) {
+          return false;
+        }
         if (allowedTables && allowedTables.length > 0) {
           return allowedTables.includes(t.table_name.toLowerCase());
         }
@@ -174,7 +277,7 @@ export class DatabaseIntegrationService {
             SELECT * FROM ${sql(`${schema}.${tableName}`)} LIMIT 10
           `;
         } catch (err: any) {
-          console.warn(`[database-integration] Could not query rows for table ${tableName}:`, err.message);
+          console.warn(`[database-integration] Could not query rows for table ${tableName}:`, databaseConnectionErrorMessage(err, config));
         }
 
         // Match table foreign keys
@@ -240,6 +343,7 @@ export class DatabaseIntegrationService {
 
         results.push({
           tableName,
+          schemaName: schema,
           rowCount: totalRows,
           columnCount: columnProfiles.length,
           schemaDefinition: columnProfiles,
@@ -251,7 +355,7 @@ export class DatabaseIntegrationService {
       return results;
     } catch (err: any) {
       await sql.end({ timeout: 1 }).catch(() => {});
-      throw err;
+      throw new Error(databaseConnectionErrorMessage(err, config));
     }
   }
 
@@ -335,7 +439,7 @@ export class DatabaseIntegrationService {
             totalRows = sampleRows.length;
           }
         } catch (err: any) {
-          console.warn(`[database-integration] Could not query sample rows for table ${tableName}:`, err.message);
+          console.warn(`[database-integration] Could not query sample rows for table ${tableName}:`, databaseConnectionErrorMessage(err, config));
         }
 
         const tableRelations = allRelations.filter(
@@ -401,6 +505,7 @@ export class DatabaseIntegrationService {
 
         results.push({
           tableName,
+          schemaName: config.database,
           rowCount: totalRows,
           columnCount: columnProfiles.length,
           schemaDefinition: columnProfiles,
@@ -412,7 +517,7 @@ export class DatabaseIntegrationService {
       return results;
     } catch (err: any) {
       await conn.end().catch(() => {});
-      throw err;
+      throw new Error(databaseConnectionErrorMessage(err, config));
     }
   }
 
@@ -424,78 +529,56 @@ export class DatabaseIntegrationService {
     config: DatabaseConnectionConfig,
     sqlQuery: string,
     limit: number = 100,
+    params: unknown[] = [],
+    signal?: AbortSignal,
+    options: { statementTimeoutMs?: number } = {},
   ): Promise<SqlQueryResult> {
-    // 1. Sanitize & check against DDL/DML mutation tokens
-    const cleanedSql = sqlQuery.trim();
-    if (!cleanedSql) {
-      throw new Error("SQL query cannot be empty");
+    const dialect = config.type === "postgres" ? "postgresql" : "mysql";
+    const cleanedSql = validateReadOnlySqlQuery(sqlQuery, dialect);
+
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) {
+      throw new Error("Query limit must be an integer between 1 and 10000");
+    }
+    const requestedTimeoutMs = options.statementTimeoutMs ?? 15_000;
+    if (!Number.isSafeInteger(requestedTimeoutMs) || requestedTimeoutMs < 1_000 || requestedTimeoutMs > 60_000) {
+      throw new Error("Statement timeout must be between 1000 and 60000 milliseconds");
     }
 
-    // Security check: ONLY allow SELECT or WITH queries
-    const lowerSql = cleanedSql.toLowerCase();
-    const isSelect = lowerSql.startsWith("select") || lowerSql.startsWith("with");
-    if (!isSelect) {
-      throw new Error("Security Violation: Only SELECT and WITH (read-only) queries are permitted.");
-    }
-
-    const forbiddenTokens = [
-      /\binsert\b/,
-      /\bupdate\b/,
-      /\bdelete\b/,
-      /\bdrop\b/,
-      /\balter\b/,
-      /\btruncate\b/,
-      /\bcreate\b/,
-      /\bgrant\b/,
-      /\brevoke\b/,
-      /\bvacuum\b/,
-      /\bcall\b/,
-      /\bexecute\b/,
-      /\bmerge\b/,
-      /\breplace\b/,
-      /\bcopy\b/,
-      /;/ // Disallow multi-statement semicolons
-    ];
-
-    for (const pattern of forbiddenTokens) {
-      if (pattern.test(lowerSql.replace(/;$/, ""))) { // allow trailing semicolon only
-        throw new Error("Security Violation: Prohibited SQL token or multi-statement query detected.");
-      }
-    }
-
-    // Ensure bounded LIMIT
-    let finalSql = cleanedSql.replace(/;+$/, "");
-    if (!/\blimit\s+\d+/i.test(finalSql)) {
-      finalSql += ` LIMIT ${limit}`;
-    }
-
-    // Query Optimization for High-Volume Databases:
-    // In MariaDB / MySQL, B-Tree indexes CANNOT be used with leading wildcards (e.g. LIKE '%VALUE%').
-    // Doing a full table scan on millions of rows across remote connections causes network hangs and timeouts.
-    // If a query contains `col LIKE '%XYZ%'`, optimize by removing the leading '%' so B-Tree index prefix scan is utilized!
-    if (config.type === "mariadb" || config.type === "mysql") {
-      finalSql = finalSql.replace(
-        /([`"\w]+)\s+LIKE\s+['"]%([^%'"\s][^'"]*?)['"]/gi,
-        (_match, col, term) => {
-          return `${col} LIKE '${term}'`;
-        }
-      );
-    }
+    // Bound the outer result even when a nested CTE/subquery has its own LIMIT.
+    // The parser rejects trailing statements and write-bearing SELECT forms;
+    // this wrapper guarantees the driver never buffers more than `limit` rows.
+    const finalSql = `SELECT * FROM (${cleanedSql}\n) AS _paperclip_bounded_query LIMIT ${limit}`;
 
     const start = Date.now();
 
+    throwIfExternalQueryAborted(signal);
+
     if (config.type === "postgres") {
       const sql = this.getPostgresSql(config, 1, 5);
+      let activeQuery: { cancel(): void } | undefined;
+      const cancelActiveQuery = () => activeQuery?.cancel();
+      signal?.addEventListener("abort", cancelActiveQuery, { once: true });
 
       try {
         // Enforce transaction read only in session
         const rows = await sql.begin(async (tx) => {
+          throwIfExternalQueryAborted(signal);
           await tx`SET TRANSACTION READ ONLY`;
-          return await tx.unsafe(finalSql);
+          await tx.unsafe(`SET LOCAL statement_timeout = '${requestedTimeoutMs}ms'`);
+          await tx`SET LOCAL lock_timeout = '1000ms'`;
+          throwIfExternalQueryAborted(signal);
+          const query = tx.unsafe(finalSql, params as any[]);
+          activeQuery = query;
+          if (signal?.aborted) activeQuery.cancel();
+          try {
+            return await query;
+          } finally {
+            if (activeQuery === query) activeQuery = undefined;
+          }
         });
 
+        throwIfExternalQueryAborted(signal);
         const executionTimeMs = Date.now() - start;
-        await sql.end({ timeout: 2 });
 
         const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
         return {
@@ -506,16 +589,28 @@ export class DatabaseIntegrationService {
           sql: finalSql,
         };
       } catch (err: any) {
+        if (signal?.aborted) throw createExternalQueryAbortError();
+        throw new Error(`PostgreSQL execution error: ${databaseConnectionErrorMessage(err, config)}`);
+      } finally {
+        signal?.removeEventListener("abort", cancelActiveQuery);
+        activeQuery = undefined;
         await sql.end({ timeout: 1 }).catch(() => {});
-        throw new Error(`PostgreSQL execution error: ${err.message}`);
       }
     } else {
       const conn = await this.createMysqlConnection(config, 8000);
+      const cancelQuery = () => conn.destroy();
+      signal?.addEventListener("abort", cancelQuery, { once: true });
 
       try {
-        // Set statement timeout if supported (15 seconds max to prevent remote network hangs)
-        await conn.query("SET SESSION max_statement_time = 15").catch(() => {});
-        const [rows, fields] = await conn.query(finalSql);
+        throwIfExternalQueryAborted(signal);
+        // Fail closed if the selected engine cannot enforce its execution deadline.
+        if (config.type === "mariadb") {
+          await conn.query("SET SESSION max_statement_time = ?", [requestedTimeoutMs / 1000]);
+        } else {
+          await conn.query("SET SESSION max_execution_time = ?", [requestedTimeoutMs]);
+        }
+        const [rows, fields] = await conn.query(finalSql, params as any[]);
+        throwIfExternalQueryAborted(signal);
         const executionTimeMs = Date.now() - start;
         await conn.end();
 
@@ -530,10 +625,142 @@ export class DatabaseIntegrationService {
           sql: finalSql,
         };
       } catch (err: any) {
+        if (signal?.aborted) throw createExternalQueryAbortError();
         await conn.end().catch(() => {});
-        throw new Error(`MariaDB/MySQL execution error: ${err.message}`);
+        throw new Error(`MariaDB/MySQL execution error: ${databaseConnectionErrorMessage(err, config)}`);
+      } finally {
+        signal?.removeEventListener("abort", cancelQuery);
       }
     }
+  }
+
+  /** Read one bounded keyset page for a configured source-table snapshot. */
+  async queryKeysetPage(
+    config: DatabaseConnectionConfig,
+    input: {
+      schemaName: string;
+      tableName: string;
+      columns: string[];
+      primaryKey: string;
+      after?: unknown;
+      pageSize: number;
+      signal?: AbortSignal;
+    },
+  ): Promise<SqlQueryResult> {
+    if (!Number.isSafeInteger(input.pageSize) || input.pageSize < 1 || input.pageSize > 5_000) {
+      throw new Error("Snapshot page size must be an integer between 1 and 5000");
+    }
+    if (!input.columns.length || input.columns.length > 500 || !input.columns.includes(input.primaryKey)) {
+      throw new Error("Snapshot requires a bounded column list containing its primary key");
+    }
+    if (config.allowedTables?.length && !config.allowedTables.some((name) => name.toLowerCase() === input.tableName.toLowerCase())) {
+      throw new Error("Snapshot table is outside the configured table allowlist");
+    }
+    if (config.allowedSchemas?.length && !config.allowedSchemas.some((name) => name.toLowerCase() === input.schemaName.toLowerCase())) {
+      throw new Error("Snapshot schema is outside the configured schema allowlist");
+    }
+    if (config.type !== "postgres" && config.type !== "mysql" && config.type !== "mariadb") {
+      throw new Error("Keyset snapshots support PostgreSQL, MySQL, and MariaDB sources only");
+    }
+
+    const quote = config.type === "postgres" ? '"' : "`";
+    const quoteIdentifier = (name: string) => `${quote}${name.replaceAll(quote, `${quote}${quote}`)}${quote}`;
+    const table = `${quoteIdentifier(input.schemaName)}.${quoteIdentifier(input.tableName)}`;
+    const projection = input.columns.map(quoteIdentifier).join(", ");
+    const primaryKey = quoteIdentifier(input.primaryKey);
+    const where = input.after === undefined ? "" : ` WHERE ${primaryKey} > ${config.type === "postgres" ? "$1" : "?"}`;
+    const query = `SELECT ${projection} FROM ${table}${where} ORDER BY ${primaryKey} ASC LIMIT ${input.pageSize}`;
+    return this.queryDatabase(
+      config,
+      query,
+      input.pageSize,
+      input.after === undefined ? [] : [input.after],
+      input.signal,
+      { statementTimeoutMs: 30_000 },
+    );
+  }
+
+  /** Read changed rows in updated-at/primary-key order for an explicitly configured incremental policy. */
+  async queryUpdatedKeysetPage(
+    config: DatabaseConnectionConfig,
+    input: {
+      schemaName: string;
+      tableName: string;
+      columns: string[];
+      primaryKey: string;
+      updatedAtColumn: string;
+      deletedAtColumn?: string;
+      since: string;
+      after?: { updatedAt: unknown; primaryKey: unknown };
+      pageSize: number;
+      signal?: AbortSignal;
+    },
+  ): Promise<SqlQueryResult> {
+    if (!Number.isSafeInteger(input.pageSize) || input.pageSize < 1 || input.pageSize > 5_000) {
+      throw new Error("Incremental page size must be an integer between 1 and 5000");
+    }
+    if (!input.columns.length || input.columns.length > 500
+      || !input.columns.includes(input.primaryKey) || !input.columns.includes(input.updatedAtColumn)
+      || (input.deletedAtColumn !== undefined && !input.columns.includes(input.deletedAtColumn))) {
+      throw new Error("Incremental sync requires a bounded projection containing its primary and updated-at columns");
+    }
+    if (config.allowedTables?.length && !config.allowedTables.some((name) => name.toLowerCase() === input.tableName.toLowerCase())) {
+      throw new Error("Incremental table is outside the configured allowlist");
+    }
+    if (config.allowedSchemas?.length && !config.allowedSchemas.some((name) => name.toLowerCase() === input.schemaName.toLowerCase())) {
+      throw new Error("Incremental schema is outside the configured allowlist");
+    }
+    if (config.type !== "postgres" && config.type !== "mysql" && config.type !== "mariadb") {
+      throw new Error("Incremental sync supports PostgreSQL, MySQL, and MariaDB sources only");
+    }
+
+    const quote = config.type === "postgres" ? '"' : "`";
+    const quoteIdentifier = (name: string) => `${quote}${name.replaceAll(quote, `${quote}${quote}`)}${quote}`;
+    const table = `${quoteIdentifier(input.schemaName)}.${quoteIdentifier(input.tableName)}`;
+    const projection = input.columns.map(quoteIdentifier).join(", ");
+    const updatedAt = quoteIdentifier(input.updatedAtColumn);
+    const changeTimestamp = input.deletedAtColumn
+      ? `GREATEST(COALESCE(${updatedAt}, ${quoteIdentifier(input.deletedAtColumn)}), COALESCE(${quoteIdentifier(input.deletedAtColumn)}, ${updatedAt}))`
+      : updatedAt;
+    const primaryKey = quoteIdentifier(input.primaryKey);
+    const firstParameter = config.type === "postgres" ? "$1" : "?";
+    const where = input.after
+      ? config.type === "postgres"
+        ? ` WHERE ${changeTimestamp} >= ${firstParameter} AND (${changeTimestamp} > $2 OR (${changeTimestamp} = $3 AND ${primaryKey} > $4))`
+        : ` WHERE ${changeTimestamp} >= ${firstParameter} AND (${changeTimestamp} > ? OR (${changeTimestamp} = ? AND ${primaryKey} > ?))`
+      : ` WHERE ${changeTimestamp} >= ${firstParameter}`;
+    const cursorCast = config.type === "postgres" ? "TEXT" : "CHAR";
+    const query = `SELECT ${projection}, CAST(${changeTimestamp} AS ${cursorCast}) AS _paperclip_sync_change_cursor FROM ${table}${where} ORDER BY ${changeTimestamp} ASC, ${primaryKey} ASC LIMIT ${input.pageSize}`;
+    const params = input.after
+      ? [input.since, input.after.updatedAt, input.after.updatedAt, input.after.primaryKey]
+      : [input.since];
+    return this.queryDatabase(config, query, input.pageSize, params, input.signal, { statementTimeoutMs: 30_000 });
+  }
+
+  async resolveTableSchema(config: DatabaseConnectionConfig, tableName: string): Promise<string> {
+    if (config.type !== "postgres") return config.database;
+    const allowedSchemas = config.allowedSchemas?.filter(Boolean);
+    const schemaFilter = allowedSchemas?.length ? "AND table_schema = ANY($2::text[])" : "";
+    const result = await this.queryDatabase(config, `
+      SELECT table_schema
+      FROM information_schema.tables
+      WHERE table_name = $1
+        AND table_type = 'BASE TABLE'
+        AND table_schema NOT IN ('information_schema', 'pg_catalog')
+        ${schemaFilter}
+      ORDER BY table_schema
+      LIMIT 2
+    `, 2, allowedSchemas?.length ? [tableName, allowedSchemas] : [tableName]);
+    const allowed = allowedSchemas?.map((schema) => schema.toLowerCase());
+    const matches = result.rows
+      .map((row) => String((row as Record<string, unknown>).table_schema || ""))
+      .filter((schema) => schema && (!allowed?.length || allowed.includes(schema.toLowerCase())));
+    if (matches.length !== 1) {
+      throw new Error(matches.length === 0
+        ? `Table '${tableName}' was not found in the configured schemas`
+        : `Table '${tableName}' exists in multiple schemas; reconnect with an explicit schema allowlist`);
+    }
+    return matches[0];
   }
 
   // --- Helper Methods ---
@@ -1204,7 +1431,8 @@ export class DatabaseIntegrationService {
   }
 
   private async createMysqlConnection(config: DatabaseConnectionConfig, timeout = 8000): Promise<mysql.Connection> {
-    return mysql.createConnection(this.getMysqlConfig(config, timeout));
+    try { return await mysql.createConnection(this.getMysqlConfig(config, timeout)); }
+    catch (error) { throw new Error(databaseConnectionErrorMessage(error, config)); }
   }
 
   private getPostgresSql(config: DatabaseConnectionConfig, max = 1, timeout = 5) {
@@ -1231,6 +1459,9 @@ export class DatabaseIntegrationService {
       user: config.username,
       ssl: config.ssl ? { rejectUnauthorized: false } : undefined,
       connectTimeout: timeout,
+      // Snapshot keyset cursors must preserve BIGINT values exactly across pages.
+      supportBigNumbers: true,
+      bigNumberStrings: true,
     };
     if (config.password && config.password.length > 0) {
       opts.password = config.password;

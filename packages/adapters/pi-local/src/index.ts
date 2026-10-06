@@ -1,5 +1,8 @@
 export const type = "pi_local";
 export const label = "Pi";
+// Pi's configured provider is `rissets`; the short `llm-hd/...` alias is
+// normalized to this canonical provider/model id during discovery.
+export const DEFAULT_PI_LOCAL_MODEL = "rissets/llm-hd/qwen3.8-27b";
 
 export const SANDBOX_INSTALL_COMMAND = "npm install -g @earendil-works/pi-coding-agent@0.74.0";
 
@@ -24,7 +27,7 @@ Core fields:
 - cwd (string, optional): default absolute working directory fallback for the agent process (created if missing when possible)
 - instructionsFilePath (string, optional): absolute path to a markdown instructions file appended to system prompt via --append-system-prompt
 - promptTemplate (string, optional): user prompt template passed via -p flag
-- model (string, required): Pi model id in provider/model format (for example xai/grok-4)
+- model (string, optional): Pi model id in provider/model format; defaults to ${DEFAULT_PI_LOCAL_MODEL}
 - thinking (string, optional): thinking level (off, minimal, low, medium, high, xhigh)
 - command (string, optional): defaults to "pi"
 - env (object, optional): KEY=VALUE environment variables
@@ -35,7 +38,7 @@ Operational fields:
 
 Notes:
 - Pi supports multiple providers and models. Use \`pi --list-models\` to list available options.
-- Paperclip requires an explicit \`model\` value for \`pi_local\` agents.
+- Paperclip uses the default model when a \`pi_local\` agent has no model override.
 - Sessions are stored in ~/.pi/paperclips/ and resumed with --session.
 - All tools (read, bash, edit, write, grep, find, ls) are enabled by default.
 - Agent instructions are appended to Pi's system prompt via --append-system-prompt, while the user task is sent via -p.

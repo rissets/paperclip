@@ -8,6 +8,29 @@ export interface PutObjectInput {
   body: Buffer | Readable;
   contentType: string;
   contentLength: number;
+  /** Stable content identity copied into provider metadata for post-upload verification. */
+  sha256?: string;
+}
+
+export type MultipartPart = { partNumber: number; etag: string };
+
+export interface CreateMultipartObjectInput {
+  objectKey: string;
+  contentType: string;
+  sha256?: string;
+}
+
+export interface UploadMultipartObjectPartInput {
+  objectKey: string;
+  uploadId: string;
+  partNumber: number;
+  body: Buffer;
+}
+
+export interface CompleteMultipartObjectInput {
+  objectKey: string;
+  uploadId: string;
+  parts: MultipartPart[];
 }
 
 export interface GetObjectInput {
@@ -32,6 +55,7 @@ export interface HeadObjectResult {
   exists: boolean;
   contentType?: string;
   contentLength?: number;
+  sha256?: string;
   etag?: string;
   lastModified?: Date;
 }
@@ -42,6 +66,10 @@ export interface StorageProvider {
   getObject(input: GetObjectInput): Promise<GetObjectResult>;
   headObject(input: GetObjectInput): Promise<HeadObjectResult>;
   deleteObject(input: GetObjectInput): Promise<void>;
+  createMultipartUpload?(input: CreateMultipartObjectInput): Promise<{ uploadId: string }>;
+  uploadMultipartPart?(input: UploadMultipartObjectPartInput): Promise<{ etag: string }>;
+  completeMultipartUpload?(input: CompleteMultipartObjectInput): Promise<void>;
+  abortMultipartUpload?(input: Pick<CompleteMultipartObjectInput, "objectKey" | "uploadId">): Promise<void>;
 }
 
 export type PutFileInput = {
@@ -49,6 +77,8 @@ export type PutFileInput = {
   namespace: string;
   originalFilename: string | null;
   contentType: string;
+  /** Optional deterministic company-scoped key for resumable operator migrations. */
+  objectKey?: string;
 } & ({ body: Buffer } | { body: Readable; byteSize: number; sha256: string });
 
 export interface PutFileResult {
@@ -66,4 +96,14 @@ export interface StorageService {
   getObject(companyId: string, objectKey: string, options?: Pick<GetObjectInput, "range">): Promise<GetObjectResult>;
   headObject(companyId: string, objectKey: string): Promise<HeadObjectResult>;
   deleteObject(companyId: string, objectKey: string): Promise<void>;
+  createMultipartUpload?(input: {
+    companyId: string;
+    namespace: string;
+    originalFilename: string;
+    contentType: string;
+    sha256?: string;
+  }): Promise<{ objectKey: string; uploadId: string }>;
+  uploadMultipartPart?(input: UploadMultipartObjectPartInput & { companyId: string }): Promise<{ etag: string }>;
+  completeMultipartUpload?(input: CompleteMultipartObjectInput & { companyId: string }): Promise<void>;
+  abortMultipartUpload?(input: { companyId: string; objectKey: string; uploadId: string }): Promise<void>;
 }

@@ -12,7 +12,12 @@ export async function putS3Multipart(client: S3Client, bucket: string, key: stri
   // Scale part sizes to the S3 part-count limit while retaining stream backpressure.
   const partSize = Math.max(8 * 1024 * 1024, Math.ceil(input.contentLength / 10_000));
   try {
-    uploadId = (await client.send(new CreateMultipartUploadCommand({ Bucket: bucket, Key: key, ContentType: input.contentType }))).UploadId;
+    uploadId = (await client.send(new CreateMultipartUploadCommand({
+      Bucket: bucket,
+      Key: key,
+      ContentType: input.contentType,
+      Metadata: input.sha256 ? { "paperclip-sha256": input.sha256 } : undefined,
+    }))).UploadId;
     if (!uploadId) throw new Error("S3 did not return a multipart upload id");
     const parts: { ETag: string; PartNumber: number }[] = [];
     for (let offset = 0; offset < input.contentLength;) {

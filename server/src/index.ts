@@ -91,6 +91,8 @@ import {
 } from "./services/index.js";
 import { questionResponseDeliveryService } from "./services/question-response-delivery.js";
 import { deliverNativeQuestionResponse } from "./services/native-runtime/native-question-bridge.js";
+import { DataSourceIngestionWorker } from "./services/data-source-ingestion-worker.js";
+import { validateDataSourceModelConfig } from "./services/data-source-model-config.js";
 import { queueIssueAssignmentWakeup } from "./services/issue-assignment-wakeup.js";
 import { createSecretProposalsService } from "./services/secret-proposals.js";
 import { environmentRuntimeService } from "./services/environment-runtime.js";
@@ -219,6 +221,7 @@ async function startServerWithDatabaseTeardown(
   await sentryReady;
   ensureDecisionSigningSecret();
   let config = loadConfig();
+  validateDataSourceModelConfig();
   initTelemetry({ enabled: config.telemetryEnabled });
   if (process.env.PAPERCLIP_SECRETS_PROVIDER === undefined) {
     process.env.PAPERCLIP_SECRETS_PROVIDER = config.secretsProvider;
@@ -1271,6 +1274,12 @@ async function startServerWithDatabaseTeardown(
     }
   };
   const executionControlSweepsInFlight = new Set<string>();
+  const dataSourceIngestionWorker = process.env.DATASOURCE_EMBEDDED_WORKER_ENABLED === "false"
+    ? null
+    : new DataSourceIngestionWorker(db as any);
+  const dataSourceEmbeddingReindexWorker = process.env.DATASOURCE_EMBEDDED_WORKER_ENABLED === "false"
+    ? null
+    : new DataSourceIngestionWorker(db as any, "embedding_reindex");
   const executionControlSweeps = [
     ["finalization", () => reconcileAbandonedExecutionControl(db)],
     ["replacement", () => heartbeat ? reconcileSafeNativeReplacements(db, new Date(), { verifyStoppedSession: run => verifyStoppedNativeSessionForReplacement(db, run) }) : undefined],
@@ -1278,6 +1287,8 @@ async function startServerWithDatabaseTeardown(
     ["status_delivery", () => deliverExecutionStatuses(db)],
     ["automatic_disposition", () => settleUnrecoverableExecutions(db)],
     ["local_ai_login_cleanup", () => localAiLoginService(db).reapExpired()],
+    ["data_source_ingestion", () => dataSourceIngestionWorker?.tick()],
+    ["data_source_embedding_reindex", () => dataSourceEmbeddingReindexWorker?.tick()],
   ] as const;
   const sweepExecutionControl = () => {
     if (heartbeatSchedulerStopped) return;

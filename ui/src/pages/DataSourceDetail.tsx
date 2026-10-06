@@ -33,6 +33,8 @@ import {
   FileCode,
   Check,
   Folder,
+  XCircle,
+  Trash2,
 } from "lucide-react";
 import { useCompany } from "@/context/CompanyContext";
 import { copyTextToClipboard } from "@/lib/clipboard";
@@ -55,6 +57,9 @@ export function DataSourceDetail() {
   const [queryGroupBy, setQueryGroupBy] = useState("");
   const [queryFilterKey, setQueryFilterKey] = useState("");
   const [queryFilterVal, setQueryFilterVal] = useState("");
+  const [queryMode, setQueryMode] = useState<"live" | "snapshot">("live");
+  const [incrementalUpdatedAtColumn, setIncrementalUpdatedAtColumn] = useState("");
+  const [incrementalDeletedAtColumn, setIncrementalDeletedAtColumn] = useState("");
 
   // Direct SQL Query Runner state (for external databases)
   const [sqlQuery, setSqlQuery] = useState("");
@@ -63,16 +68,77 @@ export function DataSourceDetail() {
 
   // RAG Search Tester state
   const [searchQuery, setSearchQuery] = useState("");
+  const [targetEmbeddingSpace, setTargetEmbeddingSpace] = useState<"bge-m3" | "openrouter-text-embedding-3-small">("bge-m3");
+  const [prunableVectorRows, setPrunableVectorRows] = useState<number | null>(null);
+  const [prunableGenerations, setPrunableGenerations] = useState<Array<{ embeddingSpace: string; embeddingGeneration: string }>>([]);
 
   const { data: ds, isLoading, error } = useQuery({
     queryKey: ["data-source", selectedCompanyId, id],
     queryFn: () => dataSourcesApi.get(selectedCompanyId!, id!),
     enabled: !!selectedCompanyId && !!id,
     refetchInterval: (query) =>
-      query.state.data?.status === "processing" || query.state.data?.status === "onboarding" ? 1500 : false,
+      query.state.data?.status === "processing" || query.state.data?.status === "onboarding"
+        || query.state.data?.ingestionJob?.status === "queued" || query.state.data?.ingestionJob?.status === "running"
+        || query.state.data?.ingestionJob?.status === "cancel_requested"
+        ? 1500
+        : false,
   });
 
   const activeTable = ds?.tables?.[selectedTableIndex];
+  const activeColumns = (Array.isArray(activeTable?.schemaDefinition) ? activeTable.schemaDefinition : []) as Array<{
+    name: string;
+    dataType?: string;
+    role?: string;
+  }>;
+  const updatedAtCandidates = activeColumns.filter((column) => column.dataType === "date" || column.role === "timestamp");
+  const deletedAtCandidates = activeColumns.filter((column) =>
+    (column.dataType === "date" || column.role === "timestamp")
+      && /(^|_)(deleted|deleted_at|removed|removed_at)($|_)/i.test(column.name),
+  );
+  const activeExternalSnapshot = (activeTable?.semanticModel as any)?.externalSnapshot;
+  const jobProgress = ds?.ingestionJob?.progress ?? {};
+  const ingestionJobActive = ds?.ingestionJob?.status === "queued"
+    || ds?.ingestionJob?.status === "running"
+    || ds?.ingestionJob?.status === "cancel_requested";
+  const jobProgressText = typeof jobProgress.rowsScanned === "number"
+    ? `${jobProgress.rowsScanned.toLocaleString()} rows scanned`
+    : typeof jobProgress.insertedRows === "number" && typeof jobProgress.totalRows === "number"
+      ? `${jobProgress.insertedRows.toLocaleString()} / ${jobProgress.totalRows.toLocaleString()} rows loaded`
+      : typeof jobProgress.insertedChunks === "number" && typeof jobProgress.chunkCount === "number"
+        ? `${jobProgress.insertedChunks.toLocaleString()} / ${jobProgress.chunkCount.toLocaleString()} chunks indexed`
+        : typeof jobProgress.processedChunks === "number" && typeof jobProgress.totalChunks === "number"
+          ? `${jobProgress.processedChunks.toLocaleString()} / ${jobProgress.totalChunks.toLocaleString()} chunks re-embedded`
+      : null;
+
+  const ragMetadata = (ds?.metadata || {}) as Record<string, unknown>;
+  const documentExtraction = ragMetadata.documentExtractionQuality && typeof ragMetadata.documentExtractionQuality === "object"
+    ? ragMetadata.documentExtractionQuality as Record<string, unknown>
+    : null;
+  const activeEmbeddingSpace = ragMetadata.embeddingSpace === "bge-m3"
+    || ragMetadata.embeddingSpace === "openrouter-text-embedding-3-small"
+    ? ragMetadata.embeddingSpace
+    : null;
+  const previousEmbeddingSpace = ragMetadata.previousEmbeddingSpace === "bge-m3"
+    || ragMetadata.previousEmbeddingSpace === "openrouter-text-embedding-3-small"
+    ? ragMetadata.previousEmbeddingSpace
+    : null;
+  const previousEmbeddingGeneration = typeof ragMetadata.previousEmbeddingGeneration === "string"
+    ? ragMetadata.previousEmbeddingGeneration
+    : null;
+
+  useEffect(() => {
+    if (activeEmbeddingSpace) {
+      setTargetEmbeddingSpace(activeEmbeddingSpace === "bge-m3"
+        ? "openrouter-text-embedding-3-small"
+        : "bge-m3");
+    }
+  }, [ds?.id, activeEmbeddingSpace]);
+
+  useEffect(() => {
+    const preferredUpdatedAt = updatedAtCandidates.find((column) => /^(updated_at|updatedat|modified_at|last_modified)$/i.test(column.name));
+    setIncrementalUpdatedAtColumn((preferredUpdatedAt || updatedAtCandidates[0])?.name || "");
+    setIncrementalDeletedAtColumn(deletedAtCandidates[0]?.name || "");
+  }, [activeTable?.id]);
 
   // Update starter SQL when active table changes
   useEffect(() => {
@@ -114,6 +180,63 @@ export function DataSourceDetail() {
 
   const reprocessMutation = useMutation({
     mutationFn: () => dataSourcesApi.reprocess(selectedCompanyId!, id!),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["data-source", selectedCompanyId, id] });
+      queryClient.invalidateQueries({ queryKey: ["data-sources", selectedCompanyId] });
+    },
+  });
+
+  const embeddingReindexMutation = useMutation({
+    mutationFn: (request: { targetSpace: "bge-m3" | "openrouter-text-embedding-3-small"; targetGeneration?: string }) =>
+      dataSourcesApi.reindexEmbeddings(selectedCompanyId!, id!, request),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["data-source", selectedCompanyId, id] });
+      queryClient.invalidateQueries({ queryKey: ["data-sources", selectedCompanyId] });
+    },
+  });
+
+  const embeddingPruneMutation = useMutation({
+    mutationFn: (request: { confirm: boolean; expectedGenerations?: Array<{ embeddingSpace: string; embeddingGeneration: string }> }) =>
+      dataSourcesApi.pruneEmbeddingGenerations(selectedCompanyId!, id!, request),
+    onSuccess: ({ data }, confirm) => {
+      setPrunableVectorRows(confirm.confirm ? null : data.candidateVectorRows);
+      setPrunableGenerations(confirm.confirm ? [] : data.candidates.map(({ embeddingSpace, embeddingGeneration }) => ({
+        embeddingSpace,
+        embeddingGeneration,
+      })));
+      queryClient.invalidateQueries({ queryKey: ["data-source", selectedCompanyId, id] });
+    },
+  });
+
+  const snapshotMutation = useMutation({
+    mutationFn: () => dataSourcesApi.snapshotExternalDatabase(selectedCompanyId!, id!, { mode: "full" }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["data-source", selectedCompanyId, id] });
+      queryClient.invalidateQueries({ queryKey: ["data-sources", selectedCompanyId] });
+    },
+  });
+
+  const incrementalSnapshotMutation = useMutation({
+    mutationFn: () => {
+      if (!activeTable || !incrementalUpdatedAtColumn) throw new Error("Select an updated-at timestamp column first.");
+      return dataSourcesApi.snapshotExternalDatabase(selectedCompanyId!, id!, {
+        mode: "incremental",
+        tableIds: [activeTable.id],
+        tablePolicies: [{
+          tableId: activeTable.id,
+          updatedAtColumn: incrementalUpdatedAtColumn,
+          ...(incrementalDeletedAtColumn ? { deletedAtColumn: incrementalDeletedAtColumn } : {}),
+        }],
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["data-source", selectedCompanyId, id] });
+      queryClient.invalidateQueries({ queryKey: ["data-sources", selectedCompanyId] });
+    },
+  });
+
+  const cancelIngestionMutation = useMutation({
+    mutationFn: (jobId: string) => dataSourcesApi.cancelIngestionJob(selectedCompanyId!, id!, jobId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["data-source", selectedCompanyId, id] });
       queryClient.invalidateQueries({ queryKey: ["data-sources", selectedCompanyId] });
@@ -166,6 +289,7 @@ export function DataSourceDetail() {
             groupBy: queryGroupBy || undefined,
           }
         : undefined,
+      mode: queryMode,
       limit: 20,
     });
   };
@@ -260,6 +384,52 @@ export function DataSourceDetail() {
                   </>
                 )}
               </p>
+              {ds.ingestionJob && (ingestionJobActive || ds.ingestionJob.status === "failed") && (
+                <div className="mt-2 flex items-center justify-between gap-3 rounded-md border border-border bg-muted px-3 py-2 text-xs" role="status" aria-live="polite">
+                  <div>
+                    <span className="font-medium text-foreground">{ds.ingestionJob.jobType === "external_db_snapshot"
+                      ? "Snapshot"
+                      : ds.ingestionJob.jobType === "embedding_reindex" ? "Embedding reindex" : "Ingestion"} {ds.ingestionJob.status.replaceAll("_", " ")}</span>
+                    <span className="text-muted-foreground"> · {ds.ingestionJob.stage.replaceAll("_", " ")} · attempt {ds.ingestionJob.attempt}/{ds.ingestionJob.maxAttempts}</span>
+                    {jobProgressText && <span className="text-muted-foreground"> · {jobProgressText}</span>}
+                    {ds.ingestionJob.lastError && <p className="mt-1 text-destructive">{ds.ingestionJob.lastError}</p>}
+                    {cancelIngestionMutation.isError && <p className="mt-1 text-destructive" role="alert">{(cancelIngestionMutation.error as Error).message || "Could not cancel the datasource job."}</p>}
+                  </div>
+                  {ds.ingestionJob.status === "cancel_requested" ? (
+                    <span className="shrink-0 text-muted-foreground">Stopping…</span>
+                  ) : ingestionJobActive && ds.ingestionJob.id ? (
+                    <button
+                      type="button"
+                      onClick={() => cancelIngestionMutation.mutate(ds.ingestionJob!.id)}
+                      disabled={cancelIngestionMutation.isPending}
+                      className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border bg-card px-2 py-1 font-medium text-foreground transition-colors hover:bg-background disabled:opacity-50"
+                    >
+                      <XCircle className="h-3.5 w-3.5" />
+                      {cancelIngestionMutation.isPending ? "Stopping…" : "Cancel job"}
+                    </button>
+                  ) : null}
+                </div>
+              )}
+              {snapshotMutation.isError && (
+                <p className="mt-2 text-xs text-destructive" role="alert">
+                  {(snapshotMutation.error as Error).message || "Could not queue the database snapshot."}
+                </p>
+              )}
+              {incrementalSnapshotMutation.isError && (
+                <p className="mt-2 text-xs text-destructive" role="alert">
+                  {(incrementalSnapshotMutation.error as Error).message || "Could not queue incremental sync."}
+                </p>
+              )}
+              {embeddingReindexMutation.isError && (
+                <p className="mt-2 text-xs text-destructive" role="alert">
+                  {(embeddingReindexMutation.error as Error).message || "Could not queue embedding reindex."}
+                </p>
+              )}
+              {embeddingPruneMutation.isError && (
+                <p className="mt-2 text-xs text-destructive" role="alert">
+                  {(embeddingPruneMutation.error as Error).message || "Could not clean up old embedding vectors."}
+                </p>
+              )}
 
               {/* JEV Semantic Profile Header Tags */}
               {ds.semanticProfile && (
@@ -289,10 +459,160 @@ export function DataSourceDetail() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2 self-start sm:self-center">
+          <div className="flex flex-wrap items-center gap-2 self-start sm:self-center">
+            {isDatabase && (
+              <>
+                <button
+                  onClick={() => snapshotMutation.mutate()}
+                  disabled={snapshotMutation.isPending || ingestionJobActive}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-xs font-medium text-foreground shadow-sm transition-colors hover:bg-muted disabled:opacity-50"
+                  title="Read eligible tables in bounded keyset pages and publish a full ClickHouse reconciliation snapshot"
+                >
+                  <Database className={cn("h-3.5 w-3.5", snapshotMutation.isPending && "animate-pulse text-primary")} />
+                  {snapshotMutation.isPending ? "Queueing snapshot..." : "Full snapshot"}
+                </button>
+                {activeTable && (
+                  <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-border bg-card px-2 py-1.5">
+                    <label className="text-xs text-muted-foreground" htmlFor="incremental-updated-at">Updated at</label>
+                    <select
+                      id="incremental-updated-at"
+                      value={incrementalUpdatedAtColumn}
+                      onChange={(event) => setIncrementalUpdatedAtColumn(event.target.value)}
+                      disabled={updatedAtCandidates.length === 0 || ingestionJobActive}
+                      className="max-w-36 rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground disabled:opacity-50"
+                    >
+                      {updatedAtCandidates.length === 0 && <option value="">No timestamp column</option>}
+                      {updatedAtCandidates.map((column) => <option key={column.name} value={column.name}>{column.name}</option>)}
+                    </select>
+                    {deletedAtCandidates.length > 0 && (
+                      <>
+                        <label className="text-xs text-muted-foreground" htmlFor="incremental-deleted-at">Deleted at</label>
+                        <select
+                          id="incremental-deleted-at"
+                          value={incrementalDeletedAtColumn}
+                          onChange={(event) => setIncrementalDeletedAtColumn(event.target.value)}
+                          disabled={ingestionJobActive}
+                          className="max-w-32 rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground disabled:opacity-50"
+                        >
+                          <option value="">No tombstone column</option>
+                          {deletedAtCandidates.map((column) => <option key={column.name} value={column.name}>{column.name}</option>)}
+                        </select>
+                      </>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => incrementalSnapshotMutation.mutate()}
+                      disabled={incrementalSnapshotMutation.isPending || ingestionJobActive || !incrementalUpdatedAtColumn}
+                      className="inline-flex items-center gap-1.5 rounded-md border border-border bg-muted px-2 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-background disabled:opacity-50"
+                      title="Read changed rows for the selected table. Hard deletes remain until a full snapshot unless a tombstone column is selected."
+                    >
+                      <RefreshCw className={cn("h-3.5 w-3.5", incrementalSnapshotMutation.isPending && "animate-spin text-primary")} />
+                      {incrementalSnapshotMutation.isPending ? "Queueing delta..." : "Sync changes"}
+                    </button>
+                    <span className="w-full text-xs text-muted-foreground">
+                      {incrementalDeletedAtColumn
+                        ? `Tombstones use the later of ${incrementalUpdatedAtColumn || "updated-at"} and ${incrementalDeletedAtColumn}.`
+                        : "Hard-deleted rows stay in the snapshot until the next full snapshot."}
+                      {typeof activeExternalSnapshot?.watermarkMicros === "string" && (
+                        <> Current watermark: {new Date(Number(BigInt(activeExternalSnapshot.watermarkMicros) / 1_000n)).toLocaleString()}.</>
+                      )}
+                    </span>
+                  </div>
+                )}
+              </>
+            )}
+            {ds.sourceType === "rag_document" && (
+              <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-card px-2 py-1.5">
+                <span className="text-xs text-muted-foreground" title={typeof ragMetadata.embeddingGeneration === "string" ? ragMetadata.embeddingGeneration : undefined}>
+                  Active: {activeEmbeddingSpace === "bge-m3" ? "BAAI BGE-M3" : activeEmbeddingSpace === "openrouter-text-embedding-3-small" ? "OpenRouter small" : "lexical only"}
+                </span>
+                {documentExtraction && (
+                  <span
+                    className={cn(
+                      "text-xs",
+                      documentExtraction.ocrStatus === "partial" || documentExtraction.ocrStatus === "unavailable"
+                        ? "text-destructive"
+                        : "text-muted-foreground",
+                    )}
+                    title={typeof documentExtraction.ocrFailure === "string" ? documentExtraction.ocrFailure : undefined}
+                  >
+                    {documentExtraction.extractor === "pdfjs"
+                      ? typeof documentExtraction.scannedPageCount === "number" && documentExtraction.scannedPageCount > 0
+                        ? `OCR ${Number(documentExtraction.ocrPageCount || 0)}/${documentExtraction.scannedPageCount} scanned pages (${String(documentExtraction.ocrStatus || "unknown")})`
+                        : "PDF text layer extracted; OCR not needed"
+                      : "DOCX text extracted"}
+                  </span>
+                )}
+                <label className="sr-only" htmlFor="embedding-reindex-target">Target embedding model</label>
+                <select
+                  id="embedding-reindex-target"
+                  value={targetEmbeddingSpace}
+                  onChange={(event) => setTargetEmbeddingSpace(event.target.value as typeof targetEmbeddingSpace)}
+                  disabled={ingestionJobActive || embeddingReindexMutation.isPending}
+                  className="rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground disabled:opacity-50"
+                >
+                  <option value="bge-m3">BAAI BGE-M3 · 1024</option>
+                  <option value="openrouter-text-embedding-3-small">OpenRouter small · 1536</option>
+                </select>
+                <button
+                  type="button"
+                  onClick={() => embeddingReindexMutation.mutate({ targetSpace: targetEmbeddingSpace })}
+                  disabled={ingestionJobActive || embeddingReindexMutation.isPending || ds.status !== "ready"}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-border bg-muted px-2 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-background disabled:opacity-50"
+                  title="Build the target vector generation in bounded batches; the current active index stays in use until the complete index is published."
+                >
+                  <RefreshCw className={cn("h-3.5 w-3.5", embeddingReindexMutation.isPending && "animate-spin text-primary")} />
+                  {embeddingReindexMutation.isPending ? "Queueing…" : "Reindex vectors"}
+                </button>
+                {previousEmbeddingSpace && previousEmbeddingGeneration && (
+                  <button
+                    type="button"
+                    onClick={() => embeddingReindexMutation.mutate({
+                      targetSpace: previousEmbeddingSpace,
+                      targetGeneration: previousEmbeddingGeneration,
+                    })}
+                    disabled={ingestionJobActive || embeddingReindexMutation.isPending || ds.status !== "ready"}
+                    className="inline-flex items-center gap-1 rounded-md border border-border bg-card px-2 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-muted disabled:opacity-50"
+                    title={`Switch back to retained generation ${previousEmbeddingGeneration}`}
+                  >
+                    <ArrowLeft className="h-3.5 w-3.5" />
+                    Roll back
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => embeddingPruneMutation.mutate({ confirm: false })}
+                  disabled={ingestionJobActive || embeddingReindexMutation.isPending || embeddingPruneMutation.isPending || ds.status !== "ready"}
+                  className="inline-flex items-center gap-1 rounded-md border border-border bg-card px-2 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-muted disabled:opacity-50"
+                  title="Preview vector generations older than 90 days. Active and rollback generations are protected."
+                >
+                  <RefreshCw className={cn("h-3.5 w-3.5", embeddingPruneMutation.isPending && "animate-spin text-primary")} />
+                  {embeddingPruneMutation.isPending ? "Reviewing…" : "Review old vectors"}
+                </button>
+                {prunableVectorRows !== null && (
+                  <span className="w-full text-xs text-muted-foreground" role="status">
+                    {prunableVectorRows === 0
+                      ? "No unpinned vector generations are older than 90 days."
+                      : `${prunableVectorRows.toLocaleString()} vectors in unpinned generations are older than 90 days. Active and rollback generations are protected.`}
+                  </span>
+                )}
+                {prunableVectorRows !== null && prunableVectorRows > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => embeddingPruneMutation.mutate({ confirm: true, expectedGenerations: prunableGenerations })}
+                    disabled={ingestionJobActive || embeddingReindexMutation.isPending || embeddingPruneMutation.isPending || ds.status !== "ready"}
+                    className="inline-flex items-center gap-1 rounded-md border border-destructive/40 bg-destructive/5 px-2 py-1.5 text-xs font-medium text-destructive transition-colors hover:bg-destructive/10 disabled:opacity-50"
+                    title="Delete only the generations shown in the preview, subject to the same 90-day and active-generation checks."
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    {embeddingPruneMutation.isPending ? "Deleting…" : "Delete eligible old vectors"}
+                  </button>
+                )}
+              </div>
+            )}
             <button
               onClick={() => reprocessMutation.mutate()}
-              disabled={reprocessMutation.isPending}
+              disabled={reprocessMutation.isPending || ingestionJobActive}
               className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-xs font-medium text-foreground shadow-sm transition-colors hover:bg-muted disabled:opacity-50"
               title="Reprocess data source (re-run AI analysis & sync)"
             >
@@ -996,7 +1316,20 @@ export function DataSourceDetail() {
                 </div>
               </div>
 
-              <div className="flex justify-end">
+              <div className="flex items-center justify-between gap-3">
+                {isDatabase && (
+                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                    Query source
+                    <select
+                      value={queryMode}
+                      onChange={(event) => setQueryMode(event.target.value as "live" | "snapshot")}
+                      className="rounded border border-border bg-background px-2 py-1.5 text-foreground"
+                    >
+                      <option value="live">Live database</option>
+                      <option value="snapshot">ClickHouse snapshot</option>
+                    </select>
+                  </label>
+                )}
                 <button
                   type="button"
                   onClick={handleRunStructuredQuery}
@@ -1010,6 +1343,14 @@ export function DataSourceDetail() {
 
               {queryMutation.data && (
                 <div className="rounded-lg border border-border overflow-x-auto">
+                  {queryMutation.data.querySource?.mode === "snapshot" && (
+                    <p className="border-b border-border px-3 py-2 text-xs text-muted-foreground">
+                      {queryMutation.data.querySource.syncMode === "incremental" ? "Incremental snapshot" : "Full snapshot"} from {queryMutation.data.querySource.snapshotAt ? new Date(queryMutation.data.querySource.snapshotAt).toLocaleString() : "unknown time"}; {queryMutation.data.querySource.consistency?.replaceAll("_", " ") || "best effort"} consistency.
+                      {queryMutation.data.querySource.deleteSemantics === "soft_delete_column"
+                        ? " Soft-delete tombstones are applied; hard deletes appear after a full snapshot."
+                        : " Hard deletes appear after a full snapshot."}
+                    </p>
+                  )}
                   <table className="w-full text-left text-xs">
                     <thead className="bg-muted text-muted-foreground font-medium border-b border-border">
                       <tr>

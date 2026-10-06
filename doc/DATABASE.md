@@ -59,6 +59,11 @@ cp .env.example .env
 # DATABASE_URL=postgres://paperclip:paperclip@localhost:5432/paperclip
 ```
 
+The Enterprise Data Sources data plane adds ClickHouse, MinIO, Redis, and
+pgvector in a separate Compose overlay with a separate PostgreSQL data volume.
+See [Data Sources Docker data plane](data-sources-data-plane.md) before starting
+it; it requires a private secret file and does not replace this local database.
+
 Run migrations:
 
 ```sh
@@ -491,3 +496,25 @@ reservation cannot silently disappear. Failed cleanup or an ambiguous storage
 write requires operator reconciliation before an unattached reservation is
 removed. The table stores no response bodies. See `doc/runner-api-tools.md` for
 limits and the operator override.
+
+## Datasource size counters
+
+`data_sources.file_size` and `data_source_tables.row_count` use PostgreSQL
+`bigint` so stored object sizes and analytical row counts are not capped by
+32-bit integers. Drizzle maps both as JavaScript numbers; datasource write paths
+must keep values within `Number.MAX_SAFE_INTEGER`. Migrations
+`0304_tan_molly_hayes.sql` and `0305_conscious_skrulls.sql` widen the existing
+columns without changing their meaning or default values.
+
+### Datasource upload sessions
+
+`data_source_upload_sessions` stores durable, company-scoped resumable upload
+state: expected object size and SHA-256, private object key and multipart ID,
+expiry, status, and one bounded receipt per accepted part (part number, byte
+count, SHA-256, and S3 ETag). It stores no file bytes. Active sessions reserve
+their expected size against the same per-company quota as completed datasource
+files. The session references the datasource created at completion; deleting a
+datasource leaves the upload audit/status row but clears that reference.
+Migrations `0306_polite_roxanne_simpson.sql` and
+`0307_boring_colonel_america.sql` create the table and add the nullable whole
+object checksum field used during completion retries.

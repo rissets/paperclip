@@ -1,19 +1,442 @@
+import fs from "node:fs";
+import { createRequire } from "node:module";
+import { parse } from "csv-parse";
+import ExcelJS from "exceljs";
 import * as XLSX from "xlsx";
 import type { ColumnDefinition, TableSemanticModel, ClickhouseSchemaDefinition } from "@paperclipai/shared";
+import { attachCsvSourceRowCheckpoint } from "./data-source-stream-checkpoint.js";
+
+const require = createRequire(import.meta.url);
+const unzipper = require("unzipper") as {
+  Open: {
+    file: (filePath: string) => Promise<{
+      files: Array<{
+        path: string;
+        uncompressedSize: number;
+        buffer: () => Promise<Buffer>;
+      }>;
+    }>;
+  };
+};
 
 export interface ParsedTableData {
   tableName: string;
   columns: ColumnDefinition[];
   semanticModel: TableSemanticModel;
   rows: Record<string, unknown>[];
+  rowCount?: number;
 }
 
 export interface ParseStructuredOptions {
   knownColumns?: string[];
   catalogMap?: Map<string, string[]>;
+  onProgress?: (rowsScanned: number) => void | Promise<void>;
 }
 
 export class StructuredIngestionService {
+  private static readonly STREAM_SAMPLE_ROWS = 2_000;
+  private static readonly MAX_XLSX_METADATA_ENTRY_BYTES = 1024 * 1024;
+
+  private static decodeXmlAttribute(value: string): string {
+    return value.replace(/&(#x[\da-f]+|#\d+|amp|lt|gt|apos|quot);/gi, (entity, token: string) => {
+      const normalized = token.toLowerCase();
+      if (normalized === "amp") return "&";
+      if (normalized === "lt") return "<";
+      if (normalized === "gt") return ">";
+      if (normalized === "apos") return "'";
+      if (normalized === "quot") return '"';
+      const codePoint = normalized.startsWith("#x")
+        ? Number.parseInt(normalized.slice(2), 16)
+        : Number.parseInt(normalized.slice(1), 10);
+      return Number.isInteger(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff
+        ? String.fromCodePoint(codePoint)
+        : entity;
+    });
+  }
+
+  private static xmlAttributes(tag: string): Record<string, string> {
+    const attributes: Record<string, string> = {};
+    const body = tag.slice(tag.indexOf(" ") + 1).replace(/\s*\/?\s*>$/, "");
+    const attributePattern = /([A-Za-z_][\w:.-]*)\s*=\s*(["'])(.*?)\2/g;
+    for (const match of body.matchAll(attributePattern)) {
+      attributes[match[1]] = this.decodeXmlAttribute(match[3]);
+    }
+    return attributes;
+  }
+
+  /** Detect common delimiters without asking csv-parse to speculatively parse quoted rows. */
+  private static detectCsvDelimiter(filePath: string, byteOffset = 0): string {
+    const descriptor = fs.openSync(filePath, "r");
+    const sample = Buffer.alloc(64 * 1024);
+    let bytesRead: number;
+    try {
+      bytesRead = fs.readSync(descriptor, sample, 0, sample.length, byteOffset);
+    } finally {
+      fs.closeSync(descriptor);
+    }
+    const text = sample.subarray(0, bytesRead).toString("utf8");
+    const candidates = [",", ";", "\t", "|"];
+    const scores = candidates.map((delimiter) => {
+      const fieldCounts: number[] = [];
+      let fields = 1;
+      let inQuotes = false;
+      for (let index = 0; index < text.length; index += 1) {
+        const character = text[index];
+        if (character === '"') {
+          if (inQuotes && text[index + 1] === '"') index += 1;
+          else inQuotes = !inQuotes;
+        } else if (!inQuotes && character === delimiter) {
+          fields += 1;
+        } else if (!inQuotes && (character === "\n" || character === "\r")) {
+          fieldCounts.push(fields);
+          fields = 1;
+          if (character === "\r" && text[index + 1] === "\n") index += 1;
+          if (fieldCounts.length >= 32) break;
+        }
+      }
+      if (fieldCounts.length < 32 && fields > 1) fieldCounts.push(fields);
+      const counts = new Map<number, number>();
+      for (const count of fieldCounts) counts.set(count, (counts.get(count) || 0) + 1);
+      const [fieldCount, matchingRows] = [...counts.entries()].sort((left, right) =>
+        right[1] - left[1] || right[0] - left[0],
+      )[0] || [1, 0];
+      return { delimiter, fieldCount, matchingRows };
+    });
+    const best = scores.sort((left, right) =>
+      right.matchingRows - left.matchingRows || right.fieldCount - left.fieldCount,
+    )[0];
+    return best && best.fieldCount > 1 ? best.delimiter : ",";
+  }
+
+  /**
+   * ExcelJS's streaming reader can encounter worksheet ZIP entries before
+   * workbook.xml and then consult its worksheet model before that model exists.
+   * Read only the two small metadata entries from the ZIP central directory and
+   * prime those lookups; worksheet cells and shared strings remain streamed.
+   */
+  private static async createExcelWorkbookReader(filePath: string) {
+    const archive = await unzipper.Open.file(filePath);
+    const readMetadataEntry = async (entryPath: string): Promise<string> => {
+      const entry = archive.files.find((candidate) => candidate.path === entryPath);
+      if (!entry) throw new Error(`Excel workbook is missing '${entryPath}'`);
+      if (!Number.isSafeInteger(entry.uncompressedSize) || entry.uncompressedSize < 0 || entry.uncompressedSize > this.MAX_XLSX_METADATA_ENTRY_BYTES) {
+        throw new Error(`Excel workbook metadata '${entryPath}' exceeds the allowed size`);
+      }
+      return (await entry.buffer()).toString("utf8");
+    };
+
+    const [workbookXml, relationshipsXml] = await Promise.all([
+      readMetadataEntry("xl/workbook.xml"),
+      readMetadataEntry("xl/_rels/workbook.xml.rels"),
+    ]);
+    const relationships = [...relationshipsXml.matchAll(/<Relationship\b[^>]*\/?\s*>/g)]
+      .map(([tag]) => this.xmlAttributes(tag))
+      .filter((attributes) => attributes.Id && attributes.Target)
+      .map((attributes) => ({ Id: attributes.Id, Target: attributes.Target }));
+    const sheets = [...workbookXml.matchAll(/<sheet\b[^>]*\/?\s*>/g)]
+      .map(([tag]) => this.xmlAttributes(tag))
+      .filter((attributes) => attributes.name && attributes.sheetId && attributes["r:id"])
+      .map((attributes) => ({
+        id: Number.parseInt(attributes.sheetId, 10),
+        name: attributes.name,
+        state: attributes.state,
+        rId: attributes["r:id"],
+      }));
+    if (relationships.length === 0 || sheets.length === 0 || sheets.some((sheet) => !Number.isSafeInteger(sheet.id))) {
+      throw new Error("Excel workbook has invalid worksheet metadata");
+    }
+
+    const reader = new ExcelJS.stream.xlsx.WorkbookReader(filePath, {
+      worksheets: "emit",
+      sharedStrings: "emit",
+      hyperlinks: "ignore",
+      styles: "ignore",
+    });
+    const internalReader = reader as unknown as {
+      model?: { sheets: typeof sheets };
+      workbookRels?: typeof relationships;
+    };
+    internalReader.model = { sheets };
+    internalReader.workbookRels = relationships;
+    return reader;
+  }
+
+  private static csvParser(
+    filePath: string,
+    options: { startByteOffset?: number; delimiter?: string; includeInfo?: boolean } = {},
+  ) {
+    const startByteOffset = options.startByteOffset ?? 0;
+    const delimiter = options.delimiter || this.detectCsvDelimiter(filePath, startByteOffset);
+    return fs.createReadStream(filePath, startByteOffset > 0 ? { start: startByteOffset } : undefined).pipe(parse({
+      bom: startByteOffset === 0,
+      delimiter,
+      skip_empty_lines: true,
+      relax_column_count: false,
+      ...(options.includeInfo ? { info: true } : {}),
+    }));
+  }
+
+  private static isEmptyCsvRecord(record: unknown[]): boolean {
+    return record.every((cell) => cell === null || cell === undefined || String(cell).trim() === "");
+  }
+
+  private static normalizeCsvValue(value: unknown, column: ColumnDefinition, rowNumber: number): unknown {
+    if (value === null || value === undefined || String(value).trim() === "") return null;
+    if (column.role === "identifier" || column.semanticCategory === "identity") return String(value);
+    if (column.dataType === "number") {
+      const number = typeof value === "number" ? value : Number(String(value).trim());
+      if (!Number.isFinite(number)) {
+        throw new Error(`CSV row ${rowNumber} has a non-numeric value in column '${column.name}'`);
+      }
+      return number;
+    }
+    if (column.dataType === "boolean") {
+      if (typeof value === "boolean") return value;
+      const normalized = String(value).trim().toLowerCase();
+      if (["true", "1", "yes"].includes(normalized)) return true;
+      if (["false", "0", "no"].includes(normalized)) return false;
+      throw new Error(`CSV row ${rowNumber} has a non-boolean value in column '${column.name}'`);
+    }
+    return String(value);
+  }
+
+  private static excelCellValue(value: unknown, sharedStrings?: unknown[]): unknown {
+    if (value instanceof Date) return value.toISOString();
+    if (!value || typeof value !== "object") return value;
+    const cell = value as Record<string, unknown>;
+    if ("result" in cell) return this.excelCellValue(cell.result, sharedStrings);
+    if (Array.isArray(cell.richText)) {
+      return cell.richText.map((part) => String((part as Record<string, unknown>)?.text ?? "")).join("");
+    }
+    if (typeof cell.text === "string") return cell.text;
+    if (typeof cell.sharedString === "number") {
+      const resolved = sharedStrings?.[cell.sharedString];
+      return resolved === undefined ? String(cell.sharedString) : this.excelCellValue(resolved, sharedStrings);
+    }
+    if (typeof cell.error === "string") return cell.error;
+    return value;
+  }
+
+  private static excelRowRecord(row: { values?: unknown[] | Record<string, unknown> }, sharedStrings?: unknown[]): string[] {
+    const values = Array.isArray(row.values) ? row.values.slice(1) : [];
+    const record = values.map((value) => {
+      const normalized = this.excelCellValue(value, sharedStrings);
+      return normalized === null || normalized === undefined ? "" : String(normalized);
+    });
+    while (record.length > 0 && record[record.length - 1] === "") record.pop();
+    return record;
+  }
+
+  private static async *excelWorkbookEvents(reader: { parse: () => AsyncIterator<unknown> }): AsyncGenerator<unknown> {
+    const parser = reader.parse();
+    while (true) {
+      const next = await parser.next();
+      if (next.done) return;
+      yield next.value;
+    }
+  }
+
+  /** Profile bounded sample rows, while counting the full CSV without retaining it. */
+  static async profileCsvFile(
+    filePath: string,
+    tableName: string,
+    options?: ParseStructuredOptions,
+  ): Promise<ParsedTableData> {
+    const sampleGrid: string[][] = [];
+    let firstRecordIsHeader: boolean | null = null;
+    let dataRowCount = 0;
+
+    for await (const rawRecord of this.csvParser(filePath)) {
+      const record = Array.from(rawRecord as unknown[]).map((cell) => String(cell ?? ""));
+      if (this.isEmptyCsvRecord(record)) continue;
+      if (firstRecordIsHeader === null) {
+        firstRecordIsHeader = !this.isRowDataRatherThanHeader(record);
+      }
+      const isHeader = sampleGrid.length === 0 && firstRecordIsHeader;
+      if (sampleGrid.length < this.STREAM_SAMPLE_ROWS + (firstRecordIsHeader ? 1 : 0)) {
+        sampleGrid.push(record);
+      }
+      if (!isHeader) dataRowCount += 1;
+      if (dataRowCount > 0 && dataRowCount % 100_000 === 0) {
+        await options?.onProgress?.(dataRowCount);
+      }
+    }
+
+    if (dataRowCount > 0 && dataRowCount % 100_000 !== 0) await options?.onProgress?.(dataRowCount);
+
+    if (sampleGrid.length === 0) {
+      const empty = this.profileAndBuildTable(tableName, []);
+      return { ...empty, rowCount: 0 };
+    }
+
+    const parsed = this.parseCsvRows(sampleGrid, tableName, options);
+    parsed.rows = parsed.rows
+      .slice(0, this.STREAM_SAMPLE_ROWS)
+      .map((row, index) => Object.fromEntries(parsed.columns.map((column) => [
+        column.name,
+        this.normalizeCsvValue(row[column.name], column, index + 1),
+      ])));
+    parsed.rowCount = dataRowCount;
+    return parsed;
+  }
+
+  /** Profile XLSX sheets from the streaming reader while retaining only the semantic sample. */
+  static async profileExcelFile(
+    filePath: string,
+    options?: ParseStructuredOptions,
+  ): Promise<ParsedTableData[]> {
+    const reader = await this.createExcelWorkbookReader(filePath);
+    const tables: ParsedTableData[] = [];
+    const sharedStrings: unknown[] = [];
+    let totalRowsScanned = 0;
+
+    for await (const event of this.excelWorkbookEvents(reader)) {
+      const item = event as { eventType?: string; value?: any; index?: number; text?: unknown };
+      // ExcelJS 4.4 yields shared-string { index, text } records directly even
+      // though its README describes them as { eventType, value } events.
+      if (typeof item.index === "number" && "text" in item) {
+        sharedStrings[item.index] = item.text;
+        continue;
+      }
+      if (item.eventType !== "worksheet") continue;
+      const worksheet = item.value;
+      const sheet = worksheet as typeof worksheet & { name?: string; id?: number };
+      const sampleGrid: string[][] = [];
+      let firstRecordIsHeader: boolean | null = null;
+      let dataRowCount = 0;
+      for await (const row of worksheet) {
+        const record = this.excelRowRecord(row, sharedStrings);
+        if (this.isEmptyCsvRecord(record)) continue;
+        if (firstRecordIsHeader === null) firstRecordIsHeader = !this.isRowDataRatherThanHeader(record);
+        const isHeader = sampleGrid.length === 0 && firstRecordIsHeader;
+        if (sampleGrid.length < this.STREAM_SAMPLE_ROWS + (firstRecordIsHeader ? 1 : 0)) sampleGrid.push(record);
+        if (!isHeader) dataRowCount += 1;
+        if (dataRowCount > 0 && dataRowCount % 100_000 === 0) {
+          await options?.onProgress?.(totalRowsScanned + dataRowCount);
+        }
+      }
+      totalRowsScanned += dataRowCount;
+      if (sampleGrid.length === 0) continue;
+
+      const parsed = this.parseCsvRows(sampleGrid, sheet.name || `Sheet${sheet.id}`, options);
+      parsed.rows = parsed.rows
+        .slice(0, this.STREAM_SAMPLE_ROWS)
+        .map((row, index) => Object.fromEntries(parsed.columns.map((column) => [
+          column.name,
+          this.normalizeCsvValue(row[column.name], column, index + 1),
+        ])));
+      parsed.rowCount = dataRowCount;
+      tables.push(parsed);
+    }
+    if (totalRowsScanned > 0 && totalRowsScanned % 100_000 !== 0) {
+      await options?.onProgress?.(totalRowsScanned);
+    }
+    return tables;
+  }
+
+  /** Stream normalized CSV rows again after schema profiling has completed. */
+  static async *streamCsvRows(
+    filePath: string,
+    columns: ColumnDefinition[],
+    resume: { byteOffset?: number; rowsCommitted?: number; delimiter?: string } = {},
+  ): AsyncGenerator<Record<string, unknown>> {
+    const byteOffset = resume.byteOffset ?? 0;
+    if (!Number.isSafeInteger(byteOffset) || byteOffset < 0) throw new Error("CSV resume byte offset is invalid");
+    const rowsCommitted = resume.rowsCommitted ?? 0;
+    if (!Number.isSafeInteger(rowsCommitted) || rowsCommitted < 0) throw new Error("CSV resume row count is invalid");
+    if (byteOffset > 0 && !resume.delimiter) throw new Error("CSV resume checkpoint is missing its detected delimiter");
+    let firstRecord = byteOffset === 0;
+    let firstRecordIsHeader = false;
+    let rowNumber = rowsCommitted;
+    const parser = this.csvParser(filePath, {
+      startByteOffset: byteOffset,
+      delimiter: resume.delimiter,
+      includeInfo: true,
+    });
+    for await (const parsedRecord of parser) {
+      const parsed = parsedRecord as { record: unknown[]; info: { bytes: number } };
+      const rawRecord = parsed.record;
+      const record = Array.from(rawRecord as unknown[]).map((cell) => String(cell ?? ""));
+      if (this.isEmptyCsvRecord(record)) continue;
+      if (firstRecord) {
+        firstRecordIsHeader = !this.isRowDataRatherThanHeader(record);
+        firstRecord = false;
+        if (firstRecordIsHeader) continue;
+      }
+      if (record.length !== columns.length) {
+        throw new Error(`CSV row ${rowNumber + 1} has ${record.length} fields; expected ${columns.length}`);
+      }
+      rowNumber += 1;
+      const row: Record<string, unknown> = {};
+      for (let index = 0; index < columns.length; index += 1) {
+        const column = columns[index];
+        row[column.name] = this.normalizeCsvValue(record[index], column, rowNumber);
+      }
+      const detectedDelimiter = resume.delimiter
+        || (parser as unknown as { options?: { delimiter?: Buffer[] } }).options?.delimiter?.[0]?.toString("utf8")
+        || ",";
+      attachCsvSourceRowCheckpoint(row, {
+        byteOffset: byteOffset + parsed.info.bytes,
+        rowNumber,
+        delimiter: detectedDelimiter,
+      });
+      yield row;
+    }
+  }
+
+  /** Re-read one XLSX sheet and normalize its records using the profiled column schema. */
+  static async *streamExcelRows(
+    filePath: string,
+    sheetName: string,
+    columns: ColumnDefinition[],
+  ): AsyncGenerator<Record<string, unknown>> {
+    const reader = await this.createExcelWorkbookReader(filePath);
+    const sharedStrings: unknown[] = [];
+    let firstRecordIsHeader: boolean | null = null;
+    let rowNumber = 0;
+    let foundSheet = false;
+    for await (const event of this.excelWorkbookEvents(reader)) {
+      const item = event as { eventType?: string; value?: any; index?: number; text?: unknown };
+      if (typeof item.index === "number" && "text" in item) {
+        sharedStrings[item.index] = item.text;
+        continue;
+      }
+      if (item.eventType !== "worksheet") continue;
+      const worksheet = item.value;
+      const sheet = worksheet as typeof worksheet & { name?: string };
+      if (sheet.name === sheetName) foundSheet = true;
+      for await (const rawRow of worksheet) {
+        if (sheet.name !== sheetName) continue;
+        const record = this.excelRowRecord(rawRow, sharedStrings);
+        if (this.isEmptyCsvRecord(record)) continue;
+        if (firstRecordIsHeader === null) {
+          firstRecordIsHeader = !this.isRowDataRatherThanHeader(record);
+          if (firstRecordIsHeader) continue;
+        }
+        if (record.length > columns.length) {
+          throw new Error(`Excel row ${rowNumber + 1} has ${record.length} fields; expected ${columns.length}`);
+        }
+        rowNumber += 1;
+        const row: Record<string, unknown> = {};
+        for (let index = 0; index < columns.length; index += 1) {
+          row[columns[index].name] = this.normalizeCsvValue(record[index] ?? "", columns[index], rowNumber);
+        }
+        yield row;
+      }
+    }
+    if (!foundSheet) throw new Error(`Excel sheet '${sheetName}' no longer exists`);
+  }
+
+  /** Parse a bounded array-of-arrays sample using the same header and semantic profiler as XLSX. */
+  static parseCsvRows(
+    rows: unknown[][],
+    tableName = "Sheet1",
+    options?: ParseStructuredOptions,
+  ): ParsedTableData {
+    const worksheet = XLSX.utils.aoa_to_sheet(rows);
+    return this.parseWorksheet(worksheet, tableName, options);
+  }
+
   /**
    * Parse CSV content from string or buffer with smart header detection and enterprise catalog resolution
    */

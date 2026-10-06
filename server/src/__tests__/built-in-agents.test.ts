@@ -26,6 +26,7 @@ import {
   routineTriggers,
 } from "@paperclipai/db";
 import { readPaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
+import { DEFAULT_PI_LOCAL_MODEL } from "@paperclipai/adapter-pi-local";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -200,6 +201,11 @@ describeEmbeddedPostgres("built-in agents", () => {
       defaultAdapterConfig: { model: "claude-haiku-4-5" },
     });
     expect(summarizer?.defaultRuntimeConfig).toBeUndefined();
+    expect(
+      definitions
+        .filter((definition) => definition.defaultAdapterType === "pi_local")
+        .map((definition) => definition.defaultAdapterConfig?.model),
+    ).toEqual(Array(5).fill(DEFAULT_PI_LOCAL_MODEL));
     expect(() => validateBuiltInAgentDefinitions([
       {
         key: "briefs",
@@ -240,6 +246,19 @@ describeEmbeddedPostgres("built-in agents", () => {
         defaultAdapterType: "claude_local",
       },
     ])).toThrow("defaultAdapterType must be allowed");
+  });
+
+  it("updates the previous stock Pi model on an existing built-in agent", async () => {
+    const companyId = await seedCompany();
+    const service = builtInAgentService(db);
+    const created = await service.ensure(companyId, "structured-ingestion");
+    await db.update(agents)
+      .set({ adapterConfig: { model: "rissets/neural/deepseek-v4.1-flash" } })
+      .where(eq(agents.id, created.agentId!));
+
+    const reconciled = await service.ensure(companyId, "structured-ingestion");
+
+    expect(reconciled.agent?.adapterConfig).toMatchObject({ model: DEFAULT_PI_LOCAL_MODEL });
   });
 
   it("lazily provisions one agent per company/key and updates the same row on setup", async () => {

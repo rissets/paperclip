@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
-import { eq, ne, and, or, ilike, desc, sql, isNull, inArray } from "drizzle-orm";
+import os from "node:os";
+import { createHash, randomUUID } from "node:crypto";
+import { eq, ne, and, or, ilike, desc, sql, isNull, inArray, lt, gt, gte } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   dataSources,
@@ -8,11 +10,13 @@ import {
   dataSourceTables,
   dataSourceRecords,
   dataSourceChunks,
+  dataSourceJobs,
   activityLog,
   agents,
 } from "@paperclipai/db";
 import type {
   DataSource,
+  DataSourceIngestionJob,
   DataSourceTable,
   KnowledgeSearchResult,
   StructuredQueryResult,
@@ -23,15 +27,258 @@ import type {
 } from "@paperclipai/shared";
 import { KnowledgeIngestionService } from "./knowledge-ingestion.js";
 import { DatabaseIntegrationService } from "./database-integration.js";
-import { ClickhouseService } from "./clickhouse.js";
+import { ClickhouseService, clickhouseSourceTableName, rewriteClickhouseCreateTableName } from "./clickhouse.js";
 import { readBuiltInAgentMarker } from "./built-in-agent-metadata.js";
 import { DataSourceCollectionsService } from "./data-source-collections.js";
+import { deleteDataSourceFile, downloadDataSourceFileToPath, readDataSourceFile } from "./data-source-object-storage.js";
+import { RagModelService, type EmbeddingSpace } from "./rag-models.js";
+import { parseDataSourceModelConfig } from "./data-source-model-config.js";
+import {
+  DataSourceVectorStore,
+  type EmbeddingCoverage,
+  type PrunableEmbeddingGeneration,
+  type ReindexVectorInput,
+} from "./data-source-vector-store.js";
+import { DataSourceCacheService, makeDataSourceCacheKey } from "./data-source-cache.js";
+import { externalQueryAdmission } from "./external-query-admission.js";
+import { DataSourceDatabaseConfigService, publicDatabaseMetadata } from "./data-source-database-config.js";
+import { conflict, notFound, unprocessable } from "../errors.js";
+import { assertDataSourceJobLease, completeDataSourceJobLease, DataSourceLeaseLostError, type DataSourceJobLease } from "./data-source-job-lease.js";
+
+type StructuredColumn = { name: string; dataType?: string };
+type QueryFilterDialect = "postgres" | "mysql" | "clickhouse";
+type SnapshotActor = { actorType: "user" | "agent"; actorId: string; agentId?: string | null; runId?: string | null };
+
+const EXTERNAL_SNAPSHOT_PAGE_SIZE = 2_000;
+const MAX_SNAPSHOT_TABLES_PER_JOB = 100;
+const MAX_EXTERNAL_SNAPSHOT_DELTAS = 32;
+const EXTERNAL_SNAPSHOT_LOOKBACK_MS = 1_000;
+const SNAPSHOT_SYNC_VERSION_COLUMN = "_paperclip_sync_version";
+const SNAPSHOT_SYNC_DELETED_COLUMN = "_paperclip_sync_deleted";
+const SNAPSHOT_SYNC_CHANGE_CURSOR_COLUMN = "_paperclip_sync_change_cursor";
+const EMBEDDING_REINDEX_BATCH_SIZE = 32;
+const EMBEDDING_GENERATION_RETENTION_DAYS = 90;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function snapshotPrimaryKey(table: typeof dataSourceTables.$inferSelect): string | null {
+  const primaryKeys = ((table.schemaDefinition || []) as ColumnDefinition[]).filter((column) => column.isPrimaryKey);
+  return primaryKeys.length === 1 ? primaryKeys[0].name : null;
+}
+
+function snapshotClickhouseDdl(table: typeof dataSourceTables.$inferSelect, tableName: string): string {
+  const columns = (table.schemaDefinition || []) as ColumnDefinition[];
+  if (columns.length === 0) throw unprocessable(`External table '${table.tableName}' has no inspected columns`);
+  if (columns.some((column) => [SNAPSHOT_SYNC_VERSION_COLUMN, SNAPSHOT_SYNC_DELETED_COLUMN, SNAPSHOT_SYNC_CHANGE_CURSOR_COLUMN].includes(column.name))) {
+    throw unprocessable(`External table '${table.tableName}' uses a reserved Paperclip synchronization column`);
+  }
+  const fallbackTypes: Record<string, string> = {
+    number: "Float64", date: "String", boolean: "UInt8", string: "String", json: "String", unknown: "String",
+  };
+  const ddlColumns = columns.map((column) => {
+    const name = column.name.replaceAll("`", "``");
+    const type = column.clickhouseType || fallbackTypes[column.dataType] || "String";
+    return `  \`${name}\` ${type}`;
+  });
+  ddlColumns.push(`  \`${SNAPSHOT_SYNC_VERSION_COLUMN}\` UInt64`);
+  ddlColumns.push(`  \`${SNAPSHOT_SYNC_DELETED_COLUMN}\` UInt8`);
+  const primaryKey = snapshotPrimaryKey(table);
+  const orderBy = primaryKey ? `\`${primaryKey.replaceAll("`", "``")}\`` : "tuple()";
+  return `CREATE TABLE IF NOT EXISTS \`${tableName}\` (\n${ddlColumns.join(",\n")}\n) ENGINE = MergeTree()\nORDER BY (${orderBy});`;
+}
+
+function timestampEpochMicros(value: unknown): bigint {
+  if (value instanceof Date && Number.isFinite(value.getTime())) return BigInt(value.getTime()) * 1_000n;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return BigInt(Math.trunc(value)) * (Math.abs(value) < 100_000_000_000 ? 1_000_000n : 1_000n);
+  }
+  if (typeof value !== "string" || !value.trim()) throw new Error("Incremental sync timestamp is null or invalid");
+  const input = value.trim().replace(" ", "T");
+  const match = /^(.*T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}(?::?\d{2})?)?$/i.exec(input);
+  if (!match) throw new Error("Incremental sync timestamps must be ISO-like date-time values");
+  const rawOffset = match[3] || "Z";
+  const offset = /^[+-]\d{2}$/i.test(rawOffset) ? `${rawOffset}:00` : rawOffset;
+  const wholeSecondMs = Date.parse(`${match[1]}.000${offset}`);
+  if (!Number.isFinite(wholeSecondMs)) throw new Error("Incremental sync timestamp is invalid");
+  const fraction = (match[2] || "").slice(0, 6).padEnd(6, "0");
+  return BigInt(wholeSecondMs) * 1_000n + BigInt(fraction || "0");
+}
+
+function incrementalRowVersion(updatedAt: unknown, generation: number): string {
+  const millis = timestampEpochMicros(updatedAt) / 1_000n;
+  return (millis * 1_024n + BigInt(generation % 1_024)).toString();
+}
+
+function effectiveChangeTimestamp(updatedAt: unknown, deletedAt?: unknown): unknown {
+  if (updatedAt === undefined || updatedAt === null || updatedAt === "") {
+    if (deletedAt === undefined || deletedAt === null || deletedAt === "") return updatedAt;
+    return deletedAt;
+  }
+  if (deletedAt === undefined || deletedAt === null || deletedAt === "") return updatedAt;
+  return timestampEpochMicros(deletedAt) > timestampEpochMicros(updatedAt) ? deletedAt : updatedAt;
+}
+
+function watermarkMicrosToIso(value: string): string {
+  const micros = BigInt(value);
+  const seconds = micros / 1_000_000n;
+  const fraction = (micros % 1_000_000n).toString().padStart(6, "0");
+  const milliseconds = Number(seconds * 1_000n);
+  if (!Number.isSafeInteger(milliseconds)) throw new Error("Incremental watermark is outside the supported date range");
+  return `${new Date(milliseconds).toISOString().slice(0, 19)}.${fraction}Z`;
+}
+
+function sourceRowIsDeleted(value: unknown): boolean {
+  return value !== undefined && value !== null && value !== false && value !== 0 && value !== "";
+}
+
+function snapshotDeltaTableName(baseName: string, jobId: string, tableId: string, attempt: number): string {
+  const jobHash = createHash("sha256").update(jobId).digest("hex").slice(0, 10);
+  const tableHash = createHash("sha256").update(tableId).digest("hex").slice(0, 8);
+  return `${baseName.slice(0, 31)}__d_${jobHash}_${attempt.toString(36)}_${tableHash}`;
+}
+
+/** A full snapshot gets an immutable ClickHouse identity so a failed PG receipt cannot replace live data. */
+function snapshotGenerationTableName(baseName: string, jobId: string, tableId: string, attempt: number): string {
+  const jobHash = createHash("sha256").update(jobId).digest("hex").slice(0, 10);
+  const tableHash = createHash("sha256").update(tableId).digest("hex").slice(0, 8);
+  return `${baseName.slice(0, 31)}__g_${jobHash}_${attempt.toString(36)}_${tableHash}`;
+}
+
+function snapshotQuerySource(table: typeof dataSourceTables.$inferSelect): string {
+  const schema = (Array.isArray(table.schemaDefinition) ? table.schemaDefinition : []) as ColumnDefinition[];
+  const semanticModel = (table.semanticModel || {}) as Record<string, any>;
+  const snapshot = semanticModel.externalSnapshot || {};
+  const primaryKey = snapshotPrimaryKey(table);
+  if (!primaryKey) throw new Error(`External snapshot table '${table.tableName}' has no single-column primary key`);
+  const tableNames = [sourceClickhouseTableName(table), ...(Array.isArray(snapshot.deltaTables) ? snapshot.deltaTables : [])];
+  const safeNames = tableNames.map((name) => {
+    if (typeof name !== "string" || !/^[a-zA-Z0-9_]{1,120}$/.test(name)) {
+      throw new Error("External snapshot metadata contains an invalid ClickHouse delta table name");
+    }
+    return `\`${name}\``;
+  });
+  if (safeNames.length > MAX_EXTERNAL_SNAPSHOT_DELTAS + 1) {
+    throw new Error("External snapshot has too many un-compacted deltas; run a full snapshot");
+  }
+  const quote = (name: string) => `\`${name.replaceAll("`", "``")}\``;
+  const visibleColumns = schema.map((column) => quote(column.name)).join(", ");
+  const unionColumns = `${visibleColumns}, ${quote(SNAPSHOT_SYNC_VERSION_COLUMN)}, ${quote(SNAPSHOT_SYNC_DELETED_COLUMN)}`;
+  const union = safeNames.map((name) => `SELECT ${unionColumns} FROM ${name}`).join(" UNION ALL ");
+  return `(SELECT ${visibleColumns} FROM (SELECT ${unionColumns} FROM (${union}) ORDER BY ${quote(primaryKey)}, ${quote(SNAPSHOT_SYNC_VERSION_COLUMN)} DESC LIMIT 1 BY ${quote(primaryKey)}) WHERE ${quote(SNAPSHOT_SYNC_DELETED_COLUMN)} = 0) AS _paperclip_snapshot`;
+}
+
+function quoteDataIdentifier(identifier: string, quote: string): string {
+  return `${quote}${identifier.replaceAll(quote, `${quote}${quote}`)}${quote}`;
+}
+
+function sourceClickhouseTableName(table: typeof dataSourceTables.$inferSelect): string {
+  const storedName = (table.semanticModel as any)?.clickhouseTable;
+  return typeof storedName === "string" && storedName.length > 0
+    ? storedName
+    : clickhouseSourceTableName(table.id, table.tableName);
+}
+
+function reprocessingCutoff(metadata: unknown): Date | null {
+  const value = (metadata as Record<string, unknown> | null)?.reprocessingStartedAt;
+  if (typeof value !== "string") return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function throwIfIngestionAborted(lease: DataSourceJobLease): void {
+  if (lease.signal?.aborted) throw new Error("Datasource ingestion was cancelled or stopped");
+}
+
+function compileStructuredFilters(
+  filter: Record<string, unknown> | undefined,
+  columns: StructuredColumn[],
+  dialect: QueryFilterDialect,
+): { whereSql: string; values: unknown[]; clickhouseParams: Record<string, { type: "String" | "Float64" | "Int64" | "UInt8"; value: string | number }> } {
+  const predicates: string[] = [];
+  const values: unknown[] = [];
+  const clickhouseParams: Record<string, { type: "String" | "Float64" | "Int64" | "UInt8"; value: string | number }> = {};
+  const quote = dialect === "postgres" ? '"' : "`";
+  const knownColumns = new Map(columns.map((column) => [column.name, column]));
+  let filterIndex = 0;
+
+  for (const [name, value] of Object.entries(filter || {})) {
+    if (value === undefined || value === null || value === "") continue;
+    if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
+      throw new Error(`Unsupported filter value for column ${name}`);
+    }
+    if (typeof value === "number" && !Number.isFinite(value)) {
+      throw new Error(`Filter value for column ${name} must be finite`);
+    }
+
+    const column = knownColumns.get(name);
+    if (!column) throw new Error(`Unknown filter column: ${name}`);
+    const identifier = quoteDataIdentifier(column.name, quote);
+    const dataType = (column.dataType || "unknown").toLowerCase();
+    const isTextSearch = dataType === "string" && typeof value === "string";
+    const index = filterIndex++;
+
+    if (dialect === "clickhouse") {
+      const parameterName = `ds_filter_${index}`;
+      if (isTextSearch) {
+        clickhouseParams[parameterName] = { type: "String", value };
+        predicates.push(`positionCaseInsensitiveUTF8(toString(${identifier}), {${parameterName}:String}) > 0`);
+      } else if (dataType === "number") {
+        const numericValue = typeof value === "number" ? value : Number(value);
+        if (!Number.isFinite(numericValue)) throw new Error(`Filter value for ${name} must be numeric`);
+        const type = Number.isSafeInteger(numericValue) ? "Int64" : "Float64";
+        clickhouseParams[parameterName] = { type, value: numericValue };
+        predicates.push(`${identifier} = {${parameterName}:${type}}`);
+      } else if (dataType === "boolean") {
+        const boolValue = typeof value === "boolean" ? value : value === "true" ? true : value === "false" ? false : null;
+        if (boolValue === null) throw new Error(`Filter value for ${name} must be boolean`);
+        clickhouseParams[parameterName] = { type: "UInt8", value: boolValue ? 1 : 0 };
+        predicates.push(`${identifier} = {${parameterName}:UInt8}`);
+      } else {
+        clickhouseParams[parameterName] = { type: "String", value: String(value) };
+        predicates.push(`toString(${identifier}) = {${parameterName}:String}`);
+      }
+      continue;
+    }
+
+    values.push(value);
+    const placeholder = dialect === "postgres" ? `$${values.length}` : "?";
+    if (isTextSearch) {
+      predicates.push(
+        dialect === "postgres"
+          ? `strpos(lower(${identifier}), lower(${placeholder})) > 0`
+          : `INSTR(LOWER(${identifier}), LOWER(${placeholder})) > 0`,
+      );
+    } else {
+      predicates.push(`${identifier} = ${placeholder}`);
+    }
+  }
+
+  return {
+    whereSql: predicates.length > 0 ? ` WHERE ${predicates.join(" AND ")}` : "",
+    values,
+    clickhouseParams,
+  };
+}
 
 export class DataSourcesService {
   private collectionsService: DataSourceCollectionsService;
+  private vectorStore: DataSourceVectorStore;
+  private embeddingReindexStore: Pick<DataSourceVectorStore,
+    "hasEmbeddingSpace" | "embeddingCoverage" | "upsertChunkEmbeddings" | "listPrunableGenerations" | "deleteGenerationRows"
+  >;
+  private embeddingReindexModels: Pick<RagModelService, "embed" | "embeddingGeneration">;
+  private cache: DataSourceCacheService;
 
-  constructor(private db: Db) {
+  constructor(private db: Db, dependencies?: {
+    embeddingReindexStore?: Pick<DataSourceVectorStore,
+      "hasEmbeddingSpace" | "embeddingCoverage" | "upsertChunkEmbeddings" | "listPrunableGenerations" | "deleteGenerationRows"
+    >;
+    embeddingReindexModels?: Pick<RagModelService, "embed" | "embeddingGeneration">;
+  }) {
     this.collectionsService = new DataSourceCollectionsService(db);
+    this.vectorStore = new DataSourceVectorStore(db);
+    this.embeddingReindexStore = dependencies?.embeddingReindexStore || this.vectorStore;
+    this.embeddingReindexModels = dependencies?.embeddingReindexModels || new RagModelService();
+    this.cache = new DataSourceCacheService();
   }
 
   /**
@@ -57,22 +304,52 @@ export class DataSourcesService {
 
     const colNameMap = new Map(collections.map((c) => [c.id, c.name]));
 
+    const jobs = list.length === 0
+      ? []
+      : await this.db
+          .select({
+            id: dataSourceJobs.id,
+            dataSourceId: dataSourceJobs.dataSourceId,
+            jobType: dataSourceJobs.jobType,
+            status: dataSourceJobs.status,
+            stage: dataSourceJobs.stage,
+            attempt: dataSourceJobs.attempt,
+            maxAttempts: dataSourceJobs.maxAttempts,
+            progress: dataSourceJobs.progress,
+            lastError: dataSourceJobs.lastError,
+            createdAt: dataSourceJobs.createdAt,
+            updatedAt: dataSourceJobs.updatedAt,
+            completedAt: dataSourceJobs.completedAt,
+          })
+          .from(dataSourceJobs)
+          .where(and(eq(dataSourceJobs.companyId, companyId), inArray(dataSourceJobs.dataSourceId, list.map((ds) => ds.id))))
+          .orderBy(desc(dataSourceJobs.createdAt));
+    const latestJobBySource = new Map<string, (typeof jobs)[number]>();
+    for (const job of jobs) {
+      if (!latestJobBySource.has(job.dataSourceId)) latestJobBySource.set(job.dataSourceId, job);
+    }
+
     // Attach tables summary
     const results: DataSource[] = [];
     for (const ds of list) {
+      const processingCutoff = reprocessingCutoff(ds.metadata);
       const tables = await this.db
         .select()
         .from(dataSourceTables)
-        .where(eq(dataSourceTables.dataSourceId, ds.id));
+        .where(processingCutoff
+          ? and(eq(dataSourceTables.dataSourceId, ds.id), lt(dataSourceTables.createdAt, processingCutoff))
+          : eq(dataSourceTables.dataSourceId, ds.id));
 
       results.push({
         ...ds,
+        metadata: publicDatabaseMetadata(ds.metadata),
         collectionId: ds.collectionId || null,
         collectionName: ds.collectionId ? colNameMap.get(ds.collectionId) || null : null,
         sourceType: ds.sourceType as any,
         status: ds.status as any,
         semanticProfile: (ds.metadata as any)?.semanticProfile || null,
         tables: tables as any[],
+        ingestionJob: (latestJobBySource.get(ds.id) as DataSourceIngestionJob | undefined) || null,
       });
     }
 
@@ -99,20 +376,45 @@ export class DataSourcesService {
       collectionName = col?.name || null;
     }
 
+    const processingCutoff = reprocessingCutoff(ds.metadata);
     const tables = await this.db
       .select()
       .from(dataSourceTables)
-      .where(eq(dataSourceTables.dataSourceId, ds.id));
+      .where(processingCutoff
+        ? and(eq(dataSourceTables.dataSourceId, ds.id), lt(dataSourceTables.createdAt, processingCutoff))
+        : eq(dataSourceTables.dataSourceId, ds.id));
 
     const chunks = await this.db
       .select()
       .from(dataSourceChunks)
-      .where(eq(dataSourceChunks.dataSourceId, ds.id))
+      .where(processingCutoff
+        ? and(eq(dataSourceChunks.dataSourceId, ds.id), lt(dataSourceChunks.createdAt, processingCutoff))
+        : eq(dataSourceChunks.dataSourceId, ds.id))
       .orderBy(dataSourceChunks.chunkIndex)
       .limit(50);
 
+    const [latestJob] = await this.db
+      .select({
+        id: dataSourceJobs.id,
+        jobType: dataSourceJobs.jobType,
+        status: dataSourceJobs.status,
+        stage: dataSourceJobs.stage,
+        attempt: dataSourceJobs.attempt,
+        maxAttempts: dataSourceJobs.maxAttempts,
+        progress: dataSourceJobs.progress,
+        lastError: dataSourceJobs.lastError,
+        createdAt: dataSourceJobs.createdAt,
+        updatedAt: dataSourceJobs.updatedAt,
+        completedAt: dataSourceJobs.completedAt,
+      })
+      .from(dataSourceJobs)
+      .where(and(eq(dataSourceJobs.companyId, companyId), eq(dataSourceJobs.dataSourceId, ds.id)))
+      .orderBy(desc(dataSourceJobs.createdAt))
+      .limit(1);
+
     return {
       ...ds,
+      metadata: publicDatabaseMetadata(ds.metadata),
       collectionId: ds.collectionId || null,
       collectionName,
       sourceType: ds.sourceType as any,
@@ -120,6 +422,7 @@ export class DataSourcesService {
       semanticProfile: (ds.metadata as any)?.semanticProfile || null,
       tables: tables as any[],
       chunks: chunks as any[],
+      ingestionJob: (latestJob as DataSourceIngestionJob | undefined) || null,
     };
   }
 
@@ -492,61 +795,1468 @@ export class DataSourcesService {
    * Delete data source and its cascade data
    */
   async delete(companyId: string, id: string): Promise<boolean> {
+    const [existing] = await this.db
+      .select({ storagePath: dataSources.storagePath, metadata: dataSources.metadata })
+      .from(dataSources)
+      .where(and(eq(dataSources.id, id), eq(dataSources.companyId, companyId)));
+    if (existing?.metadata?.credentialSecretId) {
+      await new DataSourceDatabaseConfigService(this.db).archivePrepared(companyId, existing.metadata);
+    }
     const [deleted] = await this.db
       .delete(dataSources)
       .where(and(eq(dataSources.id, id), eq(dataSources.companyId, companyId)))
       .returning();
+    if (deleted && existing?.storagePath && (existing.metadata as any)?.storageBackend === "s3") {
+      try {
+        await deleteDataSourceFile(companyId, existing.storagePath);
+      } catch (error) {
+        // Source metadata is already deleted. Keep the control-plane deletion
+        // successful and leave the object for the storage reconciliation job.
+        console.warn(`[DataSourcesService] Could not delete source object for ${id}:`, error instanceof Error ? error.message : error);
+      }
+    }
     return !!deleted;
+  }
+
+  /** Queue a full, keyset-paginated external-table snapshot without blocking the API request. */
+  async enqueueExternalDatabaseSnapshot(
+    companyId: string,
+    id: string,
+    input: {
+      mode?: "full" | "incremental";
+      tableIds?: string[];
+      tablePolicies?: Array<{ tableId: string; updatedAtColumn: string; deletedAtColumn?: string }>;
+      actor: SnapshotActor;
+    },
+  ): Promise<{ id: string; status: string; tableCount: number; skippedTableCount: number; ingestionJob: DataSourceIngestionJob }> {
+    return this.db.transaction(async (tx) => {
+      const mode = input.mode || "full";
+      if (mode !== "full" && mode !== "incremental") throw unprocessable("Snapshot mode must be full or incremental");
+      const policies = input.tablePolicies || [];
+      const policyByTableId = new Map(policies.map((policy) => [policy.tableId, policy]));
+      const [source] = await tx.select().from(dataSources).where(and(
+        eq(dataSources.id, id), eq(dataSources.companyId, companyId),
+      )).limit(1).for("update");
+      if (!source) throw notFound(`Data source not found: ${id}`);
+      if (!(["postgres", "mysql", "mariadb"] as string[]).includes(source.sourceType)) {
+        throw unprocessable("External snapshots currently support PostgreSQL, MySQL, and MariaDB data sources");
+      }
+      if (source.status !== "ready") throw conflict("External datasource must finish onboarding before a snapshot can be queued");
+
+      const [activeJob] = await tx.select({ id: dataSourceJobs.id }).from(dataSourceJobs).where(and(
+        eq(dataSourceJobs.companyId, companyId),
+        eq(dataSourceJobs.dataSourceId, id),
+        inArray(dataSourceJobs.status, ["queued", "running", "cancel_requested"]),
+      )).limit(1);
+      if (activeJob) throw conflict("This datasource already has an active ingestion or snapshot job");
+
+      const tables = await tx.select().from(dataSourceTables).where(and(
+        eq(dataSourceTables.companyId, companyId), eq(dataSourceTables.dataSourceId, id),
+      ));
+      if (input.tableIds && (!Array.isArray(input.tableIds) || input.tableIds.length === 0)) {
+        throw unprocessable("tableIds must contain at least one table when provided");
+      }
+      if (input.tableIds && input.tableIds.length > MAX_SNAPSHOT_TABLES_PER_JOB) {
+        throw unprocessable(`A snapshot job can include at most ${MAX_SNAPSHOT_TABLES_PER_JOB} tables`);
+      }
+      const requestedIds = input.tableIds || (mode === "incremental" ? policies.map((policy) => policy.tableId) : undefined);
+      const selected = requestedIds
+        ? tables.filter((table) => requestedIds.includes(table.id))
+        : tables;
+      if (requestedIds && selected.length !== new Set(requestedIds).size) {
+        throw notFound("One or more selected tables do not belong to this datasource");
+      }
+      if (mode === "incremental" && selected.some((table) => !policyByTableId.has(table.id))) {
+        throw unprocessable("Incremental sync requires an updated-at policy for each selected table");
+      }
+      for (const [tableId, policy] of policyByTableId) {
+        const table = selected.find((candidate) => candidate.id === tableId);
+        if (!table) throw notFound("A sync policy refers to a table outside the selected datasource tables");
+        const columns = (Array.isArray(table.schemaDefinition) ? table.schemaDefinition : []) as ColumnDefinition[];
+        const updatedAt = columns.find((column) => column.name === policy.updatedAtColumn);
+        if (!updatedAt) throw unprocessable(`Updated-at column '${policy.updatedAtColumn}' is not part of table '${table.tableName}'`);
+        if (updatedAt.dataType !== "date" && updatedAt.role !== "timestamp") {
+          throw unprocessable(`Updated-at column '${policy.updatedAtColumn}' must be inspected as a date or timestamp`);
+        }
+        if (policy.deletedAtColumn) {
+          const deletedAt = columns.find((column) => column.name === policy.deletedAtColumn);
+          if (!deletedAt) throw unprocessable(`Deleted-at column '${policy.deletedAtColumn}' is not part of table '${table.tableName}'`);
+          if (deletedAt.dataType !== "date" && deletedAt.role !== "timestamp") {
+            throw unprocessable(`Deleted-at column '${policy.deletedAtColumn}' must be inspected as a date or timestamp`);
+          }
+        }
+      }
+      const eligible = selected.filter((table) => snapshotPrimaryKey(table) !== null);
+      const skippedTableCount = selected.length - eligible.length;
+      if (eligible.length === 0) {
+        throw unprocessable("No selected table has exactly one inspected primary key; keyset snapshot requires a single-column primary key");
+      }
+      if (eligible.length > MAX_SNAPSHOT_TABLES_PER_JOB) {
+        throw unprocessable(`A snapshot job can include at most ${MAX_SNAPSHOT_TABLES_PER_JOB} eligible tables`);
+      }
+      if (mode === "incremental" && eligible.some((table) => {
+        const snapshot = ((table.semanticModel || {}) as Record<string, any>).externalSnapshot;
+        const deltas = Array.isArray(snapshot?.deltaTables) ? snapshot.deltaTables : [];
+        return snapshot?.engine === "merge_delta_v1" && deltas.length >= MAX_EXTERNAL_SNAPSHOT_DELTAS;
+      })) {
+        throw conflict("An external snapshot reached its delta-table limit; run a full snapshot to compact it before syncing again");
+      }
+
+      const [job] = await tx.insert(dataSourceJobs).values({
+        companyId,
+        dataSourceId: id,
+        jobType: "external_db_snapshot",
+        status: "queued",
+        stage: "queued",
+        progress: {
+          tableIds: eligible.map((table) => table.id),
+          syncMode: mode,
+          tablePolicies: eligible.flatMap((table) => {
+            const policy = policyByTableId.get(table.id);
+            return policy ? [policy] : [];
+          }),
+          totalTables: eligible.length,
+          skippedTableCount,
+          consistency: mode === "incremental" ? "best_effort_updated_at" : "best_effort_keyset",
+        },
+        idempotencyKey: `external-snapshot:${id}:${randomUUID()}`,
+      }).returning();
+
+      await tx.insert(activityLog).values({
+        companyId,
+        actorType: input.actor.actorType,
+        actorId: input.actor.actorId,
+        action: "data_source.external_snapshot.queued",
+        entityType: "data_source",
+        entityId: id,
+        agentId: input.actor.agentId || null,
+        runId: input.actor.runId || null,
+        details: {
+          jobId: job.id,
+          mode,
+          tableCount: eligible.length,
+          skippedTableCount,
+          consistency: mode === "incremental" ? "best_effort_updated_at" : "best_effort_keyset",
+        },
+      });
+
+      return {
+        id,
+        status: "queued",
+        tableCount: eligible.length,
+        skippedTableCount,
+        ingestionJob: job as DataSourceIngestionJob,
+      };
+    });
+  }
+
+  /** Remove stale immutable snapshot targets only when PostgreSQL proves they are no longer active. */
+  async reconcilePendingExternalSnapshotTargets(limit = 8): Promise<number> {
+    const boundedLimit = Math.max(1, Math.min(32, Math.trunc(limit)));
+    return this.db.transaction(async (tx) => {
+      const lockResult = await tx.execute(sql<{ acquired: boolean }>`
+        SELECT pg_try_advisory_xact_lock(hashtextextended('paperclip:datasource-snapshot-orphan-reconcile', 0)) AS acquired
+      `);
+      if (!Array.from(lockResult as Iterable<{ acquired: boolean }>)[0]?.acquired) return 0;
+
+      const result = await tx.execute(sql<{
+        tableId: string;
+        companyId: string;
+        semanticModel: Record<string, unknown> | null;
+      }>`
+        SELECT table_row.id::text AS "tableId", table_row.company_id::text AS "companyId",
+               table_row.semantic_model AS "semanticModel"
+        FROM data_source_tables AS table_row
+        LEFT JOIN data_source_jobs AS job
+          ON job.id::text = table_row.semantic_model #>> '{pendingExternalSnapshot,jobId}'
+        WHERE jsonb_typeof(table_row.semantic_model->'pendingExternalSnapshot') = 'object'
+          AND CASE
+                WHEN COALESCE(
+                  table_row.semantic_model #>> '{pendingExternalSnapshot,publishStartedAt}',
+                  table_row.semantic_model #>> '{pendingExternalSnapshot,startedAt}'
+                ) ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T'
+                THEN COALESCE(
+                  table_row.semantic_model #>> '{pendingExternalSnapshot,publishStartedAt}',
+                  table_row.semantic_model #>> '{pendingExternalSnapshot,startedAt}'
+                )::timestamptz
+                     < clock_timestamp() - interval '5 minutes'
+                ELSE FALSE
+              END
+          AND (
+            job.id IS NULL OR job.status IN ('failed', 'cancelled', 'succeeded')
+            OR (
+              job.status = 'running'
+              AND table_row.semantic_model #>> '{pendingExternalSnapshot,attempt}' ~ '^[0-9]+$'
+              AND (table_row.semantic_model #>> '{pendingExternalSnapshot,attempt}')::integer < job.attempt
+            )
+          )
+          AND table_row.semantic_model->>'clickhouseTable'
+              IS DISTINCT FROM table_row.semantic_model #>> '{pendingExternalSnapshot,pendingTargetTable}'
+          AND table_row.semantic_model->>'clickhouseTable'
+              IS DISTINCT FROM table_row.semantic_model #>> '{pendingExternalSnapshot,pendingStageTable}'
+          AND NOT COALESCE(
+            (table_row.semantic_model #> '{externalSnapshot,deltaTables}')
+              @> jsonb_build_array(table_row.semantic_model #>> '{pendingExternalSnapshot,pendingTargetTable}'),
+            FALSE
+          )
+          AND NOT COALESCE(
+            (table_row.semantic_model #> '{externalSnapshot,deltaTables}')
+              @> jsonb_build_array(table_row.semantic_model #>> '{pendingExternalSnapshot,pendingStageTable}'),
+            FALSE
+          )
+        ORDER BY table_row.updated_at ASC
+        LIMIT ${boundedLimit}
+        FOR UPDATE OF table_row SKIP LOCKED
+      `);
+
+      let reconciled = 0;
+      const cleanupDeadline = Date.now() + 8_000;
+      for (const candidate of Array.from(result as Iterable<{
+        tableId: string;
+        companyId: string;
+        semanticModel: Record<string, unknown> | null;
+      }>)) {
+        const model = candidate.semanticModel || {};
+        const pending = model.pendingExternalSnapshot && typeof model.pendingExternalSnapshot === "object"
+          ? model.pendingExternalSnapshot as Record<string, unknown>
+          : {};
+        const activeTable = typeof model.clickhouseTable === "string" ? model.clickhouseTable : "";
+        const externalSnapshot = model.externalSnapshot && typeof model.externalSnapshot === "object"
+          ? model.externalSnapshot as Record<string, unknown>
+          : {};
+        const activeDeltas = Array.isArray(externalSnapshot.deltaTables) ? externalSnapshot.deltaTables : [];
+        const prefix = `${activeTable.slice(0, 31)}__`;
+        const targets = [pending.pendingTargetTable, pending.pendingStageTable,
+          ...(Array.isArray(pending.cleanupTargets) ? pending.cleanupTargets : [])]
+          .filter((value, index, values): value is string => typeof value === "string"
+            && /^[A-Za-z0-9_]{1,120}$/.test(value)
+            && value.startsWith(prefix)
+            && value !== activeTable
+            && !activeDeltas.includes(value)
+            && values.indexOf(value) === index);
+        if (targets.length === 0) continue;
+
+        const clickhouse = new ClickhouseService();
+        let allTargetsRemoved = true;
+        for (const target of targets) {
+          const remainingMs = cleanupDeadline - Date.now();
+          if (remainingMs <= 0) {
+            allTargetsRemoved = false;
+            break;
+          }
+          try {
+            await clickhouse.execute(
+              `DROP TABLE IF EXISTS \`${target}\``,
+              clickhouse.getCompanyDatabase(candidate.companyId),
+              AbortSignal.timeout(Math.min(2_500, remainingMs)),
+            );
+          } catch {
+            allTargetsRemoved = false;
+          }
+        }
+        if (!allTargetsRemoved) {
+          console.warn("[DataSourcesService] Pending ClickHouse snapshot target cleanup failed; the next sweep will retry");
+          continue;
+        }
+
+        const pendingJobId = typeof pending.jobId === "string" ? pending.jobId : "";
+        const pendingTarget = typeof pending.pendingTargetTable === "string" ? pending.pendingTargetTable : "";
+        const cleared = await tx.execute(sql<{ id: string }>`
+          UPDATE data_source_tables
+          SET semantic_model = semantic_model - 'pendingExternalSnapshot', updated_at = now()
+          WHERE id = ${candidate.tableId}::uuid AND company_id = ${candidate.companyId}::uuid
+            AND semantic_model #>> '{pendingExternalSnapshot,jobId}' = ${pendingJobId}
+            AND semantic_model #>> '{pendingExternalSnapshot,pendingTargetTable}' = ${pendingTarget}
+          RETURNING id
+        `);
+        if (Array.from(cleared as Iterable<{ id: string }>).length === 1) reconciled += 1;
+      }
+      return reconciled;
+    });
+  }
+
+  /** Build a full external snapshot or publish a bounded updated-at delta. */
+  async runExternalDatabaseSnapshot(
+    companyId: string,
+    id: string,
+    progress: Record<string, unknown>,
+    lease: DataSourceJobLease,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const tableIds = Array.isArray(progress.tableIds)
+      ? progress.tableIds.filter((tableId): tableId is string => typeof tableId === "string")
+      : [];
+    if (tableIds.length === 0 || tableIds.length > MAX_SNAPSHOT_TABLES_PER_JOB) {
+      throw new Error("External snapshot job is missing its bounded table selection");
+    }
+    const [source] = await this.db.select().from(dataSources).where(and(
+      eq(dataSources.id, id), eq(dataSources.companyId, companyId),
+    )).limit(1);
+    if (!source || !["postgres", "mysql", "mariadb"].includes(source.sourceType)) {
+      throw new Error("External snapshot source is unavailable or has an unsupported type");
+    }
+    const config = await new DataSourceDatabaseConfigService(this.db).resolve(companyId, source);
+    const tables = await this.db.select().from(dataSourceTables).where(and(
+      eq(dataSourceTables.companyId, companyId), eq(dataSourceTables.dataSourceId, id), inArray(dataSourceTables.id, tableIds),
+    ));
+    if (tables.length !== tableIds.length) throw new Error("External snapshot table selection changed after enqueue");
+
+    const syncMode = progress.syncMode === "incremental" ? "incremental" : "full";
+    const tablePolicies = Array.isArray(progress.tablePolicies)
+      ? progress.tablePolicies.filter((value): value is { tableId: string; updatedAtColumn: string; deletedAtColumn?: string } =>
+        !!value && typeof value === "object" && typeof (value as any).tableId === "string"
+          && typeof (value as any).updatedAtColumn === "string"
+          && ((value as any).deletedAtColumn === undefined || typeof (value as any).deletedAtColumn === "string"))
+      : [];
+    const policyByTableId = new Map(tablePolicies.map((policy) => [policy.tableId, policy]));
+    if (syncMode === "incremental" && tableIds.some((tableId) => !policyByTableId.has(tableId))) {
+      throw new Error("Incremental snapshot job is missing a table updated-at policy");
+    }
+    const clickhouse = new ClickhouseService();
+    const dbIntegration = new DatabaseIntegrationService();
+    const publishedTableIds = new Set(
+      Array.isArray(progress.publishedTableIds)
+        ? progress.publishedTableIds.filter((tableId): tableId is string => typeof tableId === "string" && tableIds.includes(tableId))
+        : [],
+    );
+    let completedTables = publishedTableIds.size;
+
+    for (const table of tables) {
+      if (publishedTableIds.has(table.id)) continue;
+      const columns = (Array.isArray(table.schemaDefinition) ? table.schemaDefinition : []) as ColumnDefinition[];
+      const primaryKey = snapshotPrimaryKey(table);
+      if (!primaryKey) throw new Error(`Table '${table.tableName}' no longer has exactly one inspected primary key`);
+      const semanticModel = (table.semanticModel || {}) as Record<string, any>;
+      const previousSnapshot = (semanticModel.externalSnapshot || {}) as Record<string, any>;
+      const policy = policyByTableId.get(table.id);
+      const updatedAtColumn = policy?.updatedAtColumn;
+      const deletedAtColumn = policy?.deletedAtColumn;
+      if (syncMode === "incremental" && (!updatedAtColumn || !columns.some((column) => column.name === updatedAtColumn))) {
+        throw new Error(`Incremental snapshot policy for '${table.tableName}' no longer matches its inspected schema`);
+      }
+      if (deletedAtColumn && !columns.some((column) => column.name === deletedAtColumn)) {
+        throw new Error(`Deleted-at column '${deletedAtColumn}' no longer matches table '${table.tableName}'`);
+      }
+      const savedDeltaTables = Array.isArray(previousSnapshot.deltaTables)
+        ? previousSnapshot.deltaTables.filter((name: unknown): name is string => typeof name === "string")
+        : [];
+      const canUseDelta = syncMode === "incremental"
+        && previousSnapshot.engine === "merge_delta_v1"
+        && previousSnapshot.updatedAtColumn === updatedAtColumn
+        && typeof previousSnapshot.watermarkMicros === "string"
+        && Number.isSafeInteger(table.rowCount)
+        && table.rowCount >= 0
+        && savedDeltaTables.length <= MAX_EXTERNAL_SNAPSHOT_DELTAS;
+      const bootstrap = syncMode === "incremental" && !canUseDelta;
+      if (canUseDelta && savedDeltaTables.length >= MAX_EXTERNAL_SNAPSHOT_DELTAS) {
+        throw new Error("External snapshot reached its delta-table limit; run a full snapshot to compact the source before syncing again");
+      }
+      const generation = Math.max(0, Number(previousSnapshot.syncGeneration) || 0) + 1;
+      const sourceSchema = typeof semanticModel.sourceSchema === "string" && semanticModel.sourceSchema
+        ? semanticModel.sourceSchema
+        : await dbIntegration.resolveTableSchema(config, table.tableName);
+      const clickhouseTable = sourceClickhouseTableName(table);
+      const fullSnapshotTable = snapshotGenerationTableName(clickhouseTable, lease.jobId, table.id, lease.attempt);
+      const ddl = snapshotClickhouseDdl(table, clickhouseTable);
+      const startedAt = new Date();
+      let scannedRows = 0;
+      let cursor: unknown;
+      let incrementalCursor: { updatedAt: unknown; primaryKey: unknown } | undefined;
+      let maximumWatermarkMicros = canUseDelta ? BigInt(previousSnapshot.watermarkMicros as string) : 0n;
+      const useDelta = canUseDelta && !bootstrap;
+      const deltaTableName = snapshotDeltaTableName(clickhouseTable, lease.jobId, table.id, lease.attempt);
+      const targetTable = useDelta ? deltaTableName : fullSnapshotTable;
+      const stagingTableName = `${targetTable}__s_stage`;
+      const pendingPublication = (semanticModel.pendingExternalSnapshot || {}) as Record<string, unknown>;
+      const pendingTarget = pendingPublication.pendingTargetTable;
+      const pendingAttempt = Number(pendingPublication.attempt);
+      const targetPrefixes = [`${clickhouseTable.slice(0, 31)}__g_`, `${clickhouseTable.slice(0, 31)}__d_`];
+      const supersedesPendingAttempt = pendingPublication.jobId !== lease.jobId
+        || (Number.isSafeInteger(pendingAttempt) && pendingAttempt < lease.attempt);
+      const stalePendingTargets = [pendingTarget, pendingPublication.pendingStageTable]
+        .filter((value): value is string => typeof value === "string"
+          && /^[A-Za-z0-9_]{1,120}$/.test(value)
+          && value !== clickhouseTable
+          && targetPrefixes.some((prefix) => value.startsWith(prefix))
+          && supersedesPendingAttempt);
+      const carriedCleanupTargets = [
+        ...(Array.isArray(pendingPublication.cleanupTargets) ? pendingPublication.cleanupTargets : []),
+        ...stalePendingTargets,
+      ].filter((value, index, values): value is string => typeof value === "string"
+        && /^[A-Za-z0-9_]{1,120}$/.test(value)
+        && targetPrefixes.some((prefix) => value.startsWith(prefix))
+        && value !== clickhouseTable
+        && values.indexOf(value) === index)
+        .slice(-8);
+      for (const staleTarget of carriedCleanupTargets) {
+        await clickhouse.execute(`DROP TABLE IF EXISTS \`${staleTarget}\``, clickhouse.getCompanyDatabase(companyId))
+          .catch(() => {});
+      }
+
+      const stagingSemanticModel = {
+        ...semanticModel,
+        pendingExternalSnapshot: {
+          mode: useDelta ? "incremental" : "snapshot",
+          status: "staging",
+          attempt: lease.attempt,
+          pendingTargetTable: targetTable,
+          pendingStageTable: stagingTableName,
+          cleanupTargets: carriedCleanupTargets,
+          startedAt: startedAt.toISOString(),
+          jobId: lease.jobId,
+        },
+      };
+      await this.db.transaction(async (tx) => {
+        await assertDataSourceJobLease(tx, companyId, id, lease);
+        await tx.update(dataSourceTables).set({ semanticModel: stagingSemanticModel })
+          .where(and(eq(dataSourceTables.id, table.id), eq(dataSourceTables.dataSourceId, id), eq(dataSourceTables.companyId, companyId)));
+      });
+
+      await lease.reportProgress?.("snapshot_read", {
+        tableName: table.tableName,
+        completedTables,
+        totalTables: tables.length,
+        rowsScanned: 0,
+        syncMode,
+        bootstrap,
+      });
+
+      const rowStream = async function* (): AsyncGenerator<Record<string, unknown>> {
+        while (true) {
+          const page = await externalQueryAdmission.run(`${companyId}:${id}`, () => useDelta
+            ? dbIntegration.queryUpdatedKeysetPage(config, {
+                schemaName: sourceSchema,
+                tableName: table.tableName,
+                columns: columns.map((column) => column.name),
+                primaryKey,
+                updatedAtColumn: updatedAtColumn!,
+                deletedAtColumn,
+                since: watermarkMicrosToIso((BigInt(previousSnapshot.watermarkMicros as string) - BigInt(EXTERNAL_SNAPSHOT_LOOKBACK_MS) * 1_000n > 0n
+                  ? BigInt(previousSnapshot.watermarkMicros as string) - BigInt(EXTERNAL_SNAPSHOT_LOOKBACK_MS) * 1_000n
+                  : 0n).toString()),
+                after: incrementalCursor,
+                pageSize: EXTERNAL_SNAPSHOT_PAGE_SIZE,
+                signal,
+              })
+            : dbIntegration.queryKeysetPage(config, {
+                schemaName: sourceSchema,
+                tableName: table.tableName,
+                columns: columns.map((column) => column.name),
+                primaryKey,
+                after: cursor,
+                pageSize: EXTERNAL_SNAPSHOT_PAGE_SIZE,
+                signal,
+              }));
+          if (page.rows.length === 0) return;
+          for (const row of page.rows) {
+            const sourceRow = row as Record<string, unknown>;
+            const normalized: Record<string, unknown> = {};
+            for (const column of columns) {
+              const value = sourceRow[column.name];
+              if (value instanceof Date) normalized[column.name] = value.toISOString();
+              else if (typeof value === "bigint") normalized[column.name] = value.toString();
+              else if (Buffer.isBuffer(value)) normalized[column.name] = value.toString("base64");
+              else normalized[column.name] = value ?? null;
+            }
+            if (updatedAtColumn) {
+              const changedAt = sourceRow[SNAPSHOT_SYNC_CHANGE_CURSOR_COLUMN]
+                ?? effectiveChangeTimestamp(sourceRow[updatedAtColumn], deletedAtColumn ? sourceRow[deletedAtColumn] : undefined);
+              const watermarkMicros = timestampEpochMicros(changedAt);
+              if (watermarkMicros > maximumWatermarkMicros) maximumWatermarkMicros = watermarkMicros;
+              normalized[SNAPSHOT_SYNC_VERSION_COLUMN] = incrementalRowVersion(changedAt, generation);
+            } else {
+              normalized[SNAPSHOT_SYNC_VERSION_COLUMN] = 0;
+            }
+            normalized[SNAPSHOT_SYNC_DELETED_COLUMN] = deletedAtColumn && sourceRowIsDeleted(sourceRow[deletedAtColumn]) ? 1 : 0;
+            yield normalized;
+          }
+          const lastRow = page.rows[page.rows.length - 1] as Record<string, unknown>;
+          if (useDelta) incrementalCursor = {
+            updatedAt: lastRow[SNAPSHOT_SYNC_CHANGE_CURSOR_COLUMN]
+              ?? effectiveChangeTimestamp(lastRow[updatedAtColumn!], deletedAtColumn ? lastRow[deletedAtColumn] : undefined),
+            primaryKey: lastRow[primaryKey],
+          };
+          else cursor = lastRow[primaryKey];
+          scannedRows += page.rows.length;
+          if (page.rows.length < EXTERNAL_SNAPSHOT_PAGE_SIZE) return;
+        }
+      };
+
+      const publishProgress = async (insertedRows: number) => {
+        await lease.reportProgress?.(useDelta ? "snapshot_delta_insert" : "snapshot_insert", {
+          tableName: table.tableName,
+          completedTables,
+          totalTables: tables.length,
+          rowsScanned: insertedRows,
+          insertedRows,
+          syncMode,
+        });
+      };
+      const publicationFence = async (insertedRows: number, publish: () => Promise<void>) => {
+        if (!Number.isSafeInteger(insertedRows) || insertedRows < 0) {
+          throw new Error("Snapshot row count exceeds the safe integer range supported by datasource metadata");
+        }
+        const completedAt = new Date();
+        const nextPublishedIds = [...publishedTableIds, table.id];
+        const consistency = useDelta ? "best_effort_updated_at" : "best_effort_keyset";
+        await lease.reportProgress?.("snapshot_publish", {
+          tableName: table.tableName,
+          completedTables,
+          totalTables: tables.length,
+          insertedRows,
+          syncMode,
+          bootstrap: !useDelta,
+        });
+
+        if (useDelta) {
+          const pendingSemanticModel = {
+            ...semanticModel,
+            pendingExternalSnapshot: {
+              mode: "incremental",
+              status: "publishing",
+              attempt: lease.attempt,
+              pendingTargetTable: targetTable,
+              pendingStageTable: stagingTableName,
+              cleanupTargets: carriedCleanupTargets,
+              startedAt: startedAt.toISOString(),
+              publishStartedAt: completedAt.toISOString(),
+              jobId: lease.jobId,
+            },
+          };
+          await this.db.transaction(async (tx) => {
+            await assertDataSourceJobLease(tx, companyId, id, lease);
+            await tx.update(dataSourceTables).set({ semanticModel: pendingSemanticModel })
+              .where(and(eq(dataSourceTables.id, table.id), eq(dataSourceTables.dataSourceId, id), eq(dataSourceTables.companyId, companyId)));
+          });
+          await this.db.transaction(async (tx) => {
+            await assertDataSourceJobLease(tx, companyId, id, lease);
+            await publish();
+            await assertDataSourceJobLease(tx, companyId, id, lease);
+            const nextDeltaTables = insertedRows > 0
+              ? [...savedDeltaTables, deltaTableName]
+              : savedDeltaTables;
+            let rowCount = table.rowCount;
+            if (insertedRows > 0) {
+              const quotedPrimaryKey = `\`${primaryKey.replaceAll("`", "``")}\``;
+              const quotedDelta = `\`${deltaTableName}\``;
+              // Keep the exact logical row count without rescanning the entire
+              // snapshot: only changed keys from this delta are joined to the
+              // prior deduplicated state. The base table is ordered by PK.
+              const countResult = await clickhouse.query<{ row_delta: number | string }>(
+                `SELECT sum(multiIf(d.\`${SNAPSHOT_SYNC_DELETED_COLUMN}\` = 0 AND old._paperclip_row_exists = 0, 1, d.\`${SNAPSHOT_SYNC_DELETED_COLUMN}\` = 1 AND old._paperclip_row_exists = 1, -1, 0)) AS row_delta FROM ${quotedDelta} AS d LEFT JOIN (SELECT ${quotedPrimaryKey} AS ${quotedPrimaryKey}, toUInt8(1) AS _paperclip_row_exists FROM ${snapshotQuerySource(table)} WHERE ${quotedPrimaryKey} IN (SELECT ${quotedPrimaryKey} FROM ${quotedDelta})) AS old USING (${quotedPrimaryKey})`,
+                clickhouse.getCompanyDatabase(companyId),
+              );
+              const rowDelta = Number(countResult.rows[0]?.row_delta ?? 0);
+              if (!Number.isSafeInteger(rowDelta)) throw new Error("ClickHouse returned an invalid incremental snapshot row delta");
+              rowCount = table.rowCount + rowDelta;
+            }
+            if (!Number.isSafeInteger(rowCount) || rowCount < 0) {
+              throw new Error("ClickHouse returned an invalid logical row count for the external snapshot");
+            }
+            await assertDataSourceJobLease(tx, companyId, id, lease);
+            const nextSemanticModel = {
+              ...pendingSemanticModel,
+              clickhouseTable,
+              clickhouseSchema: { ...(semanticModel.clickhouseSchema || {}), createTableDdl: ddl },
+              externalSnapshot: {
+                mode: "snapshot",
+                engine: "merge_delta_v1",
+                status: "ready",
+                syncMode: "incremental",
+                consistency,
+                deleteSemantics: deletedAtColumn ? "soft_delete_column" : "full_reconciliation_required",
+                primaryKey,
+                updatedAtColumn,
+                deletedAtColumn: deletedAtColumn || null,
+                watermarkMicros: maximumWatermarkMicros.toString(),
+                syncGeneration: insertedRows > 0 ? generation : Math.max(0, Number(previousSnapshot.syncGeneration) || 0),
+                deltaTables: nextDeltaTables,
+                rowCount,
+                startedAt: previousSnapshot.startedAt || startedAt.toISOString(),
+                completedAt: previousSnapshot.completedAt || completedAt.toISOString(),
+                lastIncrementalAt: completedAt.toISOString(),
+                jobId: lease.jobId,
+              },
+            };
+            delete (nextSemanticModel as Record<string, unknown>).pendingExternalSnapshot;
+            await tx.update(dataSourceTables).set({
+              rowCount,
+              semanticModel: nextSemanticModel,
+              updatedAt: completedAt,
+            }).where(and(
+              eq(dataSourceTables.id, table.id),
+              eq(dataSourceTables.dataSourceId, id),
+              eq(dataSourceTables.companyId, companyId),
+            ));
+            const jobUpdate = await tx.execute(sql<{ id: string }>`
+              UPDATE data_source_jobs
+              SET progress = COALESCE(progress, '{}'::jsonb) || jsonb_build_object(
+                    'stage', 'snapshot_publish'::text, 'completedTables', ${completedTables + 1}::integer,
+                    'rowsScanned', ${insertedRows}::integer, 'lastPublishedTableId', ${table.id}::text,
+                    'publishedTableIds', ${JSON.stringify(nextPublishedIds)}::text::jsonb,
+                    'lastSnapshotAt', ${completedAt.toISOString()}::text
+                  ),
+                  lease_expires_at = now() + (${30 * 60 * 1000}::integer * interval '1 millisecond'),
+                  updated_at = now()
+              WHERE id = ${lease.jobId} AND company_id = ${companyId} AND data_source_id = ${id}
+                AND status = 'running' AND lease_owner = ${lease.owner} AND attempt = ${lease.attempt}
+                AND lease_expires_at > clock_timestamp()
+              RETURNING id
+            `);
+            if (Array.from(jobUpdate).length !== 1) throw new DataSourceLeaseLostError();
+          });
+          if (insertedRows === 0) {
+            await clickhouse.execute(`DROP TABLE IF EXISTS \`${deltaTableName}\``, clickhouse.getCompanyDatabase(companyId)).catch(() => {});
+          }
+          publishedTableIds.add(table.id);
+          return;
+        }
+
+        const pendingSemanticModel = {
+          ...semanticModel,
+          clickhouseSchema: { ...(semanticModel.clickhouseSchema || {}), createTableDdl: ddl },
+          pendingExternalSnapshot: {
+            mode: "snapshot",
+            status: "publishing",
+            attempt: lease.attempt,
+            pendingTargetTable: targetTable,
+            pendingStageTable: stagingTableName,
+            cleanupTargets: carriedCleanupTargets,
+            startedAt: startedAt.toISOString(),
+            publishStartedAt: completedAt.toISOString(),
+            jobId: lease.jobId,
+          },
+        };
+        await this.db.transaction(async (tx) => {
+          await assertDataSourceJobLease(tx, companyId, id, lease);
+          await tx.update(dataSourceTables).set({ semanticModel: pendingSemanticModel })
+            .where(and(eq(dataSourceTables.id, table.id), eq(dataSourceTables.dataSourceId, id), eq(dataSourceTables.companyId, companyId)));
+        });
+        await this.db.transaction(async (tx) => {
+          await assertDataSourceJobLease(tx, companyId, id, lease);
+          await publish();
+          await assertDataSourceJobLease(tx, companyId, id, lease);
+          const deletedRows = await clickhouse.query<{ row_count: number | string }>(
+            `SELECT count() AS row_count FROM \`${fullSnapshotTable}\` WHERE \`${SNAPSHOT_SYNC_DELETED_COLUMN}\` = 0`,
+            clickhouse.getCompanyDatabase(companyId),
+          );
+          const rowCount = Number(deletedRows.rows[0]?.row_count ?? 0);
+          if (!Number.isSafeInteger(rowCount) || rowCount < 0) throw new Error("ClickHouse returned an invalid snapshot row count");
+          await assertDataSourceJobLease(tx, companyId, id, lease);
+          const nextSemanticModel = {
+            ...pendingSemanticModel,
+            clickhouseTable: fullSnapshotTable,
+            externalSnapshot: {
+              mode: "snapshot",
+              engine: "merge_delta_v1",
+              status: "ready",
+              syncMode,
+              consistency,
+              deleteSemantics: deletedAtColumn ? "soft_delete_column" : "full_reconciliation_required",
+              primaryKey,
+              updatedAtColumn: updatedAtColumn || null,
+              deletedAtColumn: deletedAtColumn || null,
+              watermarkMicros: updatedAtColumn ? maximumWatermarkMicros.toString() : null,
+              syncGeneration: syncMode === "incremental" ? generation : 0,
+              deltaTables: [],
+              rowCount,
+              startedAt: previousSnapshot.startedAt || startedAt.toISOString(),
+              jobId: lease.jobId,
+              completedAt: completedAt.toISOString(),
+              lastFullSnapshotAt: completedAt.toISOString(),
+            },
+          };
+          delete (nextSemanticModel as Record<string, unknown>).pendingExternalSnapshot;
+          await tx.update(dataSourceTables).set({ rowCount, semanticModel: nextSemanticModel, updatedAt: completedAt })
+            .where(and(eq(dataSourceTables.id, table.id), eq(dataSourceTables.dataSourceId, id), eq(dataSourceTables.companyId, companyId)));
+          const jobUpdate = await tx.execute(sql<{ id: string }>`
+            UPDATE data_source_jobs
+            SET progress = COALESCE(progress, '{}'::jsonb) || jsonb_build_object(
+                  'stage', 'snapshot_publish'::text, 'completedTables', ${completedTables + 1}::integer,
+                  'rowsScanned', ${insertedRows}::integer, 'lastPublishedTableId', ${table.id}::text,
+                  'publishedTableIds', ${JSON.stringify(nextPublishedIds)}::text::jsonb,
+                  'lastSnapshotAt', ${completedAt.toISOString()}::text
+                ),
+                lease_expires_at = now() + (${30 * 60 * 1000}::integer * interval '1 millisecond'),
+                updated_at = now()
+            WHERE id = ${lease.jobId} AND company_id = ${companyId} AND data_source_id = ${id}
+              AND status = 'running' AND lease_owner = ${lease.owner} AND attempt = ${lease.attempt}
+              AND lease_expires_at > clock_timestamp()
+            RETURNING id
+          `);
+          if (Array.from(jobUpdate).length !== 1) throw new DataSourceLeaseLostError();
+        });
+        publishedTableIds.add(table.id);
+      };
+
+      const synced = await clickhouse.syncTableFromStream(
+        targetTable,
+        ddl,
+        rowStream(),
+        companyId,
+        publishProgress,
+        publicationFence,
+        undefined,
+        { stagingTableName, signal },
+      );
+      if (synced.insertedCount !== scannedRows) {
+        throw new Error(`ClickHouse received ${synced.insertedCount} rows; external scan counted ${scannedRows}`);
+      }
+      if (!useDelta && savedDeltaTables.length > 0) {
+        const deltaPrefix = `${clickhouseTable.slice(0, 31)}__d_`;
+        const safeDeltaTables = savedDeltaTables.filter((name) =>
+          /^[A-Za-z0-9_]+$/.test(name) && name.startsWith(deltaPrefix),
+        );
+        for (const oldDeltaTable of safeDeltaTables) {
+          await clickhouse.execute(`DROP TABLE IF EXISTS \`${oldDeltaTable}\``, clickhouse.getCompanyDatabase(companyId)).catch((error) => {
+            console.warn(`[DataSourcesService] Could not remove compacted external snapshot delta ${oldDeltaTable}:`,
+              error instanceof Error ? error.message : error);
+          });
+        }
+      }
+      if (!useDelta && clickhouseTable !== fullSnapshotTable && /^[A-Za-z0-9_]+$/.test(clickhouseTable)) {
+        await clickhouse.execute(`DROP TABLE IF EXISTS \`${clickhouseTable}\``, clickhouse.getCompanyDatabase(companyId)).catch((error) => {
+          console.warn(`[DataSourcesService] Could not remove compacted external snapshot base ${clickhouseTable}:`,
+            error instanceof Error ? error.message : error);
+        });
+      }
+      if (useDelta && synced.insertedCount === 0) {
+        await clickhouse.execute(`DROP TABLE IF EXISTS \`${deltaTableName}\``, clickhouse.getCompanyDatabase(companyId)).catch(() => {});
+      }
+      for (const staleTarget of carriedCleanupTargets) {
+        await clickhouse.execute(`DROP TABLE IF EXISTS \`${staleTarget}\``, clickhouse.getCompanyDatabase(companyId))
+          .catch(() => {});
+      }
+      completedTables += 1;
+      await lease.reportProgress?.("snapshot_table_done", {
+        tableName: table.tableName,
+        completedTables,
+        totalTables: tables.length,
+        rowsScanned: synced.insertedCount,
+        syncMode,
+        bootstrap: !useDelta,
+      });
+    }
+    await lease.reportProgress?.("snapshot_done", { completedTables, totalTables: tables.length });
+  }
+
+  /** Queue an offline, resumable migration between the two supported RAG vector spaces. */
+  async enqueueEmbeddingReindex(
+    companyId: string,
+    id: string,
+    targetSpace: EmbeddingSpace,
+    actor: SnapshotActor,
+    requestedGeneration?: string,
+  ): Promise<DataSourceIngestionJob> {
+    const result = await this.db.transaction(async (tx) => {
+      const [source] = await tx.select().from(dataSources).where(and(
+        eq(dataSources.id, id), eq(dataSources.companyId, companyId),
+      )).limit(1).for("update");
+      if (!source) throw notFound(`Data source not found: ${id}`);
+      if (source.sourceType !== "rag_document") throw unprocessable("Embedding reindex is only available for RAG document sources");
+      if (source.status !== "ready") throw conflict("Only a ready RAG datasource can change its active embedding space");
+      if (!await this.embeddingReindexStore.hasEmbeddingSpace(targetSpace)) {
+        throw unprocessable(`The pgvector sidecar for ${targetSpace} is unavailable; run this job on the configured PostgreSQL data plane`);
+      }
+
+      const [chunkCountRow] = await tx.select({ count: sql<number>`count(*)::int` }).from(dataSourceChunks).where(and(
+        eq(dataSourceChunks.companyId, companyId), eq(dataSourceChunks.dataSourceId, id),
+      ));
+      const chunkCount = Number(chunkCountRow?.count || 0);
+      if (chunkCount < 1) throw unprocessable("This RAG datasource has no published chunks to re-embed");
+
+      const [activeJob] = await tx.select({ id: dataSourceJobs.id }).from(dataSourceJobs).where(and(
+        eq(dataSourceJobs.companyId, companyId), eq(dataSourceJobs.dataSourceId, id),
+        inArray(dataSourceJobs.status, ["queued", "running", "cancel_requested"]),
+      )).limit(1);
+      if (activeJob) throw conflict(`Data source ${id} already has an active datasource job`);
+
+      const sourceMetadata = (source.metadata || {}) as Record<string, unknown>;
+      const fromSpace = sourceMetadata.embeddingSpace === "bge-m3"
+        || sourceMetadata.embeddingSpace === "openrouter-text-embedding-3-small"
+        ? sourceMetadata.embeddingSpace as EmbeddingSpace
+        : null;
+      const fromGeneration = typeof sourceMetadata.embeddingGeneration === "string"
+        ? sourceMetadata.embeddingGeneration
+        : fromSpace;
+      const targetGeneration = requestedGeneration || this.embeddingReindexModels.embeddingGeneration(targetSpace);
+      if (!/^[a-zA-Z0-9._:/@-]{1,256}$/.test(targetGeneration)) {
+        throw unprocessable("Target embedding generation must be a short model or revision identifier");
+      }
+      if (requestedGeneration && fromSpace === targetSpace && fromGeneration === targetGeneration) {
+        throw conflict(`Datasource already uses embedding generation ${targetGeneration}`);
+      }
+      const targetCoverage = await this.embeddingReindexStore.embeddingCoverage(companyId, id, targetSpace, targetGeneration, tx);
+      const reuseExistingVectors = requestedGeneration !== undefined
+        && targetCoverage.chunkCount === chunkCount
+        && targetCoverage.embeddingCount === chunkCount;
+
+      const [job] = await tx.insert(dataSourceJobs).values({
+        companyId,
+        dataSourceId: id,
+        jobType: "embedding_reindex",
+        status: "queued",
+        stage: "queued",
+        progress: {
+          fromSpace,
+          fromGeneration,
+          targetSpace,
+          targetGeneration,
+          targetGenerationResolved: requestedGeneration !== undefined,
+          totalChunks: chunkCount,
+          processedChunks: 0,
+          nextChunkId: null,
+          reuseExistingVectors,
+        },
+        idempotencyKey: `embedding-reindex:${id}:${targetSpace}:${randomUUID()}`,
+      }).returning();
+
+      await tx.insert(activityLog).values({
+        companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        action: "data_source.embedding_reindex.queued",
+        entityType: "data_source",
+        entityId: id,
+        agentId: actor.agentId || null,
+        runId: actor.runId || null,
+        details: { jobId: job.id, fromSpace, fromGeneration, targetSpace, targetGeneration, chunkCount, reuseExistingVectors },
+      });
+      return job;
+    });
+    return result as DataSourceIngestionJob;
+  }
+
+  /** Preview or delete stale sidecar vectors while protecting active and rollback generations. */
+  async pruneEmbeddingGenerations(
+    companyId: string,
+    id: string,
+    actor: SnapshotActor,
+    confirm: boolean,
+    expectedGenerations?: Array<{ embeddingSpace: EmbeddingSpace; embeddingGeneration: string }>,
+  ): Promise<{
+    dryRun: boolean;
+    retentionDays: number;
+    cutoff: string;
+    candidates: PrunableEmbeddingGeneration[];
+    candidateVectorRows: number;
+    deletedGenerations: Array<PrunableEmbeddingGeneration & { deletedRows: number }>;
+    deletedRows: number;
+  }> {
+    return this.db.transaction(async (tx) => {
+      const [source] = await tx.select().from(dataSources).where(and(
+        eq(dataSources.id, id), eq(dataSources.companyId, companyId),
+      )).limit(1).for("update");
+      if (!source) throw notFound(`Data source not found: ${id}`);
+      if (source.sourceType !== "rag_document") throw unprocessable("Embedding cleanup is only available for RAG document sources");
+      if (source.status !== "ready") throw conflict("Only a ready RAG datasource can prune retained embedding generations");
+
+      const [activeJob] = await tx.select({ id: dataSourceJobs.id }).from(dataSourceJobs).where(and(
+        eq(dataSourceJobs.companyId, companyId), eq(dataSourceJobs.dataSourceId, id),
+        inArray(dataSourceJobs.status, ["queued", "running", "cancel_requested"]),
+      )).limit(1);
+      if (activeJob) throw conflict(`Data source ${id} has an active datasource job; retry embedding cleanup after it finishes`);
+      if (confirm && (!expectedGenerations || expectedGenerations.length === 0)) {
+        throw unprocessable("Confirmed embedding cleanup must include the generation identities returned by preview");
+      }
+
+      const metadata = (source.metadata || {}) as Record<string, unknown>;
+      const pinned: Array<{ embeddingSpace: EmbeddingSpace; embeddingGeneration: string }> = [];
+      const addPinned = (spaceValue: unknown, generationValue: unknown) => {
+        if (spaceValue !== "bge-m3" && spaceValue !== "openrouter-text-embedding-3-small") return;
+        const generation = typeof generationValue === "string" && generationValue.length > 0
+          ? generationValue
+          : spaceValue;
+        if (!pinned.some((entry) => entry.embeddingSpace === spaceValue && entry.embeddingGeneration === generation)) {
+          pinned.push({ embeddingSpace: spaceValue, embeddingGeneration: generation });
+        }
+      };
+      addPinned(metadata.embeddingSpace, metadata.embeddingGeneration);
+      addPinned(metadata.previousEmbeddingSpace, metadata.previousEmbeddingGeneration);
+
+      const cutoffDate = new Date(Date.now() - EMBEDDING_GENERATION_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+      const eligible = await this.embeddingReindexStore.listPrunableGenerations(
+        companyId, id, cutoffDate, pinned, tx,
+      );
+      const expectedKeys = new Set((expectedGenerations || []).map((entry) => `${entry.embeddingSpace}\0${entry.embeddingGeneration}`));
+      const candidates = confirm
+        ? eligible.filter((entry) => expectedKeys.has(`${entry.embeddingSpace}\0${entry.embeddingGeneration}`))
+        : eligible;
+      const candidateVectorRows = candidates.reduce((total, generation) => total + generation.rowCount, 0);
+      const deletedGenerations: Array<PrunableEmbeddingGeneration & { deletedRows: number }> = [];
+      let deletedRows = 0;
+      if (confirm) {
+        for (const generation of candidates) {
+          const count = await this.embeddingReindexStore.deleteGenerationRows(companyId, id, generation, cutoffDate, tx);
+          deletedGenerations.push({ ...generation, deletedRows: count });
+          deletedRows += count;
+        }
+        await tx.insert(activityLog).values({
+          companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          action: "data_source.embedding_generations.pruned",
+          entityType: "data_source",
+          entityId: id,
+          agentId: actor.agentId || null,
+          runId: actor.runId || null,
+          details: {
+            retentionDays: EMBEDDING_GENERATION_RETENTION_DAYS,
+            cutoff: cutoffDate.toISOString(),
+            candidateVectorRows,
+            deletedRows,
+            generations: deletedGenerations.map(({ embeddingSpace, embeddingGeneration, deletedRows: rows }) => ({
+              embeddingSpace,
+              embeddingGeneration,
+              deletedRows: rows,
+            })),
+          },
+        });
+      }
+      return {
+        dryRun: !confirm,
+        retentionDays: EMBEDDING_GENERATION_RETENTION_DAYS,
+        cutoff: cutoffDate.toISOString(),
+        candidates,
+        candidateVectorRows,
+        deletedGenerations,
+        deletedRows,
+      };
+    });
+  }
+
+  /** Re-embed a datasource in bounded, lease-fenced batches and publish with one metadata-pointer update. */
+  async runEmbeddingReindex(
+    companyId: string,
+    id: string,
+    progress: Record<string, unknown>,
+    lease: DataSourceJobLease,
+  ): Promise<void> {
+    throwIfIngestionAborted(lease);
+    const targetSpace = progress.targetSpace;
+    let targetGeneration = typeof progress.targetGeneration === "string" ? progress.targetGeneration : "";
+    let targetGenerationResolved = progress.targetGenerationResolved !== false;
+    const fromSpace = progress.fromSpace;
+    const fromGeneration = progress.fromGeneration;
+    const expectedChunkCount = Number(progress.totalChunks);
+    if ((targetSpace !== "bge-m3" && targetSpace !== "openrouter-text-embedding-3-small")
+      || !/^[a-zA-Z0-9._:/@-]{1,256}$/.test(targetGeneration)
+      || (fromSpace !== null && fromSpace !== "bge-m3" && fromSpace !== "openrouter-text-embedding-3-small")
+      || (fromGeneration !== null && (typeof fromGeneration !== "string" || !/^[a-zA-Z0-9._:/@-]{1,256}$/.test(fromGeneration)))
+      || !Number.isSafeInteger(expectedChunkCount) || expectedChunkCount < 1) {
+      throw new Error("Embedding reindex job checkpoint is invalid");
+    }
+    if (!await this.embeddingReindexStore.hasEmbeddingSpace(targetSpace)) {
+      throw new Error(`The pgvector sidecar for ${targetSpace} is unavailable`);
+    }
+
+    const [source] = await this.db.select().from(dataSources).where(and(
+      eq(dataSources.id, id), eq(dataSources.companyId, companyId),
+    )).limit(1);
+    if (!source) throw new Error(`Data source not found: ${id}`);
+    if (source.sourceType !== "rag_document" || source.status !== "ready") {
+      throw new Error("Embedding reindex requires a ready RAG document datasource");
+    }
+    const sourceMetadata = (source.metadata || {}) as Record<string, unknown>;
+    const currentSpace = sourceMetadata.embeddingSpace === "bge-m3"
+      || sourceMetadata.embeddingSpace === "openrouter-text-embedding-3-small"
+      ? sourceMetadata.embeddingSpace
+      : null;
+    const currentGeneration = typeof sourceMetadata.embeddingGeneration === "string"
+      ? sourceMetadata.embeddingGeneration
+      : currentSpace;
+    if (currentSpace !== fromSpace || currentGeneration !== fromGeneration) throw new DataSourceLeaseLostError();
+
+    let cursor = typeof progress.nextChunkId === "string" && UUID_PATTERN.test(progress.nextChunkId)
+      ? progress.nextChunkId
+      : null;
+    let processedChunks = Number.isSafeInteger(progress.processedChunks) ? Number(progress.processedChunks) : 0;
+    let modelBackend = typeof progress.modelBackend === "string" ? progress.modelBackend : null;
+    const initiallyCovered = progress.reuseExistingVectors === true;
+    const startingCoverage = initiallyCovered
+      ? await this.embeddingReindexStore.embeddingCoverage(companyId, id, targetSpace, targetGeneration)
+      : null;
+    const reuseCompleteGeneration = Boolean(startingCoverage
+      && startingCoverage.chunkCount === expectedChunkCount
+      && startingCoverage.embeddingCount === expectedChunkCount);
+    if (initiallyCovered && !reuseCompleteGeneration) {
+      cursor = null;
+      processedChunks = 0;
+    }
+
+    if (!reuseCompleteGeneration) {
+      while (true) {
+        throwIfIngestionAborted(lease);
+        const predicates = [
+          eq(dataSourceChunks.companyId, companyId),
+          eq(dataSourceChunks.dataSourceId, id),
+        ];
+        if (cursor) predicates.push(gt(dataSourceChunks.id, cursor));
+        const batch = await this.db.select({
+          id: dataSourceChunks.id,
+          content: dataSourceChunks.content,
+        }).from(dataSourceChunks).where(and(...predicates)).orderBy(dataSourceChunks.id).limit(EMBEDDING_REINDEX_BATCH_SIZE);
+        if (batch.length === 0) break;
+
+        const generated = await this.embeddingReindexModels.embed(batch.map((chunk) => chunk.content), targetSpace);
+        if (generated.space !== targetSpace || typeof generated.generation !== "string"
+          || !/^[a-zA-Z0-9._:/@-]{1,256}$/.test(generated.generation)
+          || (targetGenerationResolved && generated.generation !== targetGeneration)
+          || !generated.vectors || generated.vectors.length !== batch.length) {
+          throw new Error(`Embedding provider did not produce a complete ${targetSpace} batch`);
+        }
+        if (!targetGenerationResolved) {
+          // The first provider response resolves gateway aliases to the model ID
+          // actually used. Persist that identity before writing vectors so a
+          // retried worker cannot silently switch models mid-generation.
+          targetGeneration = generated.generation;
+          targetGenerationResolved = true;
+          await lease.reportProgress?.("embedding_reindex_generation_resolved", {
+            targetSpace,
+            targetGeneration,
+            targetGenerationResolved,
+            nextChunkId: cursor,
+            processedChunks,
+            totalChunks: expectedChunkCount,
+            modelBackend: generated.backend || modelBackend || "unknown",
+          });
+        }
+        modelBackend = generated.backend || modelBackend;
+        const vectors: ReindexVectorInput[] = batch.map((chunk, index) => ({
+          chunkId: chunk.id,
+          companyId,
+          dataSourceId: id,
+          embeddingSpace: targetSpace,
+          embeddingGeneration: targetGeneration,
+          embedding: generated.vectors![index]!,
+        }));
+        await this.embeddingReindexStore.upsertChunkEmbeddings(vectors, { companyId, sourceId: id, lease });
+        cursor = batch[batch.length - 1]!.id;
+        processedChunks += batch.length;
+        await lease.reportProgress?.("embedding_reindex_batch", {
+          targetSpace,
+          targetGeneration,
+          nextChunkId: cursor,
+          processedChunks,
+          totalChunks: expectedChunkCount,
+          modelBackend: modelBackend || "unknown",
+        });
+      }
+    }
+
+    throwIfIngestionAborted(lease);
+    const coverage = await this.embeddingReindexStore.embeddingCoverage(companyId, id, targetSpace, targetGeneration);
+    if (coverage.chunkCount !== expectedChunkCount || coverage.embeddingCount !== expectedChunkCount) {
+      throw new Error(`Target embedding generation is incomplete (${coverage.embeddingCount}/${coverage.chunkCount} chunks)`);
+    }
+    await lease.reportProgress?.("embedding_reindex_publish", {
+      targetSpace,
+      processedChunks: expectedChunkCount,
+      totalChunks: expectedChunkCount,
+      modelBackend: modelBackend || "existing-vector-generation",
+    });
+
+    await this.db.transaction(async (tx) => {
+      await assertDataSourceJobLease(tx, companyId, id, lease);
+      const [lockedSource] = await tx.select().from(dataSources).where(and(
+        eq(dataSources.id, id), eq(dataSources.companyId, companyId),
+      )).limit(1).for("update");
+      if (!lockedSource || lockedSource.sourceType !== "rag_document" || lockedSource.status !== "ready") {
+        throw new DataSourceLeaseLostError();
+      }
+      const lockedMetadata = (lockedSource.metadata || {}) as Record<string, unknown>;
+      const lockedSpace = lockedMetadata.embeddingSpace === "bge-m3"
+        || lockedMetadata.embeddingSpace === "openrouter-text-embedding-3-small"
+        ? lockedMetadata.embeddingSpace
+        : null;
+      const lockedGeneration = typeof lockedMetadata.embeddingGeneration === "string"
+        ? lockedMetadata.embeddingGeneration
+        : lockedSpace;
+      if (lockedSpace !== fromSpace || lockedGeneration !== fromGeneration) throw new DataSourceLeaseLostError();
+
+      const finalCoverage: EmbeddingCoverage = await this.embeddingReindexStore.embeddingCoverage(
+        companyId, id, targetSpace, targetGeneration, tx,
+      );
+      if (finalCoverage.chunkCount !== expectedChunkCount || finalCoverage.embeddingCount !== expectedChunkCount) {
+        throw new Error("Target embedding generation changed before atomic publication");
+      }
+      const now = new Date();
+      const publishedBackend = modelBackend
+        || (targetSpace === "bge-m3" ? "local-bge-m3" : "openrouter");
+      await tx.update(dataSources).set({
+        metadata: {
+          ...lockedMetadata,
+          embeddingSpace: targetSpace,
+          embeddingGeneration: targetGeneration,
+          embeddingBackend: publishedBackend,
+          embeddingStatus: "ready",
+          previousEmbeddingSpace: fromSpace,
+          previousEmbeddingGeneration: fromGeneration,
+          embeddingReindexedAt: now.toISOString(),
+        },
+        updatedAt: now,
+      }).where(and(eq(dataSources.id, id), eq(dataSources.companyId, companyId)));
+      await tx.insert(activityLog).values({
+        companyId,
+        actorType: "system",
+        actorId: "datasource-embedding-worker",
+        action: "data_source.embedding_reindex.published",
+        entityType: "data_source",
+        entityId: id,
+        details: {
+          jobId: lease.jobId,
+          fromSpace,
+          targetSpace,
+          targetGeneration,
+          chunkCount: finalCoverage.chunkCount,
+          modelBackend: publishedBackend,
+        },
+      });
+      await completeDataSourceJobLease(tx, companyId, id, lease);
+    });
+  }
+
+  async enqueueReprocess(companyId: string, id: string): Promise<DataSource> {
+    const result = await this.db.transaction(async (tx) => {
+      const [source] = await tx
+        .select()
+        .from(dataSources)
+        .where(and(eq(dataSources.id, id), eq(dataSources.companyId, companyId)))
+        .limit(1).for("update");
+      if (!source) throw notFound(`Data source not found: ${id}`);
+      if (!source.storagePath) throw unprocessable(`Data source ${id} has no persisted file to reprocess`);
+      const [activeJob] = await tx.select({ id: dataSourceJobs.id }).from(dataSourceJobs).where(and(
+        eq(dataSourceJobs.companyId, companyId), eq(dataSourceJobs.dataSourceId, id),
+        inArray(dataSourceJobs.status, ["queued", "running", "cancel_requested"]),
+      )).limit(1);
+      if (activeJob) throw conflict(`Data source ${id} already has an active ingestion job`);
+      const sourceMetadata = (source.metadata || {}) as Record<string, unknown>;
+      const previousStatus = typeof sourceMetadata.reprocessingPreviousStatus === "string"
+        ? sourceMetadata.reprocessingPreviousStatus
+        : source.status;
+      const queuedMetadata = { ...sourceMetadata, reprocessingPreviousStatus: previousStatus };
+      const [updated] = await tx
+        .update(dataSources)
+        .set({ status: "processing", metadata: queuedMetadata, updatedAt: new Date() })
+        .where(and(eq(dataSources.id, id), eq(dataSources.companyId, companyId)))
+        .returning();
+      const [job] = await tx
+        .insert(dataSourceJobs)
+        .values({
+          companyId,
+          dataSourceId: id,
+          jobType: "ingest_file",
+          status: "queued",
+          stage: "queued",
+          idempotencyKey: `reprocess:${id}:${randomUUID()}`,
+        })
+        .returning();
+      return { updated, job };
+    });
+
+    return {
+      ...(result.updated as any),
+      sourceType: result.updated.sourceType as any,
+      status: result.updated.status as any,
+      ingestionJob: result.job,
+    } as DataSource;
+  }
+
+  async cancelIngestionJob(
+    companyId: string,
+    sourceId: string,
+    jobId: string,
+    actor: SnapshotActor,
+  ): Promise<DataSourceIngestionJob> {
+    return this.db.transaction(async (tx) => {
+      const [job] = await tx.select().from(dataSourceJobs).where(and(
+        eq(dataSourceJobs.id, jobId),
+        eq(dataSourceJobs.companyId, companyId),
+        eq(dataSourceJobs.dataSourceId, sourceId),
+      )).limit(1).for("update");
+      if (!job) throw notFound("Ingestion job not found");
+      if (job.status === "succeeded" || job.status === "failed" || job.status === "cancelled") {
+        throw conflict(`Cannot cancel an ingestion job in ${job.status} state`);
+      }
+      if (job.status === "cancel_requested") return job as DataSourceIngestionJob;
+      if (["publishing", "snapshot_publish", "snapshot_done", "embedding_reindex_publish", "completed"].includes(job.stage)) {
+        throw conflict("The datasource job is publishing its completed version and can no longer be cancelled");
+      }
+
+      const nextStatus = job.status === "queued" ? "cancelled" : "cancel_requested";
+      const nextStage = job.status === "queued" ? "cancelled" : "cancel_requested";
+      const now = new Date();
+      const [updatedJob] = await tx.update(dataSourceJobs).set({
+        status: nextStatus,
+        stage: nextStage,
+        progress: {
+          ...(job.progress || {}),
+          cancelRequestedAt: now.toISOString(),
+          ...(job.status === "queued" ? { cancelledAt: now.toISOString() } : {}),
+        },
+        completedAt: job.status === "queued" ? now : null,
+        updatedAt: now,
+      }).where(and(
+        eq(dataSourceJobs.id, jobId),
+        eq(dataSourceJobs.companyId, companyId),
+        eq(dataSourceJobs.dataSourceId, sourceId),
+      )).returning();
+
+      if (job.jobType === "ingest_file" && job.status === "queued") {
+        const [source] = await tx.select().from(dataSources).where(and(
+          eq(dataSources.id, sourceId), eq(dataSources.companyId, companyId),
+        )).limit(1).for("update");
+        if (source) {
+          const metadata = (source.metadata || {}) as Record<string, unknown>;
+          const priorStatus = metadata.reprocessingPreviousStatus;
+          const restoredStatus = priorStatus === "ready" || priorStatus === "error" || priorStatus === "onboarding"
+            ? priorStatus
+            : "error";
+          const restoredMetadata = { ...metadata };
+          delete restoredMetadata.reprocessingPreviousStatus;
+          await tx.update(dataSources).set({
+            status: restoredStatus,
+            metadata: restoredMetadata,
+            updatedAt: now,
+          }).where(and(eq(dataSources.id, sourceId), eq(dataSources.companyId, companyId)));
+        }
+      }
+
+      await tx.insert(activityLog).values({
+        companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId || null,
+        runId: actor.runId || null,
+        action: job.jobType === "embedding_reindex"
+          ? (job.status === "queued" ? "data_source.embedding_reindex.cancelled" : "data_source.embedding_reindex.cancel_requested")
+          : job.status === "queued" ? "data_source.ingestion.cancelled" : "data_source.ingestion.cancel_requested",
+        entityType: "data_source",
+        entityId: sourceId,
+        details: { jobId, jobType: job.jobType, priorStage: job.stage },
+      });
+      return updatedJob as DataSourceIngestionJob;
+    });
   }
 
   /**
    * Reprocess a single data source by re-running its onboarding pipeline
    */
-  async reprocess(companyId: string, id: string): Promise<DataSource> {
+  async reprocess(companyId: string, id: string, lease: DataSourceJobLease): Promise<DataSource> {
+    throwIfIngestionAborted(lease);
     const ds = await this.getById(companyId, id);
     if (!ds) {
       throw new Error(`Data source not found: ${id}`);
     }
 
-    if (!ds.storagePath || !fs.existsSync(ds.storagePath)) {
+    const storageBackend = (ds.metadata as any)?.storageBackend;
+    if (!ds.storagePath || (storageBackend !== "s3" && !fs.existsSync(ds.storagePath))) {
       throw new Error(`File sumber fisik tidak ditemukan di disk: ${ds.storagePath || "kosong"}`);
     }
-
-    // Clean up existing tables, records, chunks
-    await this.db.delete(dataSourceRecords).where(eq(dataSourceRecords.dataSourceId, id));
-    await this.db.delete(dataSourceTables).where(eq(dataSourceTables.dataSourceId, id));
-    await this.db.delete(dataSourceChunks).where(eq(dataSourceChunks.dataSourceId, id));
-
-    // Reset status to processing
-    await this.db
-      .update(dataSources)
-      .set({ status: "processing", updatedAt: new Date() })
-      .where(and(eq(dataSources.id, id), eq(dataSources.companyId, companyId)));
-
-    const fileBuffer = fs.readFileSync(ds.storagePath);
-    const file = {
-      buffer: fileBuffer,
-      originalname: ds.fileName || `${ds.name}.csv`,
-      mimetype: ds.mimeType || "application/octet-stream",
-      size: ds.fileSize || fileBuffer.length,
+    const loadedMetadata = (ds.metadata as Record<string, unknown> | null) || {};
+    const previousCutoff = reprocessingCutoff(loadedMetadata);
+    const originalMetadata = Object.fromEntries(
+      Object.entries(loadedMetadata).filter(([key]) => !key.startsWith("reprocessing")),
+    );
+    const savedStatus = loadedMetadata.reprocessingPreviousStatus;
+    const originalStatus = typeof savedStatus === "string" ? savedStatus : ds.status;
+    const clockResult = await this.db.execute(sql<{ startedAt: Date | string }>`
+      SELECT clock_timestamp() AS "startedAt"
+    `);
+    const clockRow = Array.from(clockResult as Iterable<{ startedAt: Date | string }>)[0];
+    const processingCutoff = new Date(clockRow?.startedAt ?? Date.now());
+    if (Number.isNaN(processingCutoff.getTime())) throw new Error("Could not establish a datasource reprocessing cutoff");
+    const processingCutoffIso = processingCutoff.toISOString();
+    const processingToken = randomUUID();
+    let publishedCommitted = false;
+    const dropClickhouseTables = async (tables: Array<{ semanticModel: unknown }>) => {
+      const clickhouse = new ClickhouseService();
+      const companyDb = clickhouse.getCompanyDatabase(companyId);
+      for (const table of tables) {
+        const tableName = (table.semanticModel as Record<string, unknown> | null)?.clickhouseTable;
+        if (typeof tableName !== "string" || !/^[a-zA-Z0-9_]+$/.test(tableName)) continue;
+        await clickhouse.execute(`DROP TABLE IF EXISTS \`${tableName}\``, companyDb).catch(() => {});
+      }
     };
 
+    const abandonedTables = previousCutoff
+      ? await this.db.select({ semanticModel: dataSourceTables.semanticModel })
+          .from(dataSourceTables)
+          .where(and(eq(dataSourceTables.dataSourceId, id), gte(dataSourceTables.createdAt, previousCutoff)))
+      : [];
+    const stagedMetadata = {
+      ...originalMetadata,
+      reprocessingStartedAt: processingCutoffIso,
+      reprocessingPreviousStatus: originalStatus,
+      reprocessingToken: processingToken,
+    };
+    await this.db.transaction(async (tx) => {
+      await assertDataSourceJobLease(tx, companyId, id, lease);
+      const [current] = await tx.select({ id: dataSources.id }).from(dataSources)
+        .where(and(eq(dataSources.id, id), eq(dataSources.companyId, companyId))).for("update");
+      if (!current) throw notFound("Datasource was removed before ingestion could start");
+      if (previousCutoff) {
+        await tx.delete(dataSourceTables).where(and(eq(dataSourceTables.dataSourceId, id), gte(dataSourceTables.createdAt, previousCutoff)));
+        await tx.delete(dataSourceChunks).where(and(eq(dataSourceChunks.dataSourceId, id), gte(dataSourceChunks.createdAt, previousCutoff)));
+      }
+      await tx.update(dataSources)
+        .set({ status: "processing", metadata: stagedMetadata, updatedAt: new Date() })
+        .where(and(eq(dataSources.id, id), eq(dataSources.companyId, companyId)));
+    });
+    await dropClickhouseTables(abandonedTables);
+    ds.metadata = stagedMetadata;
+
     const ext = path.extname(ds.fileName || "").toLowerCase().replace(".", "") || "csv";
+    const streamCsv = ds.sourceType === "csv" && (ext === "csv" || ext === "tsv");
+    const streamingThreshold = Number(process.env.DATASOURCE_STREAMING_CSV_THRESHOLD_BYTES || 8 * 1024 * 1024);
+    const streamExcel = ds.sourceType === "excel" && ext === "xlsx" && (ds.fileSize ?? 0) >= streamingThreshold;
+    const streamStructuredFile = streamCsv || streamExcel;
+    const streamRagText = ds.sourceType === "rag_document"
+      && KnowledgeIngestionService.isStreamableTextDocument(ds.fileName || `${ds.name}.${ext}`)
+      && (ds.fileSize ?? 0) >= streamingThreshold;
+    let temporaryPath: string | null = null;
+    let csvSourceFingerprint = typeof originalMetadata.storageSha256 === "string"
+      ? `sha256:${originalMetadata.storageSha256}`
+      : undefined;
 
-    const { OnboardingOrchestratorService } = await import("./onboarding-orchestrator.js");
-    const orchestrator = new OnboardingOrchestratorService(this.db);
+    try {
+      let file: { buffer?: Buffer; filePath?: string; originalname: string; mimetype: string; size: number };
+      await lease.reportProgress?.("source_download", { fileBytes: ds.fileSize ?? 0 });
+      if (storageBackend === "s3" && (streamStructuredFile || streamRagText)) {
+        temporaryPath = path.join(os.tmpdir(), `paperclip-datasource-reprocess-${randomUUID()}.${ext}`);
+        const downloaded = await downloadDataSourceFileToPath(companyId, ds.storagePath, temporaryPath, lease.signal);
+        throwIfIngestionAborted(lease);
+        const expectedSha256 = originalMetadata.storageSha256;
+        if (typeof expectedSha256 === "string" && expectedSha256 !== downloaded.sha256) {
+          throw new Error("Datasource object checksum does not match its stored manifest");
+        }
+        if (ds.fileSize && ds.fileSize !== downloaded.byteSize) {
+          throw new Error("Datasource object size does not match its stored manifest");
+        }
+        csvSourceFingerprint = `sha256:${downloaded.sha256}`;
+        file = {
+          filePath: temporaryPath,
+          originalname: ds.fileName || `${ds.name}.${ext}`,
+          mimetype: ds.mimeType || (streamCsv ? "text/csv" : streamExcel
+            ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            : "text/plain"),
+          size: downloaded.byteSize,
+        };
+      } else if (storageBackend !== "s3" && (streamStructuredFile || streamRagText)) {
+        const stat = fs.statSync(ds.storagePath);
+        csvSourceFingerprint ||= `stat:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+        file = {
+          filePath: ds.storagePath,
+          originalname: ds.fileName || `${ds.name}.${ext}`,
+          mimetype: ds.mimeType || (streamCsv ? "text/csv" : "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+          size: stat.size,
+        };
+      } else {
+        const fileBuffer = storageBackend === "s3"
+          ? await readDataSourceFile(companyId, ds.storagePath, lease.signal)
+          : fs.readFileSync(ds.storagePath);
+        file = {
+          buffer: fileBuffer,
+          originalname: ds.fileName || `${ds.name}.${ext}`,
+          mimetype: ds.mimeType || "application/octet-stream",
+          size: ds.fileSize || fileBuffer.length,
+        };
+      }
 
-    const reprocessed = await (orchestrator as any).executeOnboardingPipeline(
-      companyId,
-      ds,
-      file,
-      { collectionId: ds.collectionId ?? undefined, async: false, skipCorrelation: false },
-      ds.name,
-      ext,
-      ds.sourceType,
-    );
+      await lease.reportProgress?.("pipeline_start", { fileBytes: file.size });
+      throwIfIngestionAborted(lease);
+      const { OnboardingOrchestratorService } = await import("./onboarding-orchestrator.js");
+      const orchestrator = new OnboardingOrchestratorService(this.db);
+      const pipelineResult = await (orchestrator as any).executeOnboardingPipeline(
+        companyId,
+        ds,
+        file,
+        {
+          collectionId: ds.collectionId ?? undefined,
+          async: false,
+          skipCorrelation: true,
+          deferReady: true,
+          jobLease: lease,
+          csvSourceFingerprint: csvSourceFingerprint || `size:${file.size}`,
+        },
+        ds.name,
+        ext,
+        ds.sourceType,
+      );
 
-    return reprocessed;
+      throwIfIngestionAborted(lease);
+      await lease.reportProgress?.("publishing");
+      throwIfIngestionAborted(lease);
+      const published = await this.db.transaction(async (tx) => {
+        await assertDataSourceJobLease(tx, companyId, id, lease);
+        const [ownedSource] = await tx.select({ metadata: dataSources.metadata }).from(dataSources)
+          .where(and(eq(dataSources.id, id), eq(dataSources.companyId, companyId))).for("update");
+        if (ownedSource?.metadata?.reprocessingToken !== processingToken) throw new DataSourceLeaseLostError();
+        // The reprocessing cutoff keeps readers on the old set until this one
+        // transaction removes it and clears the cutoff. A failed replacement
+        // therefore leaves the last complete version queryable.
+        await tx.delete(dataSourceTables).where(and(
+          eq(dataSourceTables.dataSourceId, id),
+          lt(dataSourceTables.createdAt, processingCutoff),
+        ));
+        await tx.delete(dataSourceChunks).where(and(
+          eq(dataSourceChunks.dataSourceId, id),
+          lt(dataSourceChunks.createdAt, processingCutoff),
+        ));
+        const [current] = await tx
+          .select({ metadata: dataSources.metadata })
+          .from(dataSources)
+          .where(and(eq(dataSources.id, id), eq(dataSources.companyId, companyId)))
+          .limit(1);
+        const pipelineMetadata = pipelineResult?.metadata && typeof pipelineResult.metadata === "object"
+          ? pipelineResult.metadata as Record<string, unknown>
+          : (current?.metadata as Record<string, unknown> | null) || {};
+        const nextMetadata = { ...pipelineMetadata };
+        delete nextMetadata.reprocessingStartedAt;
+        delete nextMetadata.reprocessingPreviousStatus;
+        delete nextMetadata.reprocessingToken;
+        const [updated] = await tx
+          .update(dataSources)
+          .set({ status: "ready", metadata: nextMetadata, updatedAt: new Date() })
+          .where(and(eq(dataSources.id, id), eq(dataSources.companyId, companyId)))
+          .returning();
+        await completeDataSourceJobLease(tx, companyId, id, lease);
+        return updated;
+      });
+      publishedCommitted = true;
+      const staleTables = (ds.tables || []).map((table) => ({ semanticModel: table.semanticModel }));
+      await dropClickhouseTables(staleTables);
+      if (ds.collectionId) {
+        try {
+          await this.collectionsService.correlateCollection(companyId, ds.collectionId);
+        } catch (error) {
+          console.warn(`[DataSourcesService] Collection recorrelation after reprocess failed for ${id}:`, error instanceof Error ? error.message : error);
+        }
+      }
+      return (await this.getById(companyId, id)) || (published as any);
+    } catch (error) {
+      if (publishedCommitted) throw error;
+      const cutoffFloor = gte(dataSourceTables.createdAt, processingCutoff);
+      const stagedTables = await this.db
+        .select({ semanticModel: dataSourceTables.semanticModel })
+        .from(dataSourceTables)
+        .where(and(eq(dataSourceTables.dataSourceId, id), cutoffFloor));
+      await this.db.transaction(async (tx) => {
+        await assertDataSourceJobLease(tx, companyId, id, lease, { allowCancelRequested: true });
+        const [ownedSource] = await tx.select({ metadata: dataSources.metadata }).from(dataSources)
+          .where(and(eq(dataSources.id, id), eq(dataSources.companyId, companyId))).for("update");
+        if (ownedSource?.metadata?.reprocessingToken !== processingToken) throw new DataSourceLeaseLostError();
+        await tx.delete(dataSourceTables).where(and(eq(dataSourceTables.dataSourceId, id), gte(dataSourceTables.createdAt, processingCutoff)));
+        await tx.delete(dataSourceChunks).where(and(eq(dataSourceChunks.dataSourceId, id), gte(dataSourceChunks.createdAt, processingCutoff)));
+        await tx.update(dataSources)
+          .set({ status: originalStatus, metadata: originalMetadata, updatedAt: new Date() })
+          .where(and(eq(dataSources.id, id), eq(dataSources.companyId, companyId)));
+      });
+      await dropClickhouseTables(stagedTables);
+      throw error;
+    } finally {
+      if (temporaryPath) fs.rmSync(temporaryPath, { force: true });
+    }
   }
 
   /**
@@ -560,13 +2270,19 @@ export class DataSourcesService {
         and(
           eq(dataSources.companyId, companyId),
           or(eq(dataSources.status, "processing"), eq(dataSources.status, "error")),
+          sql`${dataSources.storagePath} IS NOT NULL`,
+          sql`NOT EXISTS (
+            SELECT 1 FROM data_source_jobs AS active
+            WHERE active.company_id = ${dataSources.companyId} AND active.data_source_id = ${dataSources.id}
+              AND active.status IN ('queued', 'running', 'cancel_requested')
+          )`,
         ),
       );
 
     const results: DataSource[] = [];
     for (const item of stuck) {
       try {
-        const res = await this.reprocess(companyId, item.id);
+        const res = await this.enqueueReprocess(companyId, item.id);
         results.push(res);
       } catch (err: any) {
         console.error(`[DataSourcesService] Failed to reprocess ${item.id}:`, err.message);
@@ -590,6 +2306,12 @@ export class DataSourcesService {
         fn: "sum" | "avg" | "count" | "min" | "max";
         groupBy?: string;
       };
+      mode?: "live" | "snapshot";
+      /** Effective authorization scope supplied by the route after it checks grants. */
+      authzFingerprint?: string;
+      /** Internal recursion guard for cache miss computation. */
+      bypassResultCache?: boolean;
+      signal?: AbortSignal;
     } = {},
   ): Promise<StructuredQueryResult> {
     const [table] = await this.db
@@ -597,103 +2319,338 @@ export class DataSourcesService {
       .from(dataSourceTables)
       .where(and(eq(dataSourceTables.id, tableId), eq(dataSourceTables.companyId, companyId)));
 
-    if (!table) {
-      throw new Error(`Table not found: ${tableId}`);
+    if (!table) throw new Error(`Table not found: ${tableId}`);
+
+    const requestedLimit = options.limit ?? 50;
+    const requestedOffset = options.offset ?? 0;
+    if (!Number.isSafeInteger(requestedLimit) || requestedLimit < 1) {
+      throw new Error("Query limit must be a positive integer");
     }
-
-    const limit = Math.min(options.limit || 50, 500);
-    const offset = options.offset || 0;
-
-    // Check if table belongs to an external database data source
+    if (!Number.isSafeInteger(requestedOffset) || requestedOffset < 0) {
+      throw new Error("Query offset must be a non-negative integer");
+    }
+    const limit = Math.min(requestedLimit, 500);
+    const offset = requestedOffset;
+    const schema = (Array.isArray(table.schemaDefinition) ? table.schemaDefinition : []) as StructuredColumn[];
     const [ds] = await this.db
       .select()
       .from(dataSources)
       .where(and(eq(dataSources.id, table.dataSourceId), eq(dataSources.companyId, companyId)));
+    const processingCutoff = reprocessingCutoff(ds?.metadata);
+    if (processingCutoff && table.createdAt >= processingCutoff) {
+      throw new Error(`Table not found: ${tableId}`);
+    }
 
-    if (ds && (ds.sourceType === "postgres" || ds.sourceType === "mariadb" || ds.sourceType === "mysql")) {
-      const config = (ds.metadata as any)?.rawConfig as DatabaseConnectionConfig;
-      if (config) {
-        const dbIntegration = new DatabaseIntegrationService();
-        const quote = ds.sourceType === "postgres" ? `"` : "`";
-        const quotedTable = `${quote}${table.tableName}${quote}`;
+    const aggregation = options.aggregate;
+    const allowedAggregations = new Set(["sum", "avg", "count", "min", "max"]);
+    if (aggregation) {
+      if (!allowedAggregations.has(aggregation.fn)) throw new Error("Unsupported aggregation function");
+      const metricColumn = schema.find((column) => column.name === aggregation.column);
+      if (!metricColumn) {
+        throw new Error(`Unknown aggregation column: ${aggregation.column}`);
+      }
+      if (aggregation.fn !== "count" && metricColumn.dataType !== "number") {
+        throw new Error(`${aggregation.fn} requires a numeric column: ${aggregation.column}`);
+      }
+      if (aggregation.groupBy && !schema.some((column) => column.name === aggregation.groupBy)) {
+        throw new Error(`Unknown group-by column: ${aggregation.groupBy}`);
+      }
+    }
+    // Validate filter keys/values even on the local compatibility path.
+    compileStructuredFilters(options.filter, schema, "postgres");
 
-        let query = "";
-        if (options.aggregate) {
-          const { column, fn, groupBy } = options.aggregate;
-          const quotedCol = `${quote}${column}${quote}`;
-          const aggFn = fn.toUpperCase();
-          if (groupBy) {
-            const quotedGroup = `${quote}${groupBy}${quote}`;
-            query = `SELECT ${quotedGroup}, ${aggFn}(${quotedCol}) AS ${quote}${fn}_${column}${quote}, COUNT(*) AS ${quote}row_count${quote} FROM ${quotedTable} GROUP BY ${quotedGroup} ORDER BY ${quote}${fn}_${column}${quote} DESC LIMIT ${limit} OFFSET ${offset}`;
-          } else {
-            query = `SELECT ${aggFn}(${quotedCol}) AS ${quote}${fn}_${column}${quote}, COUNT(*) AS ${quote}total_rows${quote} FROM ${quotedTable}`;
-          }
+    const externalDatabase = ds && ["postgres", "mariadb", "mysql"].includes(ds.sourceType);
+    const externalSnapshot = (table.semanticModel as any)?.externalSnapshot;
+    const useExternalSnapshot = externalDatabase && options.mode === "snapshot";
+    if (useExternalSnapshot && externalSnapshot?.status !== "ready") {
+      throw conflict("A published ClickHouse snapshot is not available for this table");
+    }
+    const cacheableResult = ds?.status === "ready" && (
+      ds.sourceType === "csv" || ds.sourceType === "excel" || useExternalSnapshot
+    );
+    if (cacheableResult && !options.bypassResultCache) {
+      const sourceRevision = [
+        ds.updatedAt.toISOString(),
+        table.updatedAt.toISOString(),
+        String(table.rowCount),
+        sourceClickhouseTableName(table),
+        useExternalSnapshot ? String(externalSnapshot.completedAt || "") : "file",
+      ].join(":");
+      const cacheKey = makeDataSourceCacheKey([
+        "structured-query-result",
+        companyId,
+        options.authzFingerprint || "internal-company-scope",
+        table.id,
+        sourceRevision,
+        JSON.stringify({
+          mode: useExternalSnapshot ? "snapshot" : "file",
+          filter: options.filter || null,
+          aggregate: options.aggregate || null,
+          limit,
+          offset,
+        }),
+      ]);
+      const ttlSeconds = Math.max(1, Math.min(300, Number(process.env.DATASOURCE_QUERY_RESULT_CACHE_TTL_SECONDS || 60)));
+      const isStructuredResult = (value: unknown): value is StructuredQueryResult => {
+        if (!value || typeof value !== "object") return false;
+        const result = value as Partial<StructuredQueryResult>;
+        return Array.isArray(result.columns) && Array.isArray(result.rows)
+          && typeof result.totalRows === "number" && Number.isFinite(result.totalRows);
+      };
+      const result = await this.cache.getOrComputeJson(
+        cacheKey,
+        isStructuredResult,
+        ttlSeconds,
+        () => this.queryTable(companyId, tableId, { ...options, bypassResultCache: true }),
+      );
+
+      // A refresh can start while Redis returns a warm value. Re-read the
+      // publication metadata and reject that old key instead of serving it.
+      const [latestTable] = await this.db.select({ semanticModel: dataSourceTables.semanticModel, updatedAt: dataSourceTables.updatedAt })
+        .from(dataSourceTables)
+        .where(and(eq(dataSourceTables.id, tableId), eq(dataSourceTables.companyId, companyId)));
+      const [latestSource] = await this.db.select({ status: dataSources.status, updatedAt: dataSources.updatedAt })
+        .from(dataSources)
+        .where(and(eq(dataSources.id, table.dataSourceId), eq(dataSources.companyId, companyId)));
+      const latestSnapshot = (latestTable?.semanticModel as any)?.externalSnapshot;
+      const publicationStillCurrent = latestTable?.updatedAt?.getTime() === table.updatedAt.getTime()
+        && latestSource?.updatedAt?.getTime() === ds.updatedAt.getTime()
+        && latestSource?.status === "ready"
+        && (!useExternalSnapshot || latestSnapshot?.status === "ready");
+      if (!publicationStillCurrent) {
+        throw conflict("Datasource data changed while this query was running; retry against the latest published version");
+      }
+      return result;
+    }
+    if (externalDatabase && !useExternalSnapshot) {
+      const config = await new DataSourceDatabaseConfigService(this.db).resolve(companyId, ds);
+      const dialect = ds.sourceType === "postgres" ? "postgres" : "mysql";
+      const quote = dialect === "postgres" ? '"' : "`";
+      const quotedTable = quoteDataIdentifier(table.tableName, quote);
+      const filters = compileStructuredFilters(options.filter, schema, dialect);
+      const dbIntegration = new DatabaseIntegrationService();
+      const runExternalQuery = (querySql: string, queryLimit: number, values: unknown[]) =>
+        externalQueryAdmission.run(
+          `${companyId}:${ds.id}`,
+          () => dbIntegration.queryDatabase(config, querySql, queryLimit, values, options.signal),
+          options.signal,
+        );
+
+      if (aggregation) {
+        const { column, fn, groupBy } = aggregation;
+        const quotedColumn = quoteDataIdentifier(column, quote);
+        const alias = quoteDataIdentifier(`${fn}_${column}`, quote);
+        let query: string;
+        if (groupBy) {
+          const quotedGroup = quoteDataIdentifier(groupBy, quote);
+          query = `SELECT ${quotedGroup}, ${fn.toUpperCase()}(${quotedColumn}) AS ${alias}, COUNT(*) AS ${quote}row_count${quote} FROM ${quotedTable}${filters.whereSql} GROUP BY ${quotedGroup} ORDER BY ${alias} DESC LIMIT ${limit} OFFSET ${offset}`;
         } else {
-          query = `SELECT * FROM ${quotedTable} LIMIT ${limit} OFFSET ${offset}`;
+          query = `SELECT ${fn.toUpperCase()}(${quotedColumn}) AS ${alias}, COUNT(*) AS ${quote}total_rows${quote} FROM ${quotedTable}${filters.whereSql}`;
         }
-
-        const queryResult = await dbIntegration.queryDatabase(config, query, limit);
+        const queryResult = await runExternalQuery(query, limit, filters.values);
         return {
           tableId,
           tableName: table.tableName,
           columns: queryResult.columns,
           rows: queryResult.rows,
-          totalRows: table.rowCount || queryResult.rowCount,
+          totalRows: queryResult.rowCount,
         };
       }
+
+      // Window count keeps filtered row totals aligned with the same remote query snapshot.
+      let hiddenTotalColumn = "__paperclip_filtered_total";
+      while (schema.some((column) => column.name === hiddenTotalColumn)) hiddenTotalColumn += "_";
+      const query = `SELECT *, COUNT(*) OVER() AS ${quoteDataIdentifier(hiddenTotalColumn, quote)} FROM ${quotedTable}${filters.whereSql} LIMIT ${limit} OFFSET ${offset}`;
+      const queryResult = await runExternalQuery(query, limit, filters.values);
+      let totalRows = Number((queryResult.rows[0] as any)?.[hiddenTotalColumn] ?? 0);
+      let rows = queryResult.rows.map((row: any) => {
+        const { [hiddenTotalColumn]: _ignored, ...visibleRow } = row;
+        return visibleRow;
+      });
+      const columns = queryResult.columns.filter((column) => column !== hiddenTotalColumn);
+      if (rows.length === 0 && offset > 0) {
+        const countQuery = `SELECT COUNT(*) AS ${quoteDataIdentifier(hiddenTotalColumn, quote)} FROM ${quotedTable}${filters.whereSql}`;
+        const countResult = await runExternalQuery(countQuery, 1, filters.values);
+        totalRows = Number((countResult.rows[0] as any)?.[hiddenTotalColumn] ?? 0);
+      }
+      return { tableId, tableName: table.tableName, columns, rows, totalRows };
     }
 
-    // Try executing aggregated queries on ClickHouse OLAP engine if table is present
-    if (options.aggregate) {
+    let clickhouseError: unknown;
+    if (aggregation) {
       try {
         const clickhouse = new ClickhouseService();
-        const sanitizedName = table.tableName.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
+        const sanitizedName = sourceClickhouseTableName(table);
         const companyDb = clickhouse.getCompanyDatabase(companyId);
         const chTables = await clickhouse.listTables(companyId);
-
         if (chTables.includes(sanitizedName)) {
-          const { column, fn, groupBy } = options.aggregate;
-          const aggFn = fn.toUpperCase();
-          let chQuery = "";
-          if (groupBy) {
-            chQuery = `SELECT \`${groupBy}\`, ${aggFn}(\`${column}\`) AS \`${fn}_${column}\`, count(*) AS \`row_count\` FROM \`${sanitizedName}\` GROUP BY \`${groupBy}\` ORDER BY \`${fn}_${column}\` DESC LIMIT ${limit} OFFSET ${offset}`;
-          } else {
-            chQuery = `SELECT ${aggFn}(\`${column}\`) AS \`${fn}_${column}\`, count(*) AS \`total_rows\` FROM \`${sanitizedName}\``;
-          }
-
-          const chResult = await clickhouse.query(chQuery, companyDb);
+          const { column, fn, groupBy } = aggregation;
+          const filters = compileStructuredFilters(options.filter, schema, "clickhouse");
+          const quotedColumn = quoteDataIdentifier(column, "`");
+          const alias = quoteDataIdentifier(`${fn}_${column}`, "`");
+          const selectGroup = groupBy ? `${quoteDataIdentifier(groupBy, "`")}, ` : "";
+          const groupByClause = groupBy ? ` GROUP BY ${quoteDataIdentifier(groupBy, "`")}` : "";
+          const orderClause = groupBy ? ` ORDER BY ${alias} DESC LIMIT ${limit} OFFSET ${offset}` : "";
+          const fromSql = useExternalSnapshot ? snapshotQuerySource(table) : quoteDataIdentifier(sanitizedName, "`");
+          const query = `SELECT ${selectGroup}${fn.toUpperCase()}(${quotedColumn}) AS ${alias}, count(*) AS ${quoteDataIdentifier(groupBy ? "row_count" : "total_rows", "`")} FROM ${fromSql}${filters.whereSql}${groupByClause}${orderClause}`;
+          const chResult = await clickhouse.query(query, companyDb, filters.clickhouseParams);
           return {
             tableId,
             tableName: table.tableName,
             columns: chResult.columns,
             rows: chResult.rows,
             totalRows: chResult.rowCount,
+            ...(useExternalSnapshot ? {
+              querySource: {
+                mode: "snapshot" as const,
+                snapshotAt: externalSnapshot.lastIncrementalAt || externalSnapshot.completedAt,
+                consistency: externalSnapshot.consistency,
+                syncMode: externalSnapshot.syncMode === "incremental" ? "incremental" as const : "full" as const,
+                watermarkMicros: externalSnapshot.watermarkMicros || null,
+                deleteSemantics: externalSnapshot.deleteSemantics,
+              },
+            } : {}),
           };
         }
-      } catch {
-        // Fall back gracefully to local row processing
+      } catch (error) {
+        clickhouseError = error;
       }
     }
 
-    // Fetch raw records from local storage (CSV/Excel ingestion)
+    const hasFilters = Object.entries(options.filter || {}).some(
+      ([, value]) => value !== undefined && value !== null && value !== "",
+    );
+    if (!aggregation && ds && (ds.sourceType === "csv" || ds.sourceType === "excel" || useExternalSnapshot)) {
+      try {
+        const clickhouse = new ClickhouseService();
+        const sanitizedName = sourceClickhouseTableName(table);
+        const companyDb = clickhouse.getCompanyDatabase(companyId);
+        const allCompanyTables = await this.db
+          .select({ tableName: dataSourceTables.tableName })
+          .from(dataSourceTables)
+          .where(eq(dataSourceTables.companyId, companyId));
+        const usesStableIdentity = typeof (table.semanticModel as any)?.clickhouseTable === "string";
+        const hasLegacyNameCollision = !usesStableIdentity && allCompanyTables.filter(
+          (item) => item.tableName.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase() === sanitizedName,
+        ).length > 1;
+        const chTables = await clickhouse.listTables(companyId);
+
+        if (chTables.includes(sanitizedName) && !hasLegacyNameCollision) {
+          const filters = compileStructuredFilters(options.filter, schema, "clickhouse");
+          let hiddenTotalColumn = "__paperclip_filtered_total";
+          while (schema.some((column) => column.name === hiddenTotalColumn)) hiddenTotalColumn += "_";
+          const quote = String.fromCharCode(96);
+          const hiddenTotal = quoteDataIdentifier(hiddenTotalColumn, quote);
+          const orderColumn = (table.semanticModel as any)?.primaryKey as string | undefined;
+          const orderClause =
+            orderColumn && schema.some((column) => column.name === orderColumn)
+              ? " ORDER BY " + quoteDataIdentifier(orderColumn, quote)
+              : "";
+          const fromSql = useExternalSnapshot
+            ? snapshotQuerySource(table)
+            : quoteDataIdentifier(sanitizedName, quote);
+          const projection = useExternalSnapshot
+            ? schema.map((column) => quoteDataIdentifier(column.name, quote)).join(", ")
+            : "*";
+          const query =
+            "SELECT " + projection +
+            (hasFilters ? ", count() OVER() AS " + hiddenTotal : "") +
+            " FROM " +
+            fromSql +
+            filters.whereSql +
+            orderClause +
+            " LIMIT " +
+            limit +
+            " OFFSET " +
+            offset;
+          const chResult = await clickhouse.query(query, companyDb, filters.clickhouseParams);
+          let totalRows = hasFilters
+            ? Number((chResult.rows[0] as any)?.[hiddenTotalColumn] ?? 0)
+            : table.rowCount;
+          const rows = chResult.rows.map((row: any) => {
+            const { [hiddenTotalColumn]: _ignored, ...visibleRow } = row;
+            return visibleRow;
+          });
+          const columns = rows.length > 0 ? Object.keys(rows[0] as object) : schema.map((column) => column.name);
+          if (hasFilters && rows.length === 0 && offset > 0) {
+            const countQuery =
+              "SELECT count() AS " +
+              hiddenTotal +
+              " FROM " +
+              fromSql +
+              filters.whereSql;
+            const countResult = await clickhouse.query(countQuery, companyDb, filters.clickhouseParams);
+            totalRows = Number((countResult.rows[0] as any)?.[hiddenTotalColumn] ?? 0);
+          }
+          return {
+            tableId,
+            tableName: table.tableName,
+            columns,
+            rows,
+            totalRows,
+            ...(useExternalSnapshot ? {
+              querySource: {
+                mode: "snapshot" as const,
+                snapshotAt: externalSnapshot.lastIncrementalAt || externalSnapshot.completedAt,
+                consistency: externalSnapshot.consistency,
+                syncMode: externalSnapshot.syncMode === "incremental" ? "incremental" as const : "full" as const,
+                watermarkMicros: externalSnapshot.watermarkMicros || null,
+                deleteSemantics: externalSnapshot.deleteSemantics,
+              },
+            } : {}),
+          };
+        }
+        if (hasLegacyNameCollision) {
+          clickhouseError = new Error("ClickHouse table name collision for " + table.tableName);
+        } else if (!chTables.includes(sanitizedName)) {
+          clickhouseError = new Error("ClickHouse table is not synchronized for " + table.tableName);
+        }
+      } catch (error) {
+        clickhouseError = error;
+      }
+    }
+
+    if (useExternalSnapshot) {
+      const reason = clickhouseError instanceof Error ? `: ${clickhouseError.message}` : "";
+      throw new Error(`Published snapshot is unavailable for ${table.tableName}; ClickHouse must be healthy${reason}`);
+    }
+
+    if ((table.semanticModel as any)?.queryStore === "clickhouse_primary") {
+      const reason = clickhouseError instanceof Error ? `: ${clickhouseError.message}` : "";
+      throw new Error(`Complete query is unavailable for ${table.tableName}; ClickHouse must be healthy${reason}`);
+    }
+
+    // PostgreSQL records are a compatibility fallback, never a source for a partial aggregate.
+    if (aggregation && table.rowCount > 1000) {
+      const reason = clickhouseError instanceof Error ? `: ${clickhouseError.message}` : "";
+      throw new Error(`Complete aggregation is unavailable for ${table.tableName}; ClickHouse must be healthy${reason}`);
+    }
+    if (!aggregation && hasFilters && table.rowCount > 1000 && clickhouseError) {
+      const reason = clickhouseError instanceof Error ? clickhouseError.message : "query failed";
+      throw new Error("Complete filtered query is unavailable for " + table.tableName + "; ClickHouse must be healthy: " + reason);
+    }
+    const pageFromLocalStorage = !aggregation && !hasFilters && table.rowCount > 1000;
     const records = await this.db
       .select()
       .from(dataSourceRecords)
       .where(and(eq(dataSourceRecords.tableId, tableId), eq(dataSourceRecords.companyId, companyId)))
       .orderBy(dataSourceRecords.rowIndex)
-      .limit(1000);
+      .limit(aggregation ? 1001 : pageFromLocalStorage ? limit : 1000)
+      .offset(pageFromLocalStorage ? offset : 0);
 
-    let rows = records.map((r) => r.data);
+    if (aggregation && (records.length > 1000 || records.length !== table.rowCount)) {
+      throw new Error(`Cannot aggregate ${table.tableName} from an incomplete PostgreSQL record snapshot`);
+    }
 
-    // Apply filtering if provided
+    let rows = records.map((record) => record.data);
     if (options.filter && Object.keys(options.filter).length > 0) {
       rows = rows.filter((row) => {
-        for (const [key, val] of Object.entries(options.filter!)) {
-          if (val === undefined || val === null || val === "") continue;
-          const rowVal = row[key];
-          if (typeof val === "string" && typeof rowVal === "string") {
-            if (!rowVal.toLowerCase().includes(val.toLowerCase())) return false;
-          } else if (rowVal !== val) {
+        for (const [key, value] of Object.entries(options.filter!)) {
+          if (value === undefined || value === null || value === "") continue;
+          const rowValue = row[key];
+          if (typeof value === "string" && typeof rowValue === "string") {
+            if (!rowValue.toLowerCase().includes(value.toLowerCase())) return false;
+          } else if (rowValue !== value) {
             return false;
           }
         }
@@ -701,42 +2658,37 @@ export class DataSourcesService {
       });
     }
 
-    const totalRows = rows.length;
-
-    // Apply aggregation if requested
-    if (options.aggregate) {
-      const { column, fn, groupBy } = options.aggregate;
+    const totalRows = pageFromLocalStorage ? table.rowCount : rows.length;
+    if (aggregation) {
+      const { column, fn, groupBy } = aggregation;
+      const grouped = new Map<string, { rows: number; nonNullCount: number; values: number[] }>();
       if (groupBy) {
-        const groups: Record<string, { count: number; sum: number; min: number; max: number }> = {};
         for (const row of rows) {
           const groupKey = String(row[groupBy] ?? "Unknown");
-          const val = Number(row[column]) || 0;
-          if (!groups[groupKey]) {
-            groups[groupKey] = { count: 0, sum: 0, min: val, max: val };
+          const state = grouped.get(groupKey) || { rows: 0, nonNullCount: 0, values: [] };
+          state.rows++;
+          if (row[column] !== null && row[column] !== undefined) state.nonNullCount++;
+          const numericValue = Number(row[column]);
+          if (row[column] !== null && row[column] !== undefined && Number.isFinite(numericValue)) {
+            state.values.push(numericValue);
           }
-          groups[groupKey].count++;
-          groups[groupKey].sum += val;
-          if (val < groups[groupKey].min) groups[groupKey].min = val;
-          if (val > groups[groupKey].max) groups[groupKey].max = val;
+          grouped.set(groupKey, state);
         }
-
-        const aggregatedRows = Object.entries(groups).map(([grp, stats]) => {
-          let aggVal = stats.count;
-          if (fn === "sum") aggVal = stats.sum;
-          else if (fn === "avg") aggVal = stats.count > 0 ? stats.sum / stats.count : 0;
-          else if (fn === "min") aggVal = stats.min;
-          else if (fn === "max") aggVal = stats.max;
-
+        const aggregatedRows = [...grouped.entries()].map(([groupKey, state]) => {
+          const values = state.values;
+          let aggregateValue = 0;
+          if (fn === "count") aggregateValue = state.nonNullCount;
+          else if (fn === "sum") aggregateValue = values.reduce((sum, value) => sum + value, 0);
+          else if (fn === "avg") aggregateValue = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+          else if (fn === "min") aggregateValue = values.length ? Math.min(...values) : 0;
+          else if (fn === "max") aggregateValue = values.length ? Math.max(...values) : 0;
           return {
-            [groupBy]: grp,
-            [`${fn}_${column}`]: Number(aggVal.toFixed(2)),
-            row_count: stats.count,
+            [groupBy]: groupKey,
+            [`${fn}_${column}`]: Number(aggregateValue.toFixed(2)),
+            row_count: state.rows,
           };
         });
-
-        // Sort descending by aggregated value
         aggregatedRows.sort((a, b) => (b[`${fn}_${column}`] as number) - (a[`${fn}_${column}`] as number));
-
         return {
           tableId,
           tableName: table.tableName,
@@ -744,50 +2696,31 @@ export class DataSourcesService {
           rows: aggregatedRows.slice(offset, offset + limit),
           totalRows: aggregatedRows.length,
         };
-      } else {
-        // Global aggregation
-        let sum = 0;
-        let count = 0;
-        let min = Infinity;
-        let max = -Infinity;
-
-        for (const row of rows) {
-          const val = Number(row[column]);
-          if (!isNaN(val)) {
-            sum += val;
-            count++;
-            if (val < min) min = val;
-            if (val > max) max = val;
-          }
-        }
-
-        let metricVal = count;
-        if (fn === "sum") metricVal = sum;
-        else if (fn === "avg") metricVal = count > 0 ? sum / count : 0;
-        else if (fn === "min") metricVal = min === Infinity ? 0 : min;
-        else if (fn === "max") metricVal = max === -Infinity ? 0 : max;
-
-        return {
-          tableId,
-          tableName: table.tableName,
-          columns: [`${fn}_${column}`, "total_rows"],
-          rows: [
-            {
-              [`${fn}_${column}`]: Number(metricVal.toFixed(2)),
-              total_rows: count,
-            },
-          ],
-          totalRows: 1,
-          summary: {
-            metrics: {
-              [`${fn}_${column}`]: Number(metricVal.toFixed(2)),
-            },
-          },
-        };
       }
+
+      const selectedValues = rows.map((row) => row[column]);
+      const nonNullCount = selectedValues.filter((value) => value !== null && value !== undefined).length;
+      const values = selectedValues
+        .filter((value) => value !== null && value !== undefined)
+        .map(Number)
+        .filter(Number.isFinite);
+      let aggregateValue = 0;
+      if (fn === "count") aggregateValue = nonNullCount;
+      else if (fn === "sum") aggregateValue = values.reduce((sum, value) => sum + value, 0);
+      else if (fn === "avg") aggregateValue = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+      else if (fn === "min") aggregateValue = values.length ? Math.min(...values) : 0;
+      else if (fn === "max") aggregateValue = values.length ? Math.max(...values) : 0;
+      return {
+        tableId,
+        tableName: table.tableName,
+        columns: [`${fn}_${column}`, "total_rows"],
+        rows: [{ [`${fn}_${column}`]: Number(aggregateValue.toFixed(2)), total_rows: nonNullCount }],
+        totalRows: 1,
+        summary: { metrics: { [`${fn}_${column}`]: Number(aggregateValue.toFixed(2)) } },
+      };
     }
 
-    const columns = (table.schemaDefinition as any[]).map((c) => c.name);
+    const columns = schema.map((column) => column.name);
     return {
       tableId,
       tableName: table.tableName,
@@ -809,10 +2742,18 @@ export class DataSourcesService {
       collectionId?: string;
       agentId?: string;
       limit?: number;
+      /** Effective authorization scope supplied by the route after it checks grants. */
+      authzFingerprint?: string;
+      /** Internal recursion guard for cache miss computation. */
+      bypassRetrievalCache?: boolean;
     } = {},
   ): Promise<KnowledgeSearchResult[]> {
-    const limit = options.limit || 5;
-    const queryEmbedding = KnowledgeIngestionService.generateEmbedding(query);
+    if (options.dataSourceIds && options.dataSourceIds.length === 0) return [];
+    const requestedLimit = options.limit ?? 5;
+    if (!Number.isSafeInteger(requestedLimit) || requestedLimit < 1) {
+      throw new Error("Knowledge search limit must be a positive integer");
+    }
+    const limit = Math.min(20, requestedLimit);
 
     let allowedDataSourceIds: string[] | null = null;
     if (options.agentId) {
@@ -874,6 +2815,168 @@ export class DataSourcesService {
       }
     }
 
+    type QueryEmbeddingBatch = Awaited<ReturnType<RagModelService["embed"]>>;
+    const modelConfig = parseDataSourceModelConfig();
+    const providerFingerprint = [
+      modelConfig.embeddingProvider,
+      modelConfig.bgeEmbeddingRevision,
+      modelConfig.openRouterBaseUrl,
+      modelConfig.openRouterEmbeddingModel,
+    ].join(":");
+    const normalizedQuery = query;
+    const versionConditions = [eq(dataSources.companyId, companyId)];
+    if (allowedDataSourceIds) {
+      if (allowedDataSourceIds.length === 0) return [];
+      versionConditions.push(inArray(dataSources.id, allowedDataSourceIds));
+    }
+    const sourceVersions = await this.db.select({
+      id: dataSources.id,
+      status: dataSources.status,
+      updatedAt: dataSources.updatedAt,
+      metadata: dataSources.metadata,
+    }).from(dataSources).where(and(...versionConditions));
+    const activeSpaceBySourceId = new Map<string, EmbeddingSpace>();
+    const activeGenerationBySourceId = new Map<string, string>();
+    const sourceIdsByGeneration = new Map<string, { space: EmbeddingSpace; sourceIds: string[] }>();
+    const unversionedEmbeddingSourceIds: string[] = [];
+    for (const source of sourceVersions) {
+      const metadata = (source.metadata || {}) as Record<string, unknown>;
+      const space = metadata.embeddingSpace;
+      if (space === "bge-m3" || space === "openrouter-text-embedding-3-small") {
+        const generation = typeof metadata.embeddingGeneration === "string" ? metadata.embeddingGeneration : space;
+        const entry = sourceIdsByGeneration.get(generation) || { space, sourceIds: [] };
+        entry.sourceIds.push(source.id);
+        sourceIdsByGeneration.set(generation, entry);
+        activeSpaceBySourceId.set(source.id, space);
+        activeGenerationBySourceId.set(source.id, generation);
+      } else if (metadata.embeddingStatus !== "unavailable") {
+        // Older sources may predate source-level generation metadata. Keep
+        // their vector sidecars searchable through the configured providers.
+        unversionedEmbeddingSourceIds.push(source.id);
+      }
+    }
+    const configuredSpaces: EmbeddingSpace[] = modelConfig.embeddingProvider === "openrouter"
+      ? ["openrouter-text-embedding-3-small"]
+      : modelConfig.embeddingProvider === "bge"
+        ? ["bge-m3"]
+        : ["bge-m3", "openrouter-text-embedding-3-small"];
+    const modelService = new RagModelService();
+    const querySourcesByGeneration = new Map<string, { space: EmbeddingSpace; sourceIds: string[] }>();
+    for (const space of configuredSpaces) {
+      for (const [generation, entry] of sourceIdsByGeneration) {
+        if (entry.space === space) {
+          querySourcesByGeneration.set(generation, entry);
+        }
+      }
+      if (unversionedEmbeddingSourceIds.length > 0) {
+        const existingLegacy = querySourcesByGeneration.get(space);
+        querySourcesByGeneration.set(space, {
+          space,
+          sourceIds: [...new Set([...(existingLegacy?.sourceIds || []), ...unversionedEmbeddingSourceIds])],
+        });
+      }
+    }
+    const isEmbeddingBatch = (space: EmbeddingSpace) => (value: unknown): value is QueryEmbeddingBatch => {
+      if (!value || typeof value !== "object") return false;
+      const batch = value as Partial<QueryEmbeddingBatch>;
+      if (batch.space !== space || typeof batch.generation !== "string"
+        || !/^[a-zA-Z0-9._:/@-]{1,256}$/.test(batch.generation)) return false;
+      const expectedDimensions = space === "bge-m3" ? 1024 : 1536;
+      return Array.isArray(batch.vectors) && batch.vectors.length === 1 && batch.vectors.every((vector) =>
+        Array.isArray(vector) && vector.length === expectedDimensions
+          && vector.every((entry) => typeof entry === "number" && Number.isFinite(entry)));
+    };
+    const queryEmbeddingBatches = new Map<string, QueryEmbeddingBatch>();
+    const embeddingErrors: unknown[] = [];
+    for (const space of configuredSpaces) {
+      const targetGenerations = [...querySourcesByGeneration.entries()]
+        .filter(([, entry]) => entry.space === space)
+        .map(([generation]) => generation);
+      if (targetGenerations.length === 0) continue;
+      const currentGeneration = modelService.embeddingGeneration(space);
+      const cacheKey = makeDataSourceCacheKey([
+        "query-embedding",
+        companyId,
+        providerFingerprint,
+        currentGeneration,
+        normalizedQuery,
+      ]);
+      try {
+        const ttlSeconds = Number(process.env.DATASOURCE_QUERY_EMBEDDING_CACHE_TTL_SECONDS || 3600);
+        const generated = await this.cache.getOrComputeJson(
+          cacheKey,
+          isEmbeddingBatch(space),
+          ttlSeconds,
+          () => modelService.embed([query], space),
+        );
+        if (generated.vectors?.length && generated.space === space && typeof generated.generation === "string") {
+          // A gateway alias can resolve to a different upstream model over time.
+          // Only query sidecars written by the exact model identity returned now;
+          // unknown/legacy generations stay lexical until explicitly reindexed.
+          for (const generation of targetGenerations) {
+            if (generation === generated.generation) queryEmbeddingBatches.set(generation, generated);
+          }
+        }
+      } catch (error) {
+        embeddingErrors.push(error);
+      }
+    }
+    if (queryEmbeddingBatches.size === 0 && embeddingErrors.length > 0) {
+      console.warn(
+        "[DataSourcesService] Query embedding unavailable; continuing with lexical retrieval:",
+        embeddingErrors[0] instanceof Error ? embeddingErrors[0].message : embeddingErrors[0],
+      );
+    }
+
+    if (!options.bypassRetrievalCache) {
+      const versionFingerprint = sourceVersions
+        .map((source) => `${source.id}:${source.status}:${source.updatedAt.toISOString()}`)
+        .sort()
+        .join("|");
+      const authzFingerprint = options.authzFingerprint || makeDataSourceCacheKey([
+        "rag-effective-access",
+        options.agentId || "internal-company-scope",
+        ...(allowedDataSourceIds ? [...allowedDataSourceIds].sort() : ["all-company-sources"]),
+      ]);
+      const cacheKey = makeDataSourceCacheKey([
+        "rag-retrieval",
+        companyId,
+        authzFingerprint,
+        options.dataSourceId || "all-sources",
+        options.collectionId || "all-collections",
+        options.dataSourceIds ? [...options.dataSourceIds].sort().join(",") : "all-requested-sources",
+        versionFingerprint,
+        providerFingerprint,
+        [...queryEmbeddingBatches.keys()].sort().join(",") || "lexical-only",
+        normalizedQuery,
+        String(limit),
+      ]);
+      const isKnowledgeResultList = (value: unknown): value is KnowledgeSearchResult[] => Array.isArray(value)
+        && value.every((item) => item && typeof item === "object"
+          && typeof item.chunkId === "string" && typeof item.dataSourceId === "string"
+          && typeof item.content === "string" && typeof item.score === "number");
+      const ttlSeconds = Math.max(1, Math.min(300, Number(process.env.DATASOURCE_RETRIEVAL_CACHE_TTL_SECONDS || 60)));
+      const result = await this.cache.getOrComputeJson(
+        cacheKey,
+        isKnowledgeResultList,
+        ttlSeconds,
+        () => this.searchKnowledge(companyId, query, { ...options, bypassRetrievalCache: true }),
+      );
+      const latestVersions = await this.db.select({
+        id: dataSources.id,
+        status: dataSources.status,
+        updatedAt: dataSources.updatedAt,
+      }).from(dataSources).where(and(...versionConditions));
+      const latestFingerprint = latestVersions
+        .map((source) => `${source.id}:${source.status}:${source.updatedAt.toISOString()}`)
+        .sort()
+        .join("|");
+      if (latestFingerprint !== versionFingerprint) {
+        throw conflict("Knowledge sources changed while retrieval was running; retry against the latest published content");
+      }
+      return result;
+    }
+
     const stopWords = new Set([
       "dan", "di", "ke", "dari", "yang", "untuk", "pada", "dengan", "ini", "itu",
       "ada", "apa", "siapa", "aja", "saja", "cek", "isinya", "bisa", "tolong",
@@ -908,7 +3011,11 @@ export class DataSourcesService {
     const queryTerms = effectiveTerms.length > 0 ? effectiveTerms : cleanTerms;
 
     // Fetch candidate chunks
-    let whereClause = eq(dataSourceChunks.companyId, companyId);
+    const activeChunkDuringReprocess = sql`(
+      ${dataSources.metadata}->>'reprocessingStartedAt' IS NULL
+      OR ${dataSourceChunks.createdAt} < (${dataSources.metadata}->>'reprocessingStartedAt')::timestamptz
+    )`;
+    let whereClause = and(eq(dataSourceChunks.companyId, companyId), activeChunkDuringReprocess) as any;
     if (options.dataSourceId) {
       if (allowedDataSourceIds && !allowedDataSourceIds.includes(options.dataSourceId)) {
         return [];
@@ -940,12 +3047,52 @@ export class DataSourcesService {
         content: dataSourceChunks.content,
         tokenCount: dataSourceChunks.tokenCount,
         embedding: dataSourceChunks.embedding,
+        metadata: dataSourceChunks.metadata,
         dataSourceName: dataSources.name,
       })
       .from(dataSourceChunks)
       .innerJoin(dataSources, eq(dataSourceChunks.dataSourceId, dataSources.id))
       .where(candidateWhere)
       .limit(300);
+
+    const vectorScoresBySpace = new Map<string, Map<string, number>>();
+    for (const [generation, embeddingBatch] of queryEmbeddingBatches) {
+      const generationScope = querySourcesByGeneration.get(generation);
+      const sourceIds = generationScope?.sourceIds || [];
+      const vector = embeddingBatch.vectors?.[0];
+      if (!vector || !generationScope) continue;
+      const scores = await this.vectorStore.search({
+        companyId,
+        dataSourceIds: sourceIds,
+        embeddingSpace: generationScope.space,
+        embeddingGeneration: generation,
+        vector,
+        limit: 300,
+      });
+      if (scores) vectorScoresBySpace.set(generation, scores);
+    }
+    const existingChunkIds = new Set(chunks.map((chunk) => chunk.chunkId));
+    const vectorOnlyIds = [...new Set([...vectorScoresBySpace.values()].flatMap((scores) => [...scores.keys()]))]
+      .filter((id) => !existingChunkIds.has(id))
+      .slice(0, 500);
+    if (vectorOnlyIds.length > 0) {
+      const vectorChunks = await this.db
+        .select({
+          chunkId: dataSourceChunks.id,
+          dataSourceId: dataSourceChunks.dataSourceId,
+          title: dataSourceChunks.title,
+          content: dataSourceChunks.content,
+          tokenCount: dataSourceChunks.tokenCount,
+          embedding: dataSourceChunks.embedding,
+          metadata: dataSourceChunks.metadata,
+          dataSourceName: dataSources.name,
+        })
+        .from(dataSourceChunks)
+        .innerJoin(dataSources, eq(dataSourceChunks.dataSourceId, dataSources.id))
+        .where(and(whereClause, inArray(dataSourceChunks.id, vectorOnlyIds)))
+        .limit(500);
+      chunks.push(...vectorChunks);
+    }
 
     // If candidate filtering returned fewer than limit, also pull general chunks
     if (chunks.length < limit && termPredicates.length > 0) {
@@ -957,6 +3104,7 @@ export class DataSourcesService {
           content: dataSourceChunks.content,
           tokenCount: dataSourceChunks.tokenCount,
           embedding: dataSourceChunks.embedding,
+          metadata: dataSourceChunks.metadata,
           dataSourceName: dataSources.name,
         })
         .from(dataSourceChunks)
@@ -973,6 +3121,9 @@ export class DataSourcesService {
     }
 
     const scoredResults: KnowledgeSearchResult[] = [];
+    const lexicalScores = new Map<string, number>();
+    const denseScoresBySpace = new Map<string, Map<string, number>>();
+    for (const generation of queryEmbeddingBatches.keys()) denseScoresBySpace.set(generation, new Map());
 
     for (const chunk of chunks) {
       const contentLower = chunk.content.toLowerCase();
@@ -1011,14 +3162,29 @@ export class DataSourcesService {
 
       // 2. Dense semantic score (cosine similarity)
       let denseScore = 0;
-      if (chunk.embedding && Array.isArray(chunk.embedding)) {
-        denseScore = KnowledgeIngestionService.cosineSimilarity(queryEmbedding, chunk.embedding);
+      const storedEmbeddingSpace = (chunk.metadata as any)?.embeddingSpace as EmbeddingSpace | null | undefined;
+      const storedGeneration = (chunk.metadata as any)?.embeddingGeneration as string | null | undefined;
+      const activeGeneration = activeGenerationBySourceId.get(chunk.dataSourceId) || storedGeneration || storedEmbeddingSpace;
+      const denseScores = denseScoresBySpace.get(activeGeneration || "");
+      const indexedScore = vectorScoresBySpace.get(activeGeneration || "")?.get(chunk.chunkId);
+      if (typeof indexedScore === "number") {
+        denseScore = indexedScore;
+      } else if ((storedGeneration || storedEmbeddingSpace) === activeGeneration) {
+        const queryVector = queryEmbeddingBatches.get(activeGeneration || "")?.vectors?.[0];
+        if (queryVector && chunk.embedding && Array.isArray(chunk.embedding)) {
+          denseScore = KnowledgeIngestionService.cosineSimilarity(queryVector, chunk.embedding);
+        }
       }
+      if (denseScores && denseScore > 0) denseScores.set(chunk.chunkId, denseScore);
 
-      // Combined hybrid score (reciprocal fusion weighted)
+      lexicalScores.set(chunk.chunkId, lexicalScore);
+
+      // Keep candidates from either retrieval path. Final ordering below uses
+      // reciprocal-rank fusion so lexical and cosine score scales are never
+      // treated as directly comparable probabilities.
       const combinedScore = denseScore * 0.3 + Math.min(lexicalScore / 35, 1.0) * 0.7;
 
-      if (combinedScore > 0.05 || lexicalScore > 0) {
+      if (denseScore > 0 || lexicalScore > 0) {
         // Snippet extraction around highest term match density
         let snippet = chunk.content.slice(0, 500) + "...";
         const substantiveTerms = queryTerms.filter((t) => !stopWords.has(t) && t.length > 2);
@@ -1070,7 +3236,26 @@ export class DataSourcesService {
       }
     }
 
-    // Sort by relevance score descending
+    const rankScores = (scores: Map<string, number>): Map<string, number> => {
+      const ranked = [...scores.entries()]
+        .filter(([, score]) => score > 0)
+        .sort((left, right) => right[1] - left[1]);
+      return new Map(ranked.map(([id], index) => [id, index + 1]));
+    };
+    const lexicalRanks = rankScores(lexicalScores);
+    const denseRanksBySpace = new Map([...denseScoresBySpace].map(([space, scores]) => [space, rankScores(scores)]));
+    const rrfScale = (1 + denseRanksBySpace.size) / 61;
+    for (const result of scoredResults) {
+      const lexicalRank = lexicalRanks.get(result.chunkId);
+      const reciprocalRank = (lexicalRank ? 1 / (60 + lexicalRank) : 0)
+        + [...denseRanksBySpace.values()].reduce((sum, ranks) => {
+          const denseRank = ranks.get(result.chunkId);
+          return sum + (denseRank ? 1 / (60 + denseRank) : 0);
+        }, 0);
+      result.score = Number((reciprocalRank / rrfScale).toFixed(4));
+    }
+
+    // Sort by reciprocal-rank fusion score descending
     scoredResults.sort((a, b) => b.score - a.score);
 
     // Deduplicate near-identical chunks (e.g. duplicate uploads or overlapping windows)
@@ -1113,6 +3298,8 @@ export class DataSourcesService {
     dataSourceId: string,
     sqlQuery: string,
     limit?: number,
+    signal?: AbortSignal,
+    options: { params?: unknown[]; statementTimeoutMs?: number } = {},
   ): Promise<SqlQueryResult> {
     const ds = await this.resolveDataSource(companyId, dataSourceId);
 
@@ -1130,13 +3317,16 @@ export class DataSourcesService {
       );
     }
 
-    const config = (ds.metadata as any)?.rawConfig as DatabaseConnectionConfig;
-    if (!config) {
-      throw new Error(`Database connection configuration is missing for data source ${dataSourceId}`);
-    }
+    const config = await new DataSourceDatabaseConfigService(this.db).resolve(companyId, ds);
 
     const dbIntegration = new DatabaseIntegrationService();
-    return dbIntegration.queryDatabase(config, sqlQuery, limit);
+    return externalQueryAdmission.run(
+      `${companyId}:${ds.id}`,
+      () => dbIntegration.queryDatabase(config, sqlQuery, limit, options.params ?? [], signal, {
+        statementTimeoutMs: options.statementTimeoutMs,
+      }),
+      signal,
+    );
   }
 
   /**
@@ -1196,7 +3386,7 @@ export class DataSourcesService {
         .where(and(eq(dataSourceTables.dataSourceId, ds.id), eq(dataSourceTables.companyId, companyId)));
 
       for (const tbl of tables) {
-        const sanitizedName = tbl.tableName.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
+        const sanitizedName = sourceClickhouseTableName(tbl);
         const sModel: any = tbl.semanticModel || {};
         let ddl = sModel.clickhouseSchema?.createTableDdl;
 
@@ -1217,13 +3407,8 @@ export class DataSourcesService {
           const pk = sModel.primaryKey || (cols.length > 0 ? cols[0].name : "");
           const orderClause = pk ? `\`${pk}\`` : "tuple()";
           ddl = `CREATE TABLE IF NOT EXISTS \`${sanitizedName}\` (\n${ddlCols}\n) ENGINE = MergeTree()\nORDER BY (${orderClause});`;
-        } else {
-          // Ensure table name in DDL is sanitized
-          ddl = ddl.replace(
-            /CREATE TABLE IF NOT EXISTS `([^`]+)`/i,
-            `CREATE TABLE IF NOT EXISTS \`${sanitizedName}\``,
-          );
         }
+        ddl = rewriteClickhouseCreateTableName(ddl, sanitizedName);
 
         // Clean any unquoted tuple identifiers in existing DDL (e.g. Tuple(0 Float64, 1 Float64))
         ddl = ddl.replace(/Tuple\(([^)]+)\)/g, (_match: string, inner: string) => {
@@ -1242,7 +3427,22 @@ export class DataSourcesService {
 
         const rows = records.map((r) => r.data as Record<string, unknown>);
 
-        await clickhouse.syncTable(sanitizedName, ddl, rows.length > 0 ? rows : undefined, companyId);
+        const isStructuredFile = ds.sourceType === "csv" || ds.sourceType === "excel";
+        await clickhouse.syncTable(sanitizedName, ddl, isStructuredFile ? rows : rows.length > 0 ? rows : undefined, companyId);
+        if ((sModel.clickhouseTable as string | undefined) !== sanitizedName
+          || sModel.clickhouseSchema?.createTableDdl !== ddl) {
+          await this.db
+            .update(dataSourceTables)
+            .set({
+              semanticModel: {
+                ...sModel,
+                clickhouseTable: sanitizedName,
+                clickhouseSchema: { ...(sModel.clickhouseSchema || {}), createTableDdl: ddl },
+              } as any,
+              updatedAt: new Date(),
+            })
+            .where(and(eq(dataSourceTables.id, tbl.id), eq(dataSourceTables.companyId, companyId)));
+        }
 
         syncedTables.push({
           tableName: tbl.tableName,
@@ -1393,4 +3593,3 @@ export class DataSourcesService {
     return this.getAgentDataSources(companyId, agentId);
   }
 }
-

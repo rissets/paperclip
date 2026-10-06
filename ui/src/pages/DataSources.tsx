@@ -115,7 +115,12 @@ export function DataSources() {
     queryKey: ["data-sources", selectedCompanyId],
     queryFn: () => dataSourcesApi.list(selectedCompanyId!),
     enabled: !!selectedCompanyId,
+    refetchInterval: (query) => query.state.data?.some((source) => source.status === "processing" || source.status === "onboarding") ? 3_000 : false,
   });
+  const recoverableSources = dataSources.filter((source) =>
+    (source.status === "processing" || source.status === "error") && source.storagePath &&
+    source.ingestionJob?.status !== "queued" && source.ingestionJob?.status !== "running",
+  );
 
   const {
     data: collections = [],
@@ -437,18 +442,21 @@ export function DataSources() {
             <Zap className="h-3.5 w-3.5 text-amber-500" />
             {syncClickhouseMutation.isPending ? "Syncing OLAP..." : "Sync ClickHouse"}
           </button>
-          {dataSources.some((d) => d.status === "processing" || d.status === "error") && (
+          {recoverableSources.length > 0 && (
             <button
               onClick={() => reprocessStuckMutation.mutate()}
               disabled={reprocessStuckMutation.isPending}
-              title="Reprocess all data sources currently stuck in processing or error"
+              title="Queue recovery for file sources without an active ingestion job"
               className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs font-medium text-amber-600 dark:text-amber-400 shadow-sm transition-colors hover:bg-amber-500/20 disabled:opacity-50"
             >
               <RefreshCw className={cn("h-3.5 w-3.5", reprocessStuckMutation.isPending && "animate-spin")} />
               {reprocessStuckMutation.isPending
-                ? "Reprocessing..."
-                : `Reprocess Stuck (${dataSources.filter((d) => d.status === "processing" || d.status === "error").length})`}
+                ? "Queueing..."
+                : `Queue Recovery (${recoverableSources.length})`}
             </button>
+          )}
+          {reprocessStuckMutation.isError && (
+            <p role="alert" className="text-sm text-destructive">{reprocessStuckMutation.error.message}</p>
           )}
           <button
             onClick={() => backfillMutation.mutate()}
@@ -661,7 +669,9 @@ export function DataSources() {
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {collections.map((col) => {
                 const tableRelationsCount = col.semanticProfile?.crossTableRelationships?.length || 0;
-                const clickhouseViewsCount = col.semanticProfile?.unifiedClickhouseViews?.length || 0;
+                const clickhouseViewsCount = col.semanticProfile?.unifiedClickhouseViews?.filter(
+                  (view) => view.deploymentStatus === "deployed",
+                ).length || 0;
                 const documentCorrelationsCount = col.semanticProfile?.crossDocumentCorrelations?.length || 0;
 
                 return (

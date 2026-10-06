@@ -80,7 +80,12 @@ export class EnterpriseOrchestratorService {
    * Dynamic System One Decision Plane (TypeSafe Jev 1.13.0) -> Route -> Delegate -> Synthesize
    * Driven by live agents & live data source semantic profiles.
    */
-  async chat(companyId: string, sessionId: string, userQuery: string): Promise<OrchestratorMessage> {
+  async chat(
+    companyId: string,
+    sessionId: string,
+    userQuery: string,
+    options: { dataSourceIds?: string[]; authzFingerprint?: string } = {},
+  ): Promise<OrchestratorMessage> {
     // 0. Ensure enterprise agent roster (cached per company)
     await this.rosterService.ensureEnterpriseRoster(companyId);
 
@@ -93,7 +98,7 @@ export class EnterpriseOrchestratorService {
     });
 
     // 2. Discover available data sources and their tables + semantic profiles
-    const availableSources = await this.db
+    const allAvailableSources = await this.db
       .select({
         id: dataSources.id,
         name: dataSources.name,
@@ -105,13 +110,21 @@ export class EnterpriseOrchestratorService {
       .from(dataSources)
       .where(and(eq(dataSources.companyId, companyId), eq(dataSources.status, "ready")));
 
-    const tables = await this.db
+    const allTables = await this.db
       .select({
         dataSourceId: dataSourceTables.dataSourceId,
         tableName: dataSourceTables.tableName,
       })
       .from(dataSourceTables)
       .where(eq(dataSourceTables.companyId, companyId));
+
+    const allowedDataSourceIds = options.dataSourceIds ? new Set(options.dataSourceIds) : null;
+    const availableSources = allowedDataSourceIds
+      ? allAvailableSources.filter((source) => allowedDataSourceIds.has(source.id))
+      : allAvailableSources;
+    const tables = allowedDataSourceIds
+      ? allTables.filter((table) => allowedDataSourceIds.has(table.dataSourceId))
+      : allTables;
 
     const sourcesWithTables = availableSources.map((s) => ({
       id: s.id,
@@ -156,6 +169,8 @@ export class EnterpriseOrchestratorService {
     if (route === "data_agent" || route === "analytics_engineer_agent" || route === "prediction_agent" || route === "hybrid") {
       const dataResult = await this.dataAgent.answer(companyId, userQuery, {
         collectionId: matchedCollectionId,
+        dataSourceIds: options.dataSourceIds,
+        authzFingerprint: options.authzFingerprint,
       });
       specialistExecutions.push(dataResult);
     }
@@ -164,6 +179,8 @@ export class EnterpriseOrchestratorService {
       const knowledgeResult = await this.knowledgeAgent.answer(companyId, userQuery, {
         dataSourceId: jevDecision.targetSourceId,
         collectionId: matchedCollectionId,
+        dataSourceIds: options.dataSourceIds,
+        authzFingerprint: options.authzFingerprint,
       });
       specialistExecutions.push(knowledgeResult);
     }

@@ -113,6 +113,7 @@ export class AiReasoningService {
 
     this.routerApiKey =
       process.env.RISSET_API_KEY ||
+      process.env.OPENROUTER_API_KEY ||
       process.env.OPENAI_API_KEY ||
       "";
 
@@ -134,7 +135,7 @@ export class AiReasoningService {
       }
     }
 
-    this.defaultModel = "rissets/neural/deepseek-v4.1-flash";
+    this.defaultModel = "rissets/llm-hd/qwen3.8-27b";
   }
 
   /**
@@ -1199,7 +1200,7 @@ Instructions:
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: apiModel.includes("/") ? apiModel : "neural/deepseek-v4.1-flash",
+        model: apiModel.includes("/") ? apiModel : "llm-hd/qwen3.8-27b",
         messages: [{ role: "user", content: prompt }],
         max_tokens: 3500,
       }),

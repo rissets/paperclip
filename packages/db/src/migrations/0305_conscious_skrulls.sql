@@ -1,0 +1,1 @@
+ALTER TABLE "data_source_tables" ALTER COLUMN "row_count" SET DATA TYPE bigint;

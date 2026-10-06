@@ -1,0 +1,5 @@
+ALTER TABLE "data_source_query_jobs" ADD CONSTRAINT "data_source_query_jobs_status_check" CHECK ("data_source_query_jobs"."status" IN ('queued', 'running', 'cancel_requested', 'succeeded', 'failed', 'cancelled'));--> statement-breakpoint
+ALTER TABLE "data_source_query_jobs" ADD CONSTRAINT "data_source_query_jobs_actor_check" CHECK ("data_source_query_jobs"."requested_by_type" IN ('board', 'agent'));--> statement-breakpoint
+ALTER TABLE "data_source_query_jobs" ADD CONSTRAINT "data_source_query_jobs_row_limit_check" CHECK ("data_source_query_jobs"."row_limit" BETWEEN 1 AND 1000);--> statement-breakpoint
+ALTER TABLE "data_source_query_jobs" ADD CONSTRAINT "data_source_query_jobs_statement_timeout_check" CHECK ("data_source_query_jobs"."statement_timeout_ms" BETWEEN 1000 AND 60000);--> statement-breakpoint
+ALTER TABLE "data_source_query_jobs" ADD CONSTRAINT "data_source_query_jobs_result_bytes_check" CHECK ("data_source_query_jobs"."result_bytes" IS NULL OR "data_source_query_jobs"."result_bytes" BETWEEN 0 AND 1048576);

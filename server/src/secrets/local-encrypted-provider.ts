@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { resolveDefaultSecretsKeyFilePath } from "../home-paths.js";
 import type {
@@ -71,7 +71,21 @@ function loadOrCreateMasterKey(): Buffer {
   const dir = path.dirname(keyPath);
   mkdirSync(dir, { recursive: true });
   const generated = randomBytes(32);
-  writeFileSync(keyPath, generated.toString("base64"), { encoding: "utf8", mode: 0o600 });
+  // Publish complete bytes atomically. A second process must read the winner's
+  // key, never overwrite it or observe a partially written file.
+  const temporaryPath = `${keyPath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+  writeFileSync(temporaryPath, generated.toString("base64"), { encoding: "utf8", mode: 0o600, flag: "wx" });
+  try {
+    linkSync(temporaryPath, keyPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const winner = decodeMasterKey(readFileSync(keyPath, "utf8"));
+    if (!winner) throw badRequest(`Invalid secrets master key at ${keyPath}`);
+    enforceKeyFilePermissionsBestEffort(keyPath);
+    return winner;
+  } finally {
+    unlinkSync(temporaryPath);
+  }
   try {
     chmodSync(keyPath, 0o600);
   } catch {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -39,6 +39,10 @@ process.exit(1);
 }
 
 describe("pi_local environment diagnostics", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it("passes a hello probe when model discovery and execution succeed", async () => {
     const root = path.join(
       os.tmpdir(),
@@ -49,6 +53,7 @@ describe("pi_local environment diagnostics", () => {
     await fs.mkdir(binDir, { recursive: true });
     await fs.mkdir(cwd, { recursive: true });
     await writeFakePiCommand(binDir, "success");
+    vi.stubEnv("PI_CODING_AGENT_DIR", path.join(root, "empty-pi-agent"));
 
     const result = await testEnvironment({
       companyId: "company-1",
@@ -80,6 +85,7 @@ describe("pi_local environment diagnostics", () => {
     await fs.mkdir(binDir, { recursive: true });
     await fs.mkdir(cwd, { recursive: true });
     await writeFakePiCommand(binDir, "stale-package");
+    vi.stubEnv("PI_CODING_AGENT_DIR", path.join(root, "empty-pi-agent"));
 
     const result = await testEnvironment({
       companyId: "company-1",

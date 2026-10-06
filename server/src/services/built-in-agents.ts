@@ -9,6 +9,7 @@ import type { Db } from "@paperclipai/db";
 import { activityLog, agents, builtInManagedResources, companies, issueThreadInteractions, issues, routines, routineTriggers } from "@paperclipai/db";
 import { syncRoutineVariablesWithTemplate } from "@paperclipai/shared";
 import type { Agent, Approval, CompanySkill, PermissionKey, Routine, RoutineTrigger, RoutineVariable } from "@paperclipai/shared";
+import { DEFAULT_PI_LOCAL_MODEL } from "@paperclipai/adapter-pi-local";
 import { conflict, HttpError, notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
 import { adoptAgentFiles, agentFilePath, fileHash, readAgentFile, snapshotAgentFiles } from "./agent-file-store.js";
@@ -149,6 +150,10 @@ export interface RequiredBuiltInAgent {
 }
 
 const BUILT_IN_AGENT_KEY_PATTERN = /^[a-z][a-z0-9_-]*$/;
+const PREVIOUS_PI_BUILT_IN_DEFAULT_MODELS = new Set([
+  "rissets/neural/deepseek-v4.1-flash",
+  "rissets/bedrock-aws/zai.glm-5",
+]);
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -601,7 +606,7 @@ const DEFINITIONS = validateBuiltInAgentDefinitions([
     allowedAdapterTypes: ["pi_local", "codex_local", "claude_local", "gemini_local", "opencode_local", "cursor_local", "process"],
     defaultAdapterType: "pi_local",
     defaultAdapterConfig: {
-      model: "rissets/neural/deepseek-v4.1-flash",
+      model: DEFAULT_PI_LOCAL_MODEL,
     },
     defaultBudgetMonthlyCents: 0,
     defaultSkillKeys: [
@@ -629,7 +634,7 @@ const DEFINITIONS = validateBuiltInAgentDefinitions([
     allowedAdapterTypes: ["pi_local", "codex_local", "claude_local", "gemini_local", "opencode_local", "cursor_local", "process"],
     defaultAdapterType: "pi_local",
     defaultAdapterConfig: {
-      model: "rissets/bedrock-aws/zai.glm-5",
+      model: DEFAULT_PI_LOCAL_MODEL,
     },
     defaultBudgetMonthlyCents: 0,
     defaultSkillKeys: [
@@ -657,7 +662,7 @@ const DEFINITIONS = validateBuiltInAgentDefinitions([
     allowedAdapterTypes: ["pi_local", "codex_local", "claude_local", "gemini_local", "opencode_local", "cursor_local", "process"],
     defaultAdapterType: "pi_local",
     defaultAdapterConfig: {
-      model: "rissets/bedrock-aws/zai.glm-5",
+      model: DEFAULT_PI_LOCAL_MODEL,
     },
     defaultBudgetMonthlyCents: 0,
     defaultSkillKeys: [
@@ -685,7 +690,7 @@ const DEFINITIONS = validateBuiltInAgentDefinitions([
     allowedAdapterTypes: ["pi_local", "codex_local", "claude_local", "gemini_local", "opencode_local", "cursor_local", "process"],
     defaultAdapterType: "pi_local",
     defaultAdapterConfig: {
-      model: "rissets/neural/deepseek-v4.1-flash",
+      model: DEFAULT_PI_LOCAL_MODEL,
     },
     defaultBudgetMonthlyCents: 0,
     defaultSkillKeys: [
@@ -715,7 +720,7 @@ const DEFINITIONS = validateBuiltInAgentDefinitions([
     allowedAdapterTypes: ["pi_local", "codex_local", "claude_local", "gemini_local", "opencode_local", "cursor_local", "process"],
     defaultAdapterType: "pi_local",
     defaultAdapterConfig: {
-      model: "rissets/neural/deepseek-v4.1-flash",
+      model: DEFAULT_PI_LOCAL_MODEL,
     },
     defaultBudgetMonthlyCents: 0,
     defaultSkillKeys: [
@@ -2070,7 +2075,13 @@ export function builtInAgentService(db: Db) {
       && !existingPendingApproval
       && input.adapterType === undefined
       && input.adapterConfig === undefined
-      && hasCompleteAdapterConfig(existing.adapterType, existing.adapterConfig),
+      && hasCompleteAdapterConfig(existing.adapterType, existing.adapterConfig)
+      && !(
+        existing.adapterType === "pi_local"
+        && isPlainRecord(existing.adapterConfig)
+        && typeof existing.adapterConfig.model === "string"
+        && PREVIOUS_PI_BUILT_IN_DEFAULT_MODELS.has(existing.adapterConfig.model.trim())
+      ),
     );
     const resolvedInput = existingPendingApproval || preserveExistingAdapter
       ? input

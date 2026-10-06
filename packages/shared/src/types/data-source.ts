@@ -9,7 +9,22 @@ export type DataSourceType =
   | "api_rest"
   | "mqtt_iot"
   | "cctv_feed";
-export type DataSourceStatus = "onboarding" | "processing" | "ready" | "error";
+export type DataSourceStatus = "uploading" | "onboarding" | "processing" | "ready" | "error";
+
+export type DataSourceUploadSessionStatus = "starting" | "uploading" | "completing" | "verifying" | "completed" | "aborted" | "expired" | "cleanup_pending" | "failed";
+
+export interface DataSourceUploadSession {
+  id: string;
+  companyId: string;
+  fileName: string;
+  expectedBytes: number;
+  partSize: number;
+  partCount: number;
+  uploadedParts: Array<{ partNumber: number; byteSize: number; sha256: string }>;
+  status: DataSourceUploadSessionStatus;
+  expiresAt: string;
+  dataSourceId?: string | null;
+}
 
 export interface DatabaseConnectionConfig {
   type: "postgres" | "mariadb" | "mysql" | "clickhouse";
@@ -150,8 +165,10 @@ export interface DatabaseConnectionTestResult {
 
 export interface TableRelation {
   sourceTable: string;
+  sourceTableId?: string;
   sourceColumn: string;
   targetTable: string;
+  targetTableId?: string;
   targetColumn: string;
   relationType: "one_to_many" | "many_to_one" | "one_to_one";
 }
@@ -252,6 +269,9 @@ export interface UnifiedClickhouseView {
   description: string;
   joinSql: string;
   sourceTables: string[];
+  sourceTableIds?: string[];
+  deploymentStatus?: "deployed" | "not_deployed" | "failed";
+  deploymentMessage?: string;
 }
 
 export interface CollectionSemanticProfile {
@@ -287,6 +307,43 @@ export interface DataSourceCollection {
   updatedAt: string | Date;
 }
 
+export interface DataSourceIngestionJob {
+  id: string;
+  jobType?: string;
+  status: "queued" | "running" | "cancel_requested" | "succeeded" | "failed" | "cancelled";
+  stage: string;
+  attempt: number;
+  maxAttempts: number;
+  progress: Record<string, unknown>;
+  lastError: string | null;
+  createdAt: string | Date;
+  updatedAt: string | Date;
+  completedAt: string | Date | null;
+}
+
+export interface DataSourceQueryJob {
+  id: string;
+  companyId: string;
+  dataSourceId: string;
+  status: "queued" | "running" | "cancel_requested" | "succeeded" | "failed" | "cancelled";
+  queryFingerprint: string;
+  rowLimit: number;
+  statementTimeoutMs: number;
+  lastError: string | null;
+  resultBytes: number | null;
+  resultExpiresAt: string | Date | null;
+  createdAt: string | Date;
+  updatedAt: string | Date;
+  completedAt: string | Date | null;
+}
+
+export interface DataSourceQueryResult {
+  columns: string[];
+  rows: Record<string, unknown>[];
+  rowCount: number;
+  executionTimeMs: number;
+}
+
 export interface DataSource {
   id: string;
   companyId: string;
@@ -304,6 +361,7 @@ export interface DataSource {
   semanticProfile?: DataSourceSemanticProfile | null;
   tables?: DataSourceTable[];
   chunks?: DataSourceChunk[];
+  ingestionJob?: DataSourceIngestionJob | null;
   createdAt: string | Date;
   updatedAt: string | Date;
 }
@@ -360,6 +418,14 @@ export interface StructuredQueryResult {
   columns: string[];
   rows: Record<string, unknown>[];
   totalRows: number;
+  querySource?: {
+    mode: "live" | "snapshot";
+    snapshotAt?: string;
+    consistency?: "best_effort_keyset" | "best_effort_updated_at";
+    syncMode?: "full" | "incremental";
+    watermarkMicros?: string | null;
+    deleteSemantics?: "soft_delete_column" | "full_reconciliation_required";
+  };
   summary?: {
     metrics: Record<string, number>;
   };

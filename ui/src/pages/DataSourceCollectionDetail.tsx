@@ -202,6 +202,7 @@ export function DataSourceCollectionDetail() {
   const crossDocCorrelations: CrossDocumentCorrelation[] = profile?.crossDocumentCorrelations || [];
   const crossModalCorrelations: CrossModalCorrelation[] = profile?.crossModalCorrelations || [];
   const unifiedViews: UnifiedClickhouseView[] = profile?.unifiedClickhouseViews || [];
+  const deployedUnifiedViewCount = unifiedViews.filter((view) => view.deploymentStatus === "deployed").length;
   const suggestedQueries: SuggestedQueryTemplate[] = profile?.suggestedQueries || [];
   const processingSources: DataSource[] = dataSourcesList.filter(
     (ds) => ds.status === "processing" || ds.status === "onboarding",
@@ -348,7 +349,7 @@ export function DataSourceCollectionDetail() {
             {crossTableRelationships.length}
           </div>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            {unifiedViews.length} ClickHouse views
+            {deployedUnifiedViewCount} deployed ClickHouse views
           </p>
         </div>
 
@@ -410,7 +411,7 @@ export function DataSourceCollectionDetail() {
           }`}
         >
           <FileCode className="h-4 w-4" />
-          Unified SQL & ClickHouse ({unifiedViews.length})
+          Unified SQL & ClickHouse ({deployedUnifiedViewCount})
         </button>
       </div>
 
@@ -767,44 +768,55 @@ export function DataSourceCollectionDetail() {
                         {view.viewName}
                       </h3>
                       <p className="text-xs text-muted-foreground">{view.description}</p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {view.deploymentStatus === "deployed"
+                          ? "Deployed in this company’s ClickHouse database."
+                          : view.deploymentMessage || "Not deployed; source tables may not be synchronized to ClickHouse."}
+                      </p>
                     </div>
-                    <button
-                      onClick={() => copyToClipboard(view.joinSql, i)}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-muted px-2.5 py-1 text-xs font-medium text-foreground hover:bg-muted/80 transition-colors"
-                    >
-                      {copiedViewIndex === i ? (
-                        <>
-                          <Check className="h-3.5 w-3.5 text-emerald-500" />
-                          Copied
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="h-3.5 w-3.5" />
-                          Copy DDL
-                        </>
-                      )}
-                    </button>
+                    {view.deploymentStatus === "deployed" && (
+                      <button
+                        onClick={() => copyToClipboard(view.joinSql, i)}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-muted px-2.5 py-1 text-xs font-medium text-foreground hover:bg-muted/80 transition-colors"
+                      >
+                        {copiedViewIndex === i ? (
+                          <>
+                            <Check className="h-3.5 w-3.5 text-emerald-500" />
+                            Copied
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="h-3.5 w-3.5" />
+                            Copy DDL
+                          </>
+                        )}
+                      </button>
+                    )}
                   </div>
 
-                  <pre className="p-3 rounded-lg bg-muted text-foreground font-mono text-xs overflow-x-auto whitespace-pre-wrap">
-                    {view.joinSql}
-                  </pre>
+                  {view.deploymentStatus === "deployed" && (
+                    <pre className="p-3 rounded-lg bg-muted text-foreground font-mono text-xs overflow-x-auto whitespace-pre-wrap">
+                      {view.joinSql}
+                    </pre>
+                  )}
 
                   <div className="flex items-center justify-between pt-2">
                     <span className="text-xs text-muted-foreground">
                       Sources: {view.sourceTables.join(", ")}
                     </span>
-                    <button
-                      onClick={() => {
-                        const selectSql = `SELECT * FROM ${view.viewName} LIMIT 10;`;
-                        setActiveSql(selectSql);
-                        runSqlQuery(selectSql);
-                      }}
-                      className="inline-flex items-center gap-1.5 text-xs font-semibold text-primary hover:underline"
-                    >
-                      <Play className="h-3 w-3" />
-                      Preview View Data
-                    </button>
+                    {view.deploymentStatus === "deployed" && (
+                      <button
+                        onClick={() => {
+                          const selectSql = `SELECT * FROM ${view.viewName} LIMIT 10;`;
+                          setActiveSql(selectSql);
+                          runSqlQuery(selectSql);
+                        }}
+                        className="inline-flex items-center gap-1.5 text-xs font-semibold text-primary hover:underline"
+                      >
+                        <Play className="h-3 w-3" />
+                        Preview View Data
+                      </button>
+                    )}
                   </div>
                 </div>
               ))}

@@ -1,6 +1,9 @@
 import type {
   DataSource,
   DataSourceCollection,
+  DataSourceIngestionJob,
+  DataSourceEmbeddingReindexRequest,
+  DataSourceUploadSession,
   CollectionSemanticProfile,
   DatabaseConnectionConfig,
   DatabaseConnectionTestResult,
@@ -10,13 +13,159 @@ import type {
   SqlQueryResult,
   StructuredQueryResult,
 } from "@paperclipai/shared";
-import { api } from "./client";
+import { ApiError, api } from "./client";
 
 export interface UploadDataSourceResponse extends DataSource {
   dataSources?: DataSource[];
   count?: number;
   message?: string;
-  collectionId?: string;
+  collectionId?: string | null;
+}
+
+const RESUMABLE_UPLOAD_THRESHOLD = 16 * 1024 * 1024;
+const uploadResumeKey = (companyId: string, file: File, collectionId?: string) =>
+  `paperclip:data-source-upload:${companyId}:${collectionId || "none"}:${file.name}:${file.size}:${file.lastModified}`;
+
+async function sha256Blob(blob: Blob): Promise<string> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) throw new Error("Secure browser hashing is unavailable; open Paperclip over HTTPS to upload large files");
+  const digest = await subtle.digest("SHA-256", await blob.arrayBuffer());
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function readUploadResumeId(key: string): string | null {
+  try { return globalThis.localStorage?.getItem(key) || null; } catch { return null; }
+}
+
+function writeUploadResumeId(key: string, id: string | null): void {
+  try {
+    if (!globalThis.localStorage) return;
+    if (id) globalThis.localStorage.setItem(key, id);
+    else globalThis.localStorage.removeItem(key);
+  } catch { /* The server session remains recoverable through its normal expiry cleanup. */ }
+}
+
+async function uploadOneResumably(
+  companyId: string,
+  file: File,
+  options: { name?: string; description?: string; collectionId?: string },
+): Promise<UploadDataSourceResponse> {
+  const key = uploadResumeKey(companyId, file, options.collectionId);
+  const sessionPath = (id: string) => `/companies/${encodeURIComponent(companyId)}/data-source-upload-sessions/${encodeURIComponent(id)}`;
+  const createSession = () => api.post<DataSourceUploadSession>(`/companies/${encodeURIComponent(companyId)}/data-source-upload-sessions`, {
+    fileName: file.name,
+    contentType: file.type || "application/octet-stream",
+    expectedBytes: file.size,
+    ...(options.name ? { name: options.name } : {}),
+    ...(options.description ? { description: options.description } : {}),
+    ...(options.collectionId ? { collectionId: options.collectionId } : {}),
+  });
+  let session: DataSourceUploadSession | null = null;
+  const existingId = readUploadResumeId(key);
+  if (existingId) {
+    try {
+      const existing = await api.get<DataSourceUploadSession>(sessionPath(existingId));
+      if (existing.fileName === file.name && existing.expectedBytes === file.size && ["uploading", "completing", "verifying", "completed"].includes(existing.status)) {
+        session = existing;
+      } else writeUploadResumeId(key, null);
+    } catch { writeUploadResumeId(key, null); }
+  }
+  const clientPartHashes = new Map<number, string>();
+  if (session) {
+    for (const part of session.uploadedParts) {
+      const start = (part.partNumber - 1) * session.partSize;
+      const end = Math.min(file.size, start + session.partSize);
+      const localSha256 = await sha256Blob(file.slice(start, end));
+      if (localSha256 !== part.sha256) {
+        if (session.status === "uploading") await api.delete(`${sessionPath(session.id)}`);
+        writeUploadResumeId(key, null);
+        clientPartHashes.clear();
+        session = null;
+        break;
+      }
+      clientPartHashes.set(part.partNumber, localSha256);
+    }
+  }
+  if (!session) {
+    session = await createSession();
+    writeUploadResumeId(key, session.id);
+  }
+
+  const uploaded = new Set(session.uploadedParts.map(part => part.partNumber));
+  const partNumbers = Array.from({ length: session.partCount }, (_, index) => index + 1).filter(part => !uploaded.has(part));
+  let next = 0;
+  const transferPart = async (partNumber: number) => {
+    const start = (partNumber - 1) * session!.partSize;
+    const blob = file.slice(start, Math.min(file.size, start + session!.partSize));
+    const partSha256 = await sha256Blob(blob);
+    clientPartHashes.set(partNumber, partSha256);
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        await api.putRaw(`${sessionPath(session!.id)}/parts/${partNumber}`, blob);
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 250 * (2 ** attempt)));
+      }
+    }
+    throw lastError;
+  };
+  const workers = Array.from({ length: Math.min(3, partNumbers.length) }, async () => {
+    while (next < partNumbers.length) {
+      const partNumber = partNumbers[next++];
+      await transferPart(partNumber);
+    }
+  });
+  await Promise.all(workers);
+
+  const partSha256s = Array.from({ length: session.partCount }, (_, index) => clientPartHashes.get(index + 1));
+  if (partSha256s.some((partSha256): partSha256 is undefined => partSha256 === undefined)) {
+    throw new Error("Could not verify every uploaded part before completing the datasource upload");
+  }
+  const result = await api.post<UploadDataSourceResponse>(`${sessionPath(session.id)}/complete`, { partSha256s });
+  writeUploadResumeId(key, null);
+  return result;
+}
+
+async function uploadMany(
+  companyId: string,
+  files: File[],
+  options: { name?: string; description?: string; collectionId?: string },
+  endpoint: string,
+): Promise<UploadDataSourceResponse> {
+  if (!files.some(file => file.size >= RESUMABLE_UPLOAD_THRESHOLD)) {
+    const form = new FormData();
+    for (const file of files) form.append("files", file);
+    if (options.name) form.append("name", options.name);
+    if (options.description) form.append("description", options.description);
+    if (options.collectionId) form.append("collectionId", options.collectionId);
+    return api.postForm<UploadDataSourceResponse>(endpoint, form);
+  }
+
+  const results: UploadDataSourceResponse[] = [];
+  for (const file of files) {
+    if (file.size >= RESUMABLE_UPLOAD_THRESHOLD) {
+      try {
+        results.push(await uploadOneResumably(companyId, file, {
+          ...options,
+          name: files.length === 1 ? options.name : undefined,
+        }));
+        continue;
+      } catch (error) {
+        if (!(error instanceof ApiError && error.status === 422 && error.message.includes("S3-compatible object storage"))) throw error;
+      }
+    }
+    const form = new FormData();
+    form.append("file", file);
+    if (files.length === 1 && options.name) form.append("name", options.name);
+    if (options.description) form.append("description", options.description);
+    if (options.collectionId) form.append("collectionId", options.collectionId);
+    results.push(await api.postForm<UploadDataSourceResponse>(endpoint, form));
+  }
+  if (results.length === 1) return results[0];
+  const sources = results.flatMap(result => result.dataSources || [result]);
+  return { ...sources[0], dataSources: sources, count: sources.length, message: `${sources.length} data sources queued for autonomous onboarding` };
 }
 
 export const dataSourcesApi = {
@@ -33,22 +182,8 @@ export const dataSourcesApi = {
     file: File | File[],
     options: { name?: string; description?: string; collectionId?: string } = {},
   ) => {
-    const formData = new FormData();
-    if (Array.isArray(file)) {
-      for (const f of file) {
-        formData.append("files", f);
-      }
-    } else {
-      formData.append("file", file);
-    }
-    if (options.name) formData.append("name", options.name);
-    if (options.description) formData.append("description", options.description);
-    if (options.collectionId) formData.append("collectionId", options.collectionId);
-
-    return api.postForm<UploadDataSourceResponse>(
-      `/companies/${encodeURIComponent(companyId)}/data-sources/upload`,
-      formData,
-    );
+    const files = Array.isArray(file) ? file : [file];
+    return uploadMany(companyId, files, options, `/companies/${encodeURIComponent(companyId)}/data-sources/upload`);
   },
 
   delete: (companyId: string, id: string) =>
@@ -60,6 +195,53 @@ export const dataSourcesApi = {
     api.post<{ success: boolean; data: DataSource }>(
       `/companies/${encodeURIComponent(companyId)}/data-sources/${encodeURIComponent(id)}/reprocess`,
       {},
+    ),
+
+  cancelIngestionJob: (companyId: string, id: string, jobId: string) =>
+    api.post<{ success: boolean; data: DataSourceIngestionJob }>(
+      `/companies/${encodeURIComponent(companyId)}/data-sources/${encodeURIComponent(id)}/ingestion-jobs/${encodeURIComponent(jobId)}/cancel`,
+      {},
+    ),
+
+  reindexEmbeddings: (companyId: string, id: string, options: DataSourceEmbeddingReindexRequest) =>
+    api.post<{ success: boolean; data: DataSourceIngestionJob }>(
+      `/companies/${encodeURIComponent(companyId)}/data-sources/${encodeURIComponent(id)}/embedding-reindex`,
+      options,
+    ),
+
+  pruneEmbeddingGenerations: (
+    companyId: string,
+    id: string,
+    request: { confirm: boolean; expectedGenerations?: Array<{ embeddingSpace: string; embeddingGeneration: string }> },
+  ) =>
+    api.post<{
+      success: boolean;
+      data: {
+        dryRun: boolean;
+        retentionDays: number;
+        cutoff: string;
+        candidates: Array<{ embeddingSpace: string; embeddingGeneration: string; rowCount: number; lastCreatedAt: string }>;
+        candidateVectorRows: number;
+        deletedGenerations: Array<{ embeddingSpace: string; embeddingGeneration: string; deletedRows: number }>;
+        deletedRows: number;
+      };
+    }>(
+      `/companies/${encodeURIComponent(companyId)}/data-sources/${encodeURIComponent(id)}/embedding-generations/prune`,
+      request,
+    ),
+
+  snapshotExternalDatabase: (
+    companyId: string,
+    id: string,
+    options: {
+      mode?: "full" | "incremental";
+      tableIds?: string[];
+      tablePolicies?: Array<{ tableId: string; updatedAtColumn: string; deletedAtColumn?: string }>;
+    } = {},
+  ) =>
+    api.post<{ success: boolean; data: { id: string; status: string; tableCount: number; skippedTableCount: number } }>(
+      `/companies/${encodeURIComponent(companyId)}/data-sources/${encodeURIComponent(id)}/snapshot`,
+      options,
     ),
 
   reprocessStuck: (companyId: string) =>
@@ -81,6 +263,7 @@ export const dataSourcesApi = {
         fn: "sum" | "avg" | "count" | "min" | "max";
         groupBy?: string;
       };
+      mode?: "live" | "snapshot";
     } = {},
   ) =>
     api.post<StructuredQueryResult>(
@@ -271,18 +454,8 @@ export const dataSourcesApi = {
     files: File | File[],
     description?: string,
   ) => {
-    const formData = new FormData();
-    if (Array.isArray(files)) {
-      for (const f of files) formData.append("files", f);
-    } else {
-      formData.append("file", files);
-    }
-    if (description) formData.append("description", description);
-
-    return api.postForm<UploadDataSourceResponse>(
-      `/companies/${encodeURIComponent(companyId)}/data-source-collections/${encodeURIComponent(collectionId)}/upload`,
-      formData,
-    );
+    const fileList = Array.isArray(files) ? files : [files];
+    return uploadMany(companyId, fileList, { description, collectionId },
+      `/companies/${encodeURIComponent(companyId)}/data-source-collections/${encodeURIComponent(collectionId)}/upload`);
   },
 };
-

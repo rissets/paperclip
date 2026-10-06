@@ -1,0 +1,270 @@
+# Merge with docker-compose.yml. The db service keeps the existing pgdata
+# volume and PostgreSQL major version while adding the pgvector extension.
+x-json-logs: &json-logs
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  db:
+    image: pgvector/pgvector:0.8.6-pg17-bookworm@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
+    logging: *json-logs
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.8.4.11@sha256:b1d9f9baec7727c779a6febb2a95eb08a8e1de3f463294e3ebb35c3d3fb30360
+    environment:
+      CLICKHOUSE_DB: paperclip
+      CLICKHOUSE_USER: paperclip
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Set CLICKHOUSE_PASSWORD in .env.data-plane}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - clickhouse-logs:/var/log/clickhouse-server
+    ports:
+      - "127.0.0.1:${DATASOURCE_CLICKHOUSE_HTTP_HOST_PORT:-18123}:8123"
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user paperclip --password \"$${CLICKHOUSE_PASSWORD}\" --query 'SELECT 1' >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    mem_limit: ${DATASOURCE_CLICKHOUSE_MEMORY_LIMIT:-4g}
+    cpus: ${DATASOURCE_CLICKHOUSE_CPUS:-2}
+    restart: unless-stopped
+    logging: *json-logs
+
+  minio:
+    image: paperclip/minio-server:RELEASE.2025-10-15T17-29-55Z
+    build:
+      context: ..
+      dockerfile: docker/minio/Dockerfile
+      target: minio-server
+      args:
+        MINIO_RELEASE: RELEASE.2025-10-15T17-29-55Z
+        MINIO_COMMIT: 9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env.data-plane}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env.data-plane}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
+      - "127.0.0.1:${DATASOURCE_MINIO_S3_HOST_PORT:-19000}:9000"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/minio-healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+    mem_limit: ${DATASOURCE_MINIO_MEMORY_LIMIT:-1g}
+    cpus: ${DATASOURCE_MINIO_CPUS:-1}
+    restart: unless-stopped
+    logging: *json-logs
+
+  minio-init:
+    image: paperclip/minio-client:RELEASE.2025-08-13T08-35-41Z
+    build:
+      context: ..
+      dockerfile: docker/minio/Dockerfile
+      target: minio-client
+      args:
+        MINIO_MC_RELEASE: RELEASE.2025-08-13T08-35-41Z
+        MINIO_MC_COMMIT: 7394ce0dd2a80935aded936b09fa12cbb3cb8096
+    entrypoint: ["/bin/sh", "/scripts/init.sh"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env.data-plane}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env.data-plane}
+      MINIO_APP_ACCESS_KEY: ${MINIO_APP_ACCESS_KEY:?Set MINIO_APP_ACCESS_KEY in .env.data-plane}
+      MINIO_APP_SECRET_KEY: ${MINIO_APP_SECRET_KEY:?Set MINIO_APP_SECRET_KEY in .env.data-plane}
+      MINIO_DATASOURCE_BUCKET: paperclip-data
+    volumes:
+      - ./minio/init.sh:/scripts/init.sh:ro
+      - ./minio/datasource-policy.json:/policies/datasource-policy.json:ro
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+    logging: *json-logs
+
+  redis-cache:
+    image: redis:8.10.2-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env.data-plane}
+    command:
+      - /bin/sh
+      - -ec
+      - exec redis-server --save "" --appendonly no --requirepass "$$REDIS_PASSWORD" --maxmemory ${DATASOURCE_REDIS_MAXMEMORY:-256mb} --maxmemory-policy noeviction
+    ports:
+      - "127.0.0.1:${DATASOURCE_REDIS_HOST_PORT:-16379}:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$${REDIS_PASSWORD}\" redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    mem_limit: ${DATASOURCE_REDIS_MEMORY_LIMIT:-384m}
+    cpus: ${DATASOURCE_REDIS_CPUS:-0.5}
+    restart: unless-stopped
+    logging: *json-logs
+
+  rag-bge-embed:
+    image: ghcr.io/huggingface/text-embeddings-inference:cuda-1.9@sha256:cb4167c3649f8b541688a246b49240699910b9261c111906fca59bcdc793ff20
+    profiles: ["gpu"]
+    command:
+      - --model-id
+      - BAAI/bge-m3
+      - --revision
+      - 80087bf0b7876bc948d3b5677706633f6c795fa2
+      - --max-concurrent-requests
+      - "64"
+      - --max-batch-tokens
+      - "32768"
+      - --max-client-batch-size
+      - "64"
+    volumes:
+      - rag-model-cache:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    logging: *json-logs
+
+  rag-bge-rerank:
+    image: ghcr.io/huggingface/text-embeddings-inference:cuda-1.9@sha256:cb4167c3649f8b541688a246b49240699910b9261c111906fca59bcdc793ff20
+    profiles: ["gpu"]
+    command:
+      - --model-id
+      - BAAI/bge-reranker-v2-m3
+      - --revision
+      - b5160aeac3c6c8fe7beaaaf04c9e0142826b58d1
+      - --max-concurrent-requests
+      - "64"
+      - --max-batch-tokens
+      - "32768"
+      - --max-client-batch-size
+      - "64"
+    volumes:
+      - rag-model-cache:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    logging: *json-logs
+
+  server:
+    profiles: ["docker-app"]
+    environment: &datasource-environment
+      DATABASE_URL: postgres://paperclip:paperclip@db:5432/paperclip
+      PAPERCLIP_SECRETS_MASTER_KEY_FILE: ${PAPERCLIP_SECRETS_MASTER_KEY_FILE:-/paperclip/instances/default/secrets/master.key}
+      DATASOURCE_EMBEDDED_WORKER_ENABLED: "false"
+      DATASOURCE_LOCAL_UPLOAD_DIRECTORY: /app/data/uploads
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: paperclip
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Set CLICKHOUSE_PASSWORD in .env.data-plane}
+      CLICKHOUSE_DATABASE: paperclip
+      PAPERCLIP_STORAGE_S3_ENDPOINT: http://minio:9000
+      PAPERCLIP_STORAGE_S3_BUCKET: paperclip-data
+      PAPERCLIP_STORAGE_S3_REGION: us-east-1
+      PAPERCLIP_STORAGE_S3_FORCE_PATH_STYLE: "true"
+      DATASOURCE_OBJECT_STORAGE_ENDPOINT: http://minio:9000
+      DATASOURCE_OBJECT_STORAGE_BUCKET: paperclip-data
+      DATASOURCE_OBJECT_STORAGE_REGION: us-east-1
+      DATASOURCE_OBJECT_STORAGE_PREFIX: data-sources
+      DATASOURCE_OBJECT_STORAGE_FORCE_PATH_STYLE: "true"
+      AWS_ACCESS_KEY_ID: ${MINIO_APP_ACCESS_KEY:?Set MINIO_APP_ACCESS_KEY in .env.data-plane}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_APP_SECRET_KEY:?Set MINIO_APP_SECRET_KEY in .env.data-plane}
+      RAG_EMBEDDING_PROVIDER: ${RAG_EMBEDDING_PROVIDER:-auto}
+      RAG_BGE_EMBEDDING_URL: http://rag-bge-embed:80
+      RAG_BGE_RERANK_URL: http://rag-bge-rerank:80
+      RAG_BGE_EMBEDDING_REVISION: 80087bf0b7876bc948d3b5677706633f6c795fa2
+      RAG_OPENROUTER_BASE_URL: ${RAG_OPENROUTER_BASE_URL:-https://router.rissets.com/v1}
+      RAG_OPENROUTER_EMBEDDING_MODEL: ${RAG_OPENROUTER_EMBEDDING_MODEL:-openrouter/text-embedding-3-small}
+      RAG_OPENROUTER_RERANK_MODEL: ${RAG_OPENROUTER_RERANK_MODEL:-openrouter/openrouter/cohere/rerank-v3.5}
+      RAG_PDF_OCR_ENABLED: ${RAG_PDF_OCR_ENABLED:-true}
+      RAG_PDF_OCR_LANGS: ${RAG_PDF_OCR_LANGS:-eng+ind}
+      RAG_PDF_OCR_MAX_PAGES: ${RAG_PDF_OCR_MAX_PAGES:-200}
+      RAG_PDF_OCR_PAGE_TIMEOUT_MS: ${RAG_PDF_OCR_PAGE_TIMEOUT_MS:-30000}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
+      TYPESAFE_BASE_URL: ${TYPESAFE_BASE_URL:-https://api.typesafe.ai/v1/systemone}
+      DEFAULT_SYSTEMONE_MODEL: ${DEFAULT_SYSTEMONE_MODEL:-jev-1.13.0}
+      REDIS_HOST: redis-cache
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env.data-plane}
+      DATASOURCE_QUERY_EMBEDDING_CACHE_TTL_SECONDS: ${DATASOURCE_QUERY_EMBEDDING_CACHE_TTL_SECONDS:-3600}
+      DATASOURCE_MAX_CSV_UPLOAD_BYTES: ${DATASOURCE_MAX_CSV_UPLOAD_BYTES:-1073741824}
+      DATASOURCE_MAX_FILE_UPLOAD_BYTES: ${DATASOURCE_MAX_FILE_UPLOAD_BYTES:-104857600}
+      DATASOURCE_MAX_ZIP_EXPANDED_BYTES: ${DATASOURCE_MAX_ZIP_EXPANDED_BYTES:-1073741824}
+      DATASOURCE_MAX_UPLOAD_REQUEST_BYTES: ${DATASOURCE_MAX_UPLOAD_REQUEST_BYTES:-1073741824}
+      DATASOURCE_CLICKHOUSE_QUERY_MAX_EXECUTION_SECONDS: ${DATASOURCE_CLICKHOUSE_QUERY_MAX_EXECUTION_SECONDS:-60}
+      DATASOURCE_CLICKHOUSE_QUERY_MAX_MEMORY_BYTES: ${DATASOURCE_CLICKHOUSE_QUERY_MAX_MEMORY_BYTES:-1073741824}
+      DATASOURCE_CLICKHOUSE_QUERY_MAX_ROWS: ${DATASOURCE_CLICKHOUSE_QUERY_MAX_ROWS:-10000000}
+      DATASOURCE_CLICKHOUSE_QUERY_MAX_BYTES: ${DATASOURCE_CLICKHOUSE_QUERY_MAX_BYTES:-1073741824}
+      DATASOURCE_CLICKHOUSE_QUERY_MAX_RESULT_BYTES: ${DATASOURCE_CLICKHOUSE_QUERY_MAX_RESULT_BYTES:-67108864}
+      DATASOURCE_CLICKHOUSE_INSERT_MAX_BATCH_ROWS: ${DATASOURCE_CLICKHOUSE_INSERT_MAX_BATCH_ROWS:-50000}
+    volumes:
+      - datasource-local-uploads:/app/data/uploads
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 120s
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      redis-cache:
+        condition: service_healthy
+
+  datasource-worker:
+    profiles: ["docker-app"]
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: ["node", "--import", "./server/node_modules/tsx/dist/loader.mjs", "server/dist/datasource-worker.js"]
+    environment:
+      <<: *datasource-environment
+      DATASOURCE_WORKER_POLL_MS: ${DATASOURCE_WORKER_POLL_MS:-2000}
+      DATASOURCE_WORKER_HEALTH_PORT: "3101"
+    volumes:
+      - paperclip-data:/paperclip
+      - datasource-local-uploads:/app/data/uploads
+    depends_on:
+      server:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      redis-cache:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3101/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    mem_limit: ${DATASOURCE_WORKER_MEMORY_LIMIT:-2g}
+    cpus: ${DATASOURCE_WORKER_CPUS:-2}
+    pids_limit: 256
+    stop_grace_period: 5m
+    restart: unless-stopped
+    logging: *json-logs
+
+volumes:
+  clickhouse-data:
+  clickhouse-logs:
+  minio-data:
+  rag-model-cache:
+  datasource-local-uploads:

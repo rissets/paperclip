@@ -2087,6 +2087,69 @@
       "when": 1791056041987,
       "tag": "0299_clear_zuras",
       "breakpoints": true
+    },
+    {
+      "idx": 300,
+      "version": "7",
+      "when": 1791211023074,
+      "tag": "0300_medical_red_wolf",
+      "breakpoints": true
+    },
+    {
+      "idx": 301,
+      "version": "7",
+      "when": 1791211773438,
+      "tag": "0301_outgoing_mantis",
+      "breakpoints": true
+    },
+    {
+      "idx": 302,
+      "version": "7",
+      "when": 1791278543302,
+      "tag": "0302_early_mother_askani",
+      "breakpoints": true
+    },
+    {
+      "idx": 303,
+      "version": "7",
+      "when": 1791278590721,
+      "tag": "0303_supreme_raza",
+      "breakpoints": true
+    },
+    {
+      "idx": 304,
+      "version": "7",
+      "when": 1791282391767,
+      "tag": "0304_tan_molly_hayes",
+      "breakpoints": true
+    },
+    {
+      "idx": 305,
+      "version": "7",
+      "when": 1791282432850,
+      "tag": "0305_conscious_skrulls",
+      "breakpoints": true
+    },
+    {
+      "idx": 306,
+      "version": "7",
+      "when": 1791293890369,
+      "tag": "0306_polite_roxanne_simpson",
+      "breakpoints": true
+    },
+    {
+      "idx": 307,
+      "version": "7",
+      "when": 1791294356630,
+      "tag": "0307_boring_colonel_america",
+      "breakpoints": true
+    },
+    {
+      "idx": 308,
+      "version": "7",
+      "when": 1791299584072,
+      "tag": "0308_motionless_rocket_racer",
+      "breakpoints": true
     }
   ]
 }

@@ -4,6 +4,7 @@ import path from "node:path";
 import os from "node:os";
 import type { AdapterModel } from "@paperclipai/adapter-utils";
 import { asString, runChildProcess } from "@paperclipai/adapter-utils/server-utils";
+import { DEFAULT_PI_LOCAL_MODEL } from "../index.js";
 
 const MODELS_CACHE_TTL_MS = 60_000;
 
@@ -283,10 +284,7 @@ export async function ensurePiModelConfiguredAndAvailable(input: {
   cwd?: unknown;
   env?: unknown;
 }): Promise<AdapterModel[]> {
-  const rawModel = asString(input.model, "").trim();
-  if (!rawModel) {
-    throw new Error("Pi requires `adapterConfig.model` in provider/model format.");
-  }
+  const rawModel = asString(input.model, DEFAULT_PI_LOCAL_MODEL).trim() || DEFAULT_PI_LOCAL_MODEL;
 
   const models = await discoverPiModelsCached({
     command: input.command,
@@ -595,4 +593,3 @@ export async function listExistingPiConnections(): Promise<PiConnection[]> {
 
   return connections;
 }
-

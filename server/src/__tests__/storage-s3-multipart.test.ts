@@ -26,8 +26,13 @@ describe("streamed S3 multipart uploads", () => {
     });
     const body = Readable.from((async function* () { for (let i = 0; i < 272; i++) yield Buffer.alloc(64 * 1024); })());
     try {
-      await putS3Multipart(client, "bucket", "key", { objectKey: "key", contentType: "text/plain", contentLength: 17 * 1024 * 1024, body });
+      await putS3Multipart(client, "bucket", "key", {
+        objectKey: "key", contentType: "text/plain", contentLength: 17 * 1024 * 1024,
+        body, sha256: "a".repeat(64),
+      });
       expect(lengths).toEqual([8, 8, 1].map(mb => mb * 1024 * 1024));
+      const create = send.mock.calls.map(([command]) => command).find(command => command instanceof CreateMultipartUploadCommand) as CreateMultipartUploadCommand;
+      expect(create.input.Metadata).toEqual({ "paperclip-sha256": "a".repeat(64) });
     } finally { send.mockRestore(); client.destroy(); }
   });
   it("aborts an incomplete upload and closes its source on failure", async () => {

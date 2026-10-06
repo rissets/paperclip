@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import {
   ensurePiModelConfiguredAndAvailable,
   listPiModels,
@@ -7,8 +10,16 @@ import {
 } from "./models.js";
 
 describe("pi models", () => {
-  afterEach(() => {
+  let hostModelsDir: string | null = null;
+
+  afterEach(async () => {
     delete process.env.PAPERCLIP_PI_COMMAND;
+    delete process.env.PI_CODING_AGENT_DIR;
+    if (hostModelsDir) {
+      const directory = hostModelsDir;
+      hostModelsDir = null;
+      await fs.rm(directory, { recursive: true, force: true });
+    }
     resetPiModelsCacheForTests();
   });
 
@@ -17,10 +28,23 @@ describe("pi models", () => {
     await expect(listPiModels()).resolves.toEqual([]);
   });
 
-  it("rejects when model is missing", async () => {
+  it("uses the default when model is missing and the host provides that model", async () => {
+    hostModelsDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pi-models-"));
+    await fs.writeFile(path.join(hostModelsDir, "models.json"), JSON.stringify({
+      providers: {
+        rissets: {
+          models: [{ id: "llm-hd/qwen3.8-27b", name: "Qwen 3.8:27 (HD)" }],
+        },
+      },
+    }));
+    const piCommand = path.join(hostModelsDir, "pi-list-models");
+    await fs.writeFile(piCommand, "#!/bin/sh\nexit 0\n");
+    await fs.chmod(piCommand, 0o755);
+    process.env.PI_CODING_AGENT_DIR = hostModelsDir;
+    process.env.PAPERCLIP_PI_COMMAND = piCommand;
     await expect(
       ensurePiModelConfiguredAndAvailable({ model: "" }),
-    ).rejects.toThrow("Pi requires `adapterConfig.model`");
+    ).resolves.toContainEqual(expect.objectContaining({ id: "rissets/llm-hd/qwen3.8-27b" }));
   });
 
   it("rejects when discovery cannot run for configured model", async () => {

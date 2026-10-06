@@ -4,6 +4,10 @@ import {
   GetObjectCommand,
   HeadObjectCommand,
   PutObjectCommand,
+  CreateMultipartUploadCommand,
+  UploadPartCommand,
+  CompleteMultipartUploadCommand,
+  AbortMultipartUploadCommand,
 } from "@aws-sdk/client-s3";
 import { putS3Multipart } from "./s3-multipart.js";
 import { addAbortSignal, Readable } from "node:stream";
@@ -93,6 +97,7 @@ export function createS3StorageProvider(config: S3ProviderConfig): StorageProvid
           Body: input.body,
           ContentType: input.contentType,
           ContentLength: input.contentLength,
+          Metadata: input.sha256 ? { "paperclip-sha256": input.sha256 } : undefined,
         }),
       );
     },
@@ -140,6 +145,7 @@ export function createS3StorageProvider(config: S3ProviderConfig): StorageProvid
           exists: true,
           contentType: output.ContentType,
           contentLength: output.ContentLength,
+          sha256: output.Metadata?.["paperclip-sha256"],
           etag: output.ETag,
           lastModified: toDate(output.LastModified),
         };
@@ -158,6 +164,47 @@ export function createS3StorageProvider(config: S3ProviderConfig): StorageProvid
           Key: key,
         }),
       );
+    },
+
+    async createMultipartUpload(input) {
+      const output = await client.send(new CreateMultipartUploadCommand({
+        Bucket: bucket,
+        Key: buildKey(prefix, input.objectKey),
+        ContentType: input.contentType,
+        Metadata: input.sha256 ? { "paperclip-sha256": input.sha256 } : undefined,
+      }));
+      if (!output.UploadId) throw new Error("S3 did not return a multipart upload id");
+      return { uploadId: output.UploadId };
+    },
+
+    async uploadMultipartPart(input) {
+      const output = await client.send(new UploadPartCommand({
+        Bucket: bucket,
+        Key: buildKey(prefix, input.objectKey),
+        UploadId: input.uploadId,
+        PartNumber: input.partNumber,
+        Body: input.body,
+        ContentLength: input.body.length,
+      }));
+      if (!output.ETag) throw new Error("S3 did not return a multipart part receipt");
+      return { etag: output.ETag };
+    },
+
+    async completeMultipartUpload(input) {
+      await client.send(new CompleteMultipartUploadCommand({
+        Bucket: bucket,
+        Key: buildKey(prefix, input.objectKey),
+        UploadId: input.uploadId,
+        MultipartUpload: { Parts: input.parts.map(part => ({ PartNumber: part.partNumber, ETag: part.etag })) },
+      }));
+    },
+
+    async abortMultipartUpload(input) {
+      await client.send(new AbortMultipartUploadCommand({
+        Bucket: bucket,
+        Key: buildKey(prefix, input.objectKey),
+        UploadId: input.uploadId,
+      }));
     },
   };
 }

@@ -83,6 +83,16 @@ pnpm dev:stop --data-dir ./tmp/paperclip-dev
 
 Issue execution may also use project execution workspace policies and workspace runtime services for per-project worktrees, preview servers, and managed dev commands. Configure those through the project workspace/runtime surfaces rather than starting long-running unmanaged processes when a task needs a reusable service.
 
+### Enterprise data-source services
+
+The default `pnpm dev` uses embedded PostgreSQL and does not start the analytical
+data plane. To work on large CSV/Excel ingestion, RAG vectors, or external
+database snapshots against Dockerized PostgreSQL + pgvector, ClickHouse, MinIO,
+and Redis, follow the isolated setup in
+[Data Sources Docker data plane](data-sources-data-plane.md). It uses a separate
+Compose project and PostgreSQL volume; do not point it at an existing instance
+volume unless you are following the documented migration and restore procedure.
+
 ### Mobile-friendly preview (`pnpm dev:mobile`)
 
 The vite dev server serves an unbundled module graph. This is fast to reload on a local machine but too heavy for phones and tablets on slow links (airplane wifi, mobile data, distant tailnet peers). `pnpm dev:mobile` builds the UI once and serves the small production bundle on port `3101` via `vite preview`, proxying `/api` requests to the dev API on `3100`.

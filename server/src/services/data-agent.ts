@@ -5,6 +5,7 @@ import { DataSourcesService } from "./data-sources.js";
 import { TypeSafeJevService } from "./typesafe-jev.js";
 import { aiReasoningService } from "./ai-reasoning.js";
 import type { SpecialistExecution } from "@paperclipai/shared";
+import { makeDataSourceCacheKey } from "./data-source-cache.js";
 
 export class DataAgentService {
   private dataSourcesService: DataSourcesService;
@@ -21,7 +22,12 @@ export class DataAgentService {
   async answer(
     companyId: string,
     query: string,
-    options?: { collectionId?: string; agentId?: string },
+    options?: {
+      collectionId?: string;
+      agentId?: string;
+      dataSourceIds?: string[];
+      authzFingerprint?: string;
+    },
   ): Promise<SpecialistExecution> {
     let allSources = await this.db
       .select()
@@ -32,6 +38,25 @@ export class DataAgentService {
       .select()
       .from(dataSourceTables)
       .where(eq(dataSourceTables.companyId, companyId));
+
+    let authorizedDataSourceIds = options?.dataSourceIds;
+    if (options?.agentId) {
+      const access = await this.dataSourcesService.getAgentDataSources(companyId, options.agentId);
+      const agentAllowedIds = access.mode === "none" ? [] : access.effectiveDataSourceIds || [];
+      authorizedDataSourceIds = authorizedDataSourceIds
+        ? authorizedDataSourceIds.filter((id) => agentAllowedIds.includes(id))
+        : agentAllowedIds;
+    }
+    if (authorizedDataSourceIds) {
+      const allowed = new Set(authorizedDataSourceIds);
+      allSources = allSources.filter((source) => allowed.has(source.id));
+      tables = tables.filter((table) => allowed.has(table.dataSourceId));
+    }
+    const authzFingerprint = options?.authzFingerprint || makeDataSourceCacheKey([
+      "data-agent-acl",
+      options?.agentId || "internal-company-scope",
+      ...(authorizedDataSourceIds ? [...authorizedDataSourceIds].sort() : ["all-company-sources"]),
+    ]);
 
     if (options?.collectionId) {
       const colSources = allSources.filter((s) => s.collectionId === options.collectionId);
@@ -463,15 +488,38 @@ export class DataAgentService {
       }
     }
 
+    const bestSource = allSources.find((source) => source.id === bestTable.dataSourceId);
+    const snapshot = (bestTable.semanticModel as any)?.externalSnapshot;
+    const freshnessSensitive = /\b(latest|current|live|real[ -]?time|sekarang|terkini|hari ini|saat ini|terbaru)\b/i.test(query);
+    const queryMode: "live" | "snapshot" =
+      bestSource && ["postgres", "mysql", "mariadb"].includes(bestSource.sourceType)
+        && bestTable.rowCount >= 100_000
+        && Boolean(matchedMetric)
+        && snapshot?.status === "ready"
+        && !freshnessSensitive
+        ? "snapshot"
+        : "live";
+
     // 4. Execute deterministic query on table
     let queryResult;
+    const querySourceDescription = queryMode === "snapshot" && (snapshot?.lastIncrementalAt || snapshot?.completedAt)
+      ? (() => {
+          const capturedAt = snapshot.lastIncrementalAt || snapshot.completedAt;
+          const timestampMode = snapshot.syncMode === "incremental";
+          const consistency = timestampMode ? "best-effort timestamp consistency" : "best-effort keyset consistency";
+          const deletionNote = snapshot.deleteSemantics === "soft_delete_column"
+            ? "soft-delete tombstones are applied; hard deletes require full reconciliation"
+            : "hard deletes after this snapshot may remain until full reconciliation";
+          return `using the published ClickHouse ${timestampMode ? "incremental snapshot" : "full snapshot"} captured at ${new Date(capturedAt).toLocaleString()} (${consistency}; ${deletionNote})`;
+        })()
+      : "using a live source query";
     let queryDescription = "";
     const filterDesc = Object.keys(detectedFilter).length > 0
       ? ` (filter: ${JSON.stringify(detectedFilter)})`
       : "";
 
     if (matchedMetric && matchedDimension) {
-      queryDescription = `Aggregate ${matchedAggregation}(${matchedMetric}) grouped by ${matchedDimension} on table '${bestTable.tableName}'${filterDesc}`;
+      queryDescription = `Aggregate ${matchedAggregation}(${matchedMetric}) grouped by ${matchedDimension} on table '${bestTable.tableName}'${filterDesc}; ${querySourceDescription}`;
       queryResult = await this.dataSourcesService.queryTable(companyId, bestTable.id, {
         filter: Object.keys(detectedFilter).length > 0 ? detectedFilter : undefined,
         aggregate: {
@@ -479,21 +527,26 @@ export class DataAgentService {
           fn: matchedAggregation,
           groupBy: matchedDimension,
         },
+        mode: queryMode,
         limit: 15,
+        authzFingerprint,
       });
     } else if (matchedMetric) {
-      queryDescription = `Compute ${matchedAggregation}(${matchedMetric}) on table '${bestTable.tableName}'${filterDesc}`;
+      queryDescription = `Compute ${matchedAggregation}(${matchedMetric}) on table '${bestTable.tableName}'${filterDesc}; ${querySourceDescription}`;
       queryResult = await this.dataSourcesService.queryTable(companyId, bestTable.id, {
         filter: Object.keys(detectedFilter).length > 0 ? detectedFilter : undefined,
         aggregate: {
           column: matchedMetric,
           fn: matchedAggregation,
         },
+        mode: queryMode,
+        authzFingerprint,
       });
     } else {
-      queryDescription = `Preview top records from table '${bestTable.tableName}'`;
+      queryDescription = `Preview top records from table '${bestTable.tableName}' using live source query`;
       queryResult = await this.dataSourcesService.queryTable(companyId, bestTable.id, {
         limit: 10,
+        authzFingerprint,
       });
     }
 

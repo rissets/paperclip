@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import AdmZip from "adm-zip";
 import {
   dataSourceCollections,
@@ -13,7 +16,7 @@ describe("DataSourceCollectionsService", () => {
   const service = new DataSourceCollectionsService({} as any);
 
   describe("extractZipEntries", () => {
-    it("extracts supported files and filters out macOS metadata/hidden files", () => {
+    it("streams supported files to private temp paths and filters out macOS metadata/hidden files", async () => {
       const zip = new AdmZip();
 
       // Add valid structured and document files
@@ -27,25 +30,62 @@ describe("DataSourceCollectionsService", () => {
       zip.addFile("timurtelecom/.DS_Store", Buffer.from("junk"));
       zip.addFile("timurtelecom/unsupported.bin", Buffer.from("binary blob"));
 
-      const zipBuffer = zip.toBuffer();
-      const extracted = service.extractZipEntries(zipBuffer);
+      const archiveDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-zip-test-"));
+      const archivePath = path.join(archiveDirectory, "source.zip");
+      await fs.writeFile(archivePath, zip.toBuffer());
+      const extracted = await service.extractZipEntries({ filePath: archivePath });
 
-      expect(extracted).toHaveLength(4);
+      try {
+        expect(extracted.entries).toHaveLength(4);
 
-      const fileNames = extracted.map((f) => f.originalname).sort();
-      expect(fileNames).toEqual([
-        "customers.csv",
-        "network_sla.pdf",
-        "notes.txt",
-        "subscriptions.csv",
-      ]);
+        const fileNames = extracted.entries.map((f) => f.originalname).sort();
+        expect(fileNames).toEqual([
+          "customers.csv",
+          "network_sla.pdf",
+          "notes.txt",
+          "subscriptions.csv",
+        ]);
 
-      const csvFile = extracted.find((f) => f.originalname === "customers.csv");
-      expect(csvFile?.mimetype).toBe("text/csv");
-      expect(csvFile?.buffer.toString("utf-8")).toContain("Fiber100");
+        const csvFile = extracted.entries.find((f) => f.originalname === "customers.csv");
+        expect(csvFile?.mimetype).toBe("text/csv");
+        expect(csvFile && await fs.readFile(csvFile.filePath, "utf8")).toContain("Fiber100");
 
-      const pdfFile = extracted.find((f) => f.originalname === "network_sla.pdf");
-      expect(pdfFile?.mimetype).toBe("application/pdf");
+        const pdfFile = extracted.entries.find((f) => f.originalname === "network_sla.pdf");
+        expect(pdfFile?.mimetype).toBe("application/pdf");
+        expect((await fs.stat(csvFile!.filePath)).mode & 0o777).toBe(0o600);
+      } finally {
+        await fs.rm(extracted.directory, { recursive: true, force: true });
+        await fs.rm(archiveDirectory, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps traversal-named members inside private temp storage and enforces expansion limits", async () => {
+      const traversal = new AdmZip();
+      traversal.addFile("../outside.csv", Buffer.from("id\n1\n"));
+      const extractedTraversal = await service.extractZipEntries({ buffer: traversal.toBuffer() });
+      try {
+        expect(extractedTraversal.entries).toHaveLength(1);
+        expect(path.dirname(extractedTraversal.entries[0]!.filePath)).toBe(extractedTraversal.directory);
+        expect(extractedTraversal.entries[0]!.originalname).toBe("outside.csv");
+      } finally {
+        await fs.rm(extractedTraversal.directory, { recursive: true, force: true });
+      }
+
+      const tooLargeEntry = new AdmZip();
+      tooLargeEntry.addFile("large.csv", Buffer.from("x".repeat(64)));
+      await expect(service.extractZipEntries({ buffer: tooLargeEntry.toBuffer() }, { maxEntryBytes: 32 }))
+        .rejects.toMatchObject({ status: 413 });
+
+      const tooManyExpandedBytes = new AdmZip();
+      tooManyExpandedBytes.addFile("first.txt", Buffer.from("first payload"));
+      tooManyExpandedBytes.addFile("second.txt", Buffer.from("second payload"));
+      await expect(service.extractZipEntries({ buffer: tooManyExpandedBytes.toBuffer() }, { maxTotalBytes: 20 }))
+        .rejects.toMatchObject({ status: 413 });
+
+      const oversizedUnsupportedEntry = new AdmZip();
+      oversizedUnsupportedEntry.addFile("ignored.bin", Buffer.from("x".repeat(64)));
+      await expect(service.extractZipEntries({ buffer: oversizedUnsupportedEntry.toBuffer() }, { maxTotalBytes: 32 }))
+        .rejects.toMatchObject({ status: 413 });
     });
   });
 
@@ -129,6 +169,7 @@ describe("DataSourceCollectionsService", () => {
             { name: "region", dataType: "string", role: "dimension", isNullable: false },
           ],
           rowCount: 3,
+          semanticModel: { clickhouseTable: "ds_customer_001" },
         },
         {
           id: "tbl-2",
@@ -142,6 +183,7 @@ describe("DataSourceCollectionsService", () => {
             { name: "monthly_fee", dataType: "number", role: "metric", isNullable: false },
           ],
           rowCount: 5,
+          semanticModel: { clickhouseTable: "ds_subscription_001" },
         },
       ];
 
@@ -180,13 +222,15 @@ describe("DataSourceCollectionsService", () => {
       };
 
       const mockDb: any = {
-        select: () => ({
+        select: (selectedFields: Record<string, unknown>) => ({
           from: (table: any) => {
             const result = getTableResult(table);
             const queryObj: any = {
               where: () => queryObj,
               orderBy: () => queryObj,
               limit: () => queryObj,
+              innerJoin: () => queryObj,
+              as: () => selectedFields,
               then: (resolve: any) => resolve(result),
             };
             return queryObj;
@@ -208,7 +252,14 @@ describe("DataSourceCollectionsService", () => {
         }),
       };
 
-      const serviceWithMock = new DataSourceCollectionsService(mockDb);
+      const executedClickhouseSql: string[] = [];
+      const fakeClickhouse = {
+        getCompanyDatabase: () => "paperclip_company_123",
+        isHealthy: async () => ({ ok: true }),
+        ensureCompanyDatabase: async () => "paperclip_company_123",
+        execute: async (sql: string) => { executedClickhouseSql.push(sql); },
+      };
+      const serviceWithMock = new DataSourceCollectionsService(mockDb, fakeClickhouse as any);
 
       const profile = await serviceWithMock.correlateCollection(mockCompanyId, mockCollectionId);
 
@@ -238,12 +289,17 @@ describe("DataSourceCollectionsService", () => {
       const view = profile.unifiedClickhouseViews![0];
       expect(view.joinSql).toContain("CREATE OR REPLACE VIEW");
       expect(view.joinSql).toContain("LEFT JOIN");
+      expect(view.joinSql).toContain("paperclip_company_123");
+      expect(view.joinSql).toContain("ds_customer_001");
+      expect(view.deploymentStatus).toBe("deployed");
+      expect(executedClickhouseSql).toContain(view.joinSql);
       expect(view.sourceTables).toContain("subscriptions");
       expect(view.sourceTables).toContain("customers");
 
       // Verify Suggested Cross-Table Queries
       expect(profile.suggestedQueries.length).toBeGreaterThan(0);
-      expect(profile.suggestedQueries[0].sqlSnippet).toContain("JOIN");
+      expect(profile.suggestedQueries[0].sqlSnippet).toContain("SELECT * FROM");
+      expect(profile.suggestedQueries[0].sqlSnippet).toContain(view.viewName);
     });
   });
 

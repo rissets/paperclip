@@ -1,7 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { Readable } from "node:stream";
-import type { StorageService, StorageProvider, PutFileInput, PutFileResult } from "./types.js";
+import type {
+  StorageService, StorageProvider, PutFileInput, PutFileResult,
+  CompleteMultipartObjectInput, UploadMultipartObjectPartInput,
+} from "./types.js";
 import { badRequest, forbidden, unprocessable } from "../errors.js";
 
 const MAX_SEGMENT_LENGTH = 120;
@@ -54,6 +57,15 @@ function ensureCompanyPrefix(companyId: string, objectKey: string): void {
   }
 }
 
+function validateExplicitObjectKey(companyId: string, objectKey: string): string {
+  ensureCompanyPrefix(companyId, objectKey);
+  const segments = objectKey.split("/");
+  if (objectKey.length > 1024 || segments.some((segment) => !segment || segment === "." || segment === ".." || !/^[a-zA-Z0-9_-]+$/.test(segment))) {
+    throw badRequest("Invalid deterministic object key");
+  }
+  return objectKey;
+}
+
 function hashBuffer(input: Buffer): string {
   return createHash("sha256").update(input).digest("hex");
 }
@@ -97,15 +109,19 @@ export function createStorageService(provider: StorageProvider): StorageService 
 
     async putFile(input: PutFileInput): Promise<PutFileResult> {
       assertPutFileInput(input);
-      const objectKey = buildObjectKey(input.companyId, input.namespace, input.originalFilename);
+      const objectKey = input.objectKey
+        ? validateExplicitObjectKey(input.companyId, input.objectKey)
+        : buildObjectKey(input.companyId, input.namespace, input.originalFilename);
       const byteSize = "byteSize" in input ? input.byteSize : input.body.length;
       const contentType = input.contentType.trim().toLowerCase();
+      const sha256 = "sha256" in input ? input.sha256 : hashBuffer(input.body);
       try {
         await provider.putObject({
           objectKey,
           body: input.body,
           contentType,
           contentLength: byteSize,
+          sha256,
         });
       } catch (error) {
         await provider.deleteObject({ objectKey }).catch(() => {});
@@ -119,7 +135,7 @@ export function createStorageService(provider: StorageProvider): StorageService 
         objectKey,
         contentType,
         byteSize,
-        sha256: "sha256" in input ? input.sha256 : hashBuffer(input.body),
+        sha256,
         originalFilename: input.originalFilename,
       };
     },
@@ -137,6 +153,37 @@ export function createStorageService(provider: StorageProvider): StorageService 
     async deleteObject(companyId: string, objectKey: string) {
       ensureCompanyPrefix(companyId, objectKey);
       await provider.deleteObject({ objectKey });
+    },
+
+    async createMultipartUpload(input) {
+      if (!provider.createMultipartUpload) throw unprocessable("Configured datasource storage does not support multipart uploads");
+      if (!input.companyId.trim()) throw unprocessable("companyId is required");
+      if (input.sha256 && !/^[0-9a-f]{64}$/.test(input.sha256)) throw unprocessable("A valid SHA-256 is required when provided");
+      const objectKey = buildObjectKey(input.companyId, input.namespace, input.originalFilename);
+      const { uploadId } = await provider.createMultipartUpload({
+        objectKey, contentType: input.contentType.trim().toLowerCase(), sha256: input.sha256,
+      });
+      return { objectKey, uploadId };
+    },
+
+    async uploadMultipartPart(input) {
+      ensureCompanyPrefix(input.companyId, input.objectKey);
+      if (!provider.uploadMultipartPart) throw unprocessable("Configured datasource storage does not support multipart uploads");
+      return provider.uploadMultipartPart({
+        objectKey: input.objectKey, uploadId: input.uploadId, partNumber: input.partNumber, body: input.body,
+      });
+    },
+
+    async completeMultipartUpload(input) {
+      ensureCompanyPrefix(input.companyId, input.objectKey);
+      if (!provider.completeMultipartUpload) throw unprocessable("Configured datasource storage does not support multipart uploads");
+      await provider.completeMultipartUpload({ objectKey: input.objectKey, uploadId: input.uploadId, parts: input.parts });
+    },
+
+    async abortMultipartUpload(input) {
+      ensureCompanyPrefix(input.companyId, input.objectKey);
+      if (!provider.abortMultipartUpload) throw unprocessable("Configured datasource storage does not support multipart uploads");
+      await provider.abortMultipartUpload({ objectKey: input.objectKey, uploadId: input.uploadId });
     },
   };
 }

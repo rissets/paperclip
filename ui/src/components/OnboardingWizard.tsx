@@ -104,6 +104,7 @@ import {
 } from "../lib/onboarding-launch";
 import { buildNewAgentRuntimeConfig } from "../lib/new-agent-runtime-config";
 import { DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX } from "@paperclipai/adapter-codex-local";
+import { DEFAULT_PI_LOCAL_MODEL } from "@paperclipai/adapter-pi-local";
 import { DEFAULT_CURSOR_LOCAL_MODEL } from "@paperclipai/adapter-cursor-local";
 import { DEFAULT_GEMINI_LOCAL_MODEL } from "@paperclipai/adapter-gemini-local";
 import { DEFAULT_KIMI_LOCAL_MODEL } from "@paperclipai/adapter-kimi-local";
@@ -990,7 +991,9 @@ function OnboardingWizardInner({
           if (targetConn && targetConn.models.length > 0) {
             setModel((prevModel) => {
               if (prevModel && targetConn.models.some((m) => m.id === prevModel)) return prevModel;
-              return targetConn.models[0].id;
+              return targetConn.models.some((m) => m.id === DEFAULT_PI_LOCAL_MODEL)
+                ? DEFAULT_PI_LOCAL_MODEL
+                : targetConn.models[0].id;
             });
           }
         } else {
@@ -1602,6 +1605,10 @@ function OnboardingWizardInner({
     }
     if (next === "cursor") {
       setModel(DEFAULT_CURSOR_LOCAL_MODEL);
+      return;
+    }
+    if (next === "pi_local") {
+      setModel("");
       return;
     }
     setModel("");
@@ -2903,7 +2910,11 @@ function OnboardingWizardInner({
                           setCredentialMode("api");
                           const active = piConnections.find((c) => c.id === selectedPiConnectionId) ?? piConnections[0];
                           if (active && active.models.length > 0) {
-                            setModel(active.models[0].id);
+                            setModel(active.models.some((m) => m.id === DEFAULT_PI_LOCAL_MODEL)
+                              ? DEFAULT_PI_LOCAL_MODEL
+                              : active.models[0].id);
+                          } else {
+                            setModel("");
                           }
                         }
                         else if (id !== "codex_local") setModel("");

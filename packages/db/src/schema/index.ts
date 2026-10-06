@@ -220,6 +220,11 @@ export {
   orchestratorSessions,
   orchestratorMessages,
 } from "./data_sources.js";
+export { dataSourceJobs } from "./data_source_jobs.js";
+export { dataSourceUploadSessions } from "./data_source_upload_sessions.js";
+export { dataSourceQueryJobs } from "./data_source_query_jobs.js";
+export { dataSourceChunkEmbeddings } from "./data_source_chunk_embeddings.js";
+export { dataSourceGatewayChunkEmbeddings } from "./data_source_gateway_chunk_embeddings.js";
 
 export { chatTaskHandoffs, chatCompletionDeliveries } from "./chat_completion_deliveries.js";
 export { agentInstructionRevisions, agentInstructionHeads, agentInstructionWorkingCopies } from "./agent_instruction_revisions.js";

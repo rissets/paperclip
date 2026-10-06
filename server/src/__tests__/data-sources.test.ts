@@ -102,24 +102,19 @@ Evaluasi didasarkan pada kualitas, rekam jejak, garansi purna jual, dan harga pe
     const firstChunk = chunks[0];
     expect(firstChunk.title).toBeDefined();
     expect(firstChunk.content).toContain("100 juta");
-    expect(firstChunk.embedding).toBeDefined();
-    expect(firstChunk.embedding).toHaveLength(128);
+    // Parsing produces text chunks only; the onboarding pipeline attaches a
+    // model-generated vector after choosing its explicit embedding space.
+    expect(firstChunk.embedding).toBeUndefined();
   });
 
-  it("calculates accurate cosine similarity for semantic matching", () => {
-    const textA = "Kebijakan pengadaan barang operasional dan persetujuan direktur keuangan.";
-    const textB = "Aturan pengadaan barang kantor dan otorisasi anggaran pengadaan.";
-    const textC = "Resep memasak rendang daging sapi khas Padang.";
-
-    const embA = KnowledgeIngestionService.generateEmbedding(textA);
-    const embB = KnowledgeIngestionService.generateEmbedding(textB);
-    const embC = KnowledgeIngestionService.generateEmbedding(textC);
-
+  it("calculates cosine similarity only for compatible model vectors", () => {
+    const embA = [1, 0.8, 0];
+    const embB = [1, 0.7, 0];
+    const embC = [0, 0, 1];
     const simAB = KnowledgeIngestionService.cosineSimilarity(embA, embB);
     const simAC = KnowledgeIngestionService.cosineSimilarity(embA, embC);
-
-    // Business & procurement query matches more closely than food recipe
     expect(simAB).toBeGreaterThan(simAC);
+    expect(KnowledgeIngestionService.cosineSimilarity(embA, [1, 0])).toBe(0);
   });
 
   it("does not treat isolated single numbers or table indices as section headers", async () => {
@@ -332,7 +327,7 @@ describe("TypeSafe Jev System One Decision Plane", () => {
     expect(metricDecision.groupBy).toBe("region");
   });
 
-  it("re-ranks RAG candidate snippets with calibrated scoring", async () => {
+  it("re-ranks RAG candidates and evaluates literal query-term coverage", async () => {
     const { TypeSafeJevService } = await import("../services/typesafe-jev.js");
     const jev = new TypeSafeJevService();
 
@@ -344,6 +339,19 @@ describe("TypeSafe Jev System One Decision Plane", () => {
     expect(ragEval.topChunkIds).toBeDefined();
     expect(ragEval.topChunkIds[0]).toBe("c1");
     expect(ragEval.isAnswerable).toBe(true);
+  });
+
+  it("does not treat one matching word as enough evidence for a broad question", async () => {
+    const { TypeSafeJevService } = await import("../services/typesafe-jev.js");
+    const jev = new TypeSafeJevService();
+
+    const ragEval = await jev.rerankAndVerifyRag("Berapa komitmen SLA uptime cloud?", [
+      { chunkId: "c1", content: "Cloud services rely on separate network tiers.", sourceName: "Architecture Notes" },
+    ]);
+
+    expect(ragEval.isAnswerable).toBe(false);
+    expect(ragEval.confidence).toBeLessThan(0.4);
+    expect(ragEval.answerabilityNote).toContain("do not cover enough");
   });
 
   it("formats Indonesian company profile from internal AHU_DB perseroan record", async () => {
@@ -559,6 +567,3 @@ describe("TypeSafe Jev System One Decision Plane", () => {
     expect(reasoningSteps[0].agent).toBe("StructuredIngestionAgent");
   });
 });
-
-
-
