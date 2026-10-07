@@ -45,9 +45,80 @@ import { DataSourceDatabaseConfigService, publicDatabaseMetadata } from "./data-
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { assertDataSourceJobLease, completeDataSourceJobLease, DataSourceLeaseLostError, type DataSourceJobLease } from "./data-source-job-lease.js";
 
-type StructuredColumn = { name: string; dataType?: string };
+type StructuredColumn = { name: string; dataType?: string; role?: string; clickhouseType?: string };
 type QueryFilterDialect = "postgres" | "mysql" | "clickhouse";
 type SnapshotActor = { actorType: "user" | "agent"; actorId: string; agentId?: string | null; runId?: string | null };
+type StructuredAggregateFunction = "sum" | "avg" | "count" | "min" | "max";
+
+function isTemporalStructuredColumn(column: StructuredColumn): boolean {
+  const normalizedType = column.dataType?.toLowerCase();
+  return normalizedType === "date"
+    || normalizedType === "time"
+    || normalizedType === "datetime"
+    || normalizedType === "timestamp"
+    || column.role === "timestamp"
+    || /(^|[_\s])(date|time|timestamp|datetime|created|updated|modified|period|tanggal|waktu)([_\s]|$)/i.test(column.name);
+}
+
+export function validateStructuredAggregationColumn(
+  column: StructuredColumn,
+  fn: StructuredAggregateFunction,
+): void {
+  if (fn === "count") return;
+  if ((fn === "sum" || fn === "avg") && column.dataType !== "number") {
+    throw unprocessable(`${fn} requires a numeric column: ${column.name}`);
+  }
+  if ((fn === "min" || fn === "max") && column.dataType !== "number" && !isTemporalStructuredColumn(column)) {
+    throw unprocessable(`${fn} requires a numeric or date/time column: ${column.name}`);
+  }
+}
+
+export function clickhouseAggregateColumnExpression(column: StructuredColumn, fn: StructuredAggregateFunction): string {
+  const quoted = quoteDataIdentifier(column.name, "`");
+  if ((fn !== "min" && fn !== "max") || !isTemporalStructuredColumn(column)) return quoted;
+  const clickhouseType = column.clickhouseType || "";
+  const nativeClickhouseDate = /\bdate(?:32|time(?:64)?)\b/i.test(clickhouseType);
+  const numericColumn = column.dataType === "number"
+    || /\b(?:u?int(?:8|16|32|64|128|256)|float(?:32|64)|decimal(?:32|64|128|256))\b/i.test(clickhouseType);
+  return nativeClickhouseDate || numericColumn ? quoted : `parseDateTimeBestEffortOrNull(${quoted})`;
+}
+
+function calculateStructuredAggregate(
+  values: unknown[],
+  fn: StructuredAggregateFunction,
+  temporal: boolean,
+): number | unknown {
+  const nonNullValues = values.filter((value) => value !== null && value !== undefined);
+  if (fn === "count") return nonNullValues.length;
+
+  const comparable = nonNullValues.flatMap((value) => {
+    if (temporal) {
+      const orderValue = value instanceof Date
+        ? value.getTime()
+        : typeof value === "number"
+          ? value
+          : Date.parse(String(value));
+      return Number.isFinite(orderValue) ? [{ orderValue, value }] : [];
+    }
+    const orderValue = Number(value);
+    return Number.isFinite(orderValue) ? [{ orderValue, value: orderValue }] : [];
+  });
+
+  if (fn === "min" || fn === "max") {
+    if (comparable.length === 0) return temporal ? null : 0;
+    const ordered = comparable.reduce((best, item) =>
+      fn === "min"
+        ? item.orderValue < best.orderValue ? item : best
+        : item.orderValue > best.orderValue ? item : best,
+    );
+    return temporal ? ordered.value : Number(ordered.orderValue.toFixed(2));
+  }
+
+  const numericValues = comparable.map((item) => item.orderValue);
+  const total = numericValues.reduce((sum, value) => sum + value, 0);
+  const result = fn === "avg" ? numericValues.length ? total / numericValues.length : 0 : total;
+  return Number(result.toFixed(2));
+}
 
 const EXTERNAL_SNAPSHOT_PAGE_SIZE = 2_000;
 const MAX_SNAPSHOT_TABLES_PER_JOB = 100;
@@ -2344,16 +2415,14 @@ export class DataSourcesService {
     const aggregation = options.aggregate;
     const allowedAggregations = new Set(["sum", "avg", "count", "min", "max"]);
     if (aggregation) {
-      if (!allowedAggregations.has(aggregation.fn)) throw new Error("Unsupported aggregation function");
+      if (!allowedAggregations.has(aggregation.fn)) throw unprocessable("Unsupported aggregation function");
       const metricColumn = schema.find((column) => column.name === aggregation.column);
       if (!metricColumn) {
-        throw new Error(`Unknown aggregation column: ${aggregation.column}`);
+        throw unprocessable(`Unknown aggregation column: ${aggregation.column}`);
       }
-      if (aggregation.fn !== "count" && metricColumn.dataType !== "number") {
-        throw new Error(`${aggregation.fn} requires a numeric column: ${aggregation.column}`);
-      }
+      validateStructuredAggregationColumn(metricColumn, aggregation.fn);
       if (aggregation.groupBy && !schema.some((column) => column.name === aggregation.groupBy)) {
-        throw new Error(`Unknown group-by column: ${aggregation.groupBy}`);
+        throw unprocessable(`Unknown group-by column: ${aggregation.groupBy}`);
       }
     }
     // Validate filter keys/values even on the local compatibility path.
@@ -2486,7 +2555,8 @@ export class DataSourcesService {
         if (chTables.includes(sanitizedName)) {
           const { column, fn, groupBy } = aggregation;
           const filters = compileStructuredFilters(options.filter, schema, "clickhouse");
-          const quotedColumn = quoteDataIdentifier(column, "`");
+          const metricColumn = schema.find((item) => item.name === column)!;
+          const quotedColumn = clickhouseAggregateColumnExpression(metricColumn, fn);
           const alias = quoteDataIdentifier(`${fn}_${column}`, "`");
           const selectGroup = groupBy ? `${quoteDataIdentifier(groupBy, "`")}, ` : "";
           const groupByClause = groupBy ? ` GROUP BY ${quoteDataIdentifier(groupBy, "`")}` : "";
@@ -2661,34 +2731,36 @@ export class DataSourcesService {
     const totalRows = pageFromLocalStorage ? table.rowCount : rows.length;
     if (aggregation) {
       const { column, fn, groupBy } = aggregation;
-      const grouped = new Map<string, { rows: number; nonNullCount: number; values: number[] }>();
+      const metricColumn = schema.find((item) => item.name === column)!;
+      const temporalMetric = isTemporalStructuredColumn(metricColumn);
+      const grouped = new Map<string, { rows: number; values: unknown[] }>();
       if (groupBy) {
         for (const row of rows) {
           const groupKey = String(row[groupBy] ?? "Unknown");
-          const state = grouped.get(groupKey) || { rows: 0, nonNullCount: 0, values: [] };
+          const state = grouped.get(groupKey) || { rows: 0, values: [] };
           state.rows++;
-          if (row[column] !== null && row[column] !== undefined) state.nonNullCount++;
-          const numericValue = Number(row[column]);
-          if (row[column] !== null && row[column] !== undefined && Number.isFinite(numericValue)) {
-            state.values.push(numericValue);
-          }
+          state.values.push(row[column]);
           grouped.set(groupKey, state);
         }
         const aggregatedRows = [...grouped.entries()].map(([groupKey, state]) => {
-          const values = state.values;
-          let aggregateValue = 0;
-          if (fn === "count") aggregateValue = state.nonNullCount;
-          else if (fn === "sum") aggregateValue = values.reduce((sum, value) => sum + value, 0);
-          else if (fn === "avg") aggregateValue = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
-          else if (fn === "min") aggregateValue = values.length ? Math.min(...values) : 0;
-          else if (fn === "max") aggregateValue = values.length ? Math.max(...values) : 0;
+          const aggregateValue = calculateStructuredAggregate(state.values, fn, temporalMetric);
           return {
             [groupBy]: groupKey,
-            [`${fn}_${column}`]: Number(aggregateValue.toFixed(2)),
+            [`${fn}_${column}`]: aggregateValue,
             row_count: state.rows,
           };
         });
-        aggregatedRows.sort((a, b) => (b[`${fn}_${column}`] as number) - (a[`${fn}_${column}`] as number));
+        const comparableGroupValue = (value: unknown) => {
+          if (temporalMetric && (fn === "min" || fn === "max")) {
+            const parsed = value instanceof Date ? value.getTime() : Date.parse(String(value));
+            return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
+          }
+          const parsed = Number(value);
+          return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
+        };
+        aggregatedRows.sort((a, b) =>
+          comparableGroupValue(b[`${fn}_${column}`]) - comparableGroupValue(a[`${fn}_${column}`]),
+        );
         return {
           tableId,
           tableName: table.tableName,
@@ -2699,24 +2771,14 @@ export class DataSourcesService {
       }
 
       const selectedValues = rows.map((row) => row[column]);
-      const nonNullCount = selectedValues.filter((value) => value !== null && value !== undefined).length;
-      const values = selectedValues
-        .filter((value) => value !== null && value !== undefined)
-        .map(Number)
-        .filter(Number.isFinite);
-      let aggregateValue = 0;
-      if (fn === "count") aggregateValue = nonNullCount;
-      else if (fn === "sum") aggregateValue = values.reduce((sum, value) => sum + value, 0);
-      else if (fn === "avg") aggregateValue = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
-      else if (fn === "min") aggregateValue = values.length ? Math.min(...values) : 0;
-      else if (fn === "max") aggregateValue = values.length ? Math.max(...values) : 0;
+      const aggregateValue = calculateStructuredAggregate(selectedValues, fn, temporalMetric);
       return {
         tableId,
         tableName: table.tableName,
         columns: [`${fn}_${column}`, "total_rows"],
-        rows: [{ [`${fn}_${column}`]: Number(aggregateValue.toFixed(2)), total_rows: nonNullCount }],
+        rows: [{ [`${fn}_${column}`]: aggregateValue, total_rows: selectedValues.filter((value) => value !== null && value !== undefined).length }],
         totalRows: 1,
-        summary: { metrics: { [`${fn}_${column}`]: Number(aggregateValue.toFixed(2)) } },
+        ...(typeof aggregateValue === "number" ? { summary: { metrics: { [`${fn}_${column}`]: aggregateValue } } } : {}),
       };
     }
 

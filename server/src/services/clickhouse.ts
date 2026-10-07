@@ -70,6 +70,117 @@ export function clickhouseSourceTableName(tableId: string, displayName: string):
   return `ds_${identity}_${readable}`;
 }
 
+/** Rewrite assigned logical/legacy table aliases to their published ClickHouse names. */
+export function rewriteClickhouseTableReferences(
+  sql: string,
+  physicalNameByAlias: ReadonlyMap<string, string>,
+  cteNames: ReadonlySet<string> = new Set(),
+): string {
+  type Identifier = { start: number; end: number; value: string };
+  const replacements: Array<{ start: number; end: number; value: string }> = [];
+  const lowerCtes = new Set([...cteNames].map((name) => name.toLowerCase()));
+
+  const skipTrivia = (start: number): number => {
+    let index = start;
+    while (index < sql.length) {
+      if (/\s/.test(sql[index]!)) {
+        index++;
+      } else if (sql[index] === "-" && sql[index + 1] === "-") {
+        index += 2;
+        while (index < sql.length && sql[index] !== "\n") index++;
+      } else if (sql[index] === "/" && sql[index + 1] === "*") {
+        index += 2;
+        while (index < sql.length && !(sql[index] === "*" && sql[index + 1] === "/")) index++;
+        index = Math.min(sql.length, index + 2);
+      } else {
+        break;
+      }
+    }
+    return index;
+  };
+
+  const readIdentifier = (start: number): Identifier | null => {
+    const quote = sql[start];
+    if (quote === "`" || quote === '"') {
+      let value = "";
+      let index = start + 1;
+      while (index < sql.length) {
+        if (sql[index] === quote && sql[index + 1] === quote) {
+          value += quote;
+          index += 2;
+        } else if (sql[index] === quote) {
+          return { start, end: index + 1, value };
+        } else {
+          value += sql[index];
+          index++;
+        }
+      }
+      return null;
+    }
+    const match = sql.slice(start).match(/^[A-Za-z0-9_]+/);
+    return match ? { start, end: start + match[0].length, value: match[0] } : null;
+  };
+
+  let index = 0;
+  while (index < sql.length) {
+    if (sql[index] === "-" && sql[index + 1] === "-") {
+      index += 2;
+      while (index < sql.length && sql[index] !== "\n") index++;
+      continue;
+    }
+    if (sql[index] === "/" && sql[index + 1] === "*") {
+      index += 2;
+      while (index < sql.length && !(sql[index] === "*" && sql[index + 1] === "/")) index++;
+      index = Math.min(sql.length, index + 2);
+      continue;
+    }
+    if (sql[index] === "'") {
+      index++;
+      while (index < sql.length) {
+        if (sql[index] === "'" && sql[index + 1] === "'") index += 2;
+        else if (sql[index] === "'") { index++; break; }
+        else if (sql[index] === "\\") index += 2;
+        else index++;
+      }
+      continue;
+    }
+
+    const keywordMatch = sql.slice(index).match(/^(from|join)\b/i);
+    if (keywordMatch && (index === 0 || !/[A-Za-z0-9_]/.test(sql[index - 1]!))) {
+      const firstStart = skipTrivia(index + keywordMatch[0].length);
+      const first = readIdentifier(firstStart);
+      if (first) {
+        let table = first;
+        const dot = skipTrivia(first.end);
+        if (sql[dot] === ".") {
+          const qualified = readIdentifier(skipTrivia(dot + 1));
+          if (qualified) table = qualified;
+        }
+        const normalized = table.value.toLowerCase();
+        const physicalName = physicalNameByAlias.get(normalized);
+        if (physicalName && !lowerCtes.has(normalized) && normalized !== physicalName.toLowerCase()) {
+          replacements.push({ start: table.start, end: table.end, value: `\`${physicalName.replaceAll("`", "``")}\`` });
+        }
+        index = table.end;
+        continue;
+      }
+    }
+
+    if (sql[index] === "`" || sql[index] === '"') {
+      const identifier = readIdentifier(index);
+      index = identifier?.end ?? index + 1;
+    } else {
+      index++;
+    }
+  }
+
+  let rewritten = sql;
+  for (const replacement of replacements.reverse()) {
+    rewritten = rewritten.slice(0, replacement.start) + replacement.value + rewritten.slice(replacement.end);
+  }
+  return rewritten;
+}
+
 export function rewriteClickhouseCreateTableName(ddl: string, tableName: string): string {
   const sanitized = tableName.replace(/[^a-zA-Z0-9_]/g, "");
   if (!sanitized) throw new Error("Invalid ClickHouse table name");

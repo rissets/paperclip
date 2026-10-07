@@ -121,6 +121,16 @@ flowchart LR
   Retrieval --> Cache[Redis: embeddings, structured results, and RAG candidates]
 ~~~
 
+### Agent-facing structured queries and table identity
+
+The Data Agent's structured query CLI returns stable `tableId`, `dataSourceId`, numeric `rowCount`, and the published physical `clickhouseTable` in JSON catalog output. Use both IDs for `--aggregate` and `--describe-table` so those operations resolve the selected source directly instead of listing the full catalog again. Use the physical identifier for direct `--sql`; the displayed table name is a logical label and can differ from the ClickHouse table name. `system.tables` describes ClickHouse catalog entries, not records in a datasource; use `count()` on the physical table when a source-record count is required.
+
+Agent SQL authorization is still evaluated against the agent's current datasource grants and deployed collection views. For assigned tables, the API accepts an unambiguous logical/display alias, sanitized legacy alias, or physical table identifier and rewrites references in `FROM`/`JOIN` clauses to the published physical name before execution. It does not rewrite comments or string literals, and CTE names are left alone. If one alias identifies multiple granted tables, it is not resolved implicitly; use the exact physical identifier. This compatibility mapping fixes logical-name queries without widening table access.
+
+Structured `sum` and `avg` remain numeric-only. `count` counts non-null values; `min` and `max` accept numeric or date/time columns, including timestamp-like string columns. On ClickHouse, string timestamps are parsed with `parseDateTimeBestEffortOrNull` for these extrema; native ClickHouse date/time and numeric columns are used directly. Invalid functions, columns, or incompatible types return a validation error instead of surfacing as an internal server error.
+
+The shipped Data Agent instructions direct a new analysis to list the catalog once, use stable IDs, choose bounded ClickHouse aggregation, distinguish source row counts from grouped-result counts, and avoid `SELECT *` or whole-dataset retrieval. A chart-only/presentation follow-up reuses the immediately preceding verified result; failed queries get at most one correction retry, while timed-out external queries should be narrowed or reported instead of looped. Existing built-in Data Agents receive default managed instructions only when the shipped entry is absent and no external/legacy instruction source or committed managed revision takes precedence; operator-authored entry files are preserved.
+
 ### Durable external query jobs
 
 The existing `POST /api/companies/:companyId/data-sources/:id/query-sql` remains the short interactive path with its 15-second server-side deadline and client-disconnect cancellation. A caller can send a slower bounded read-only query asynchronously instead:

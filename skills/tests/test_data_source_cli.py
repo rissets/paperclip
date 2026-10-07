@@ -1,5 +1,9 @@
 import importlib.util
+import hashlib
+import io
+import json
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -36,6 +40,41 @@ class JsonResponse:
 
 
 class DataSourceCliTests(unittest.TestCase):
+    def test_structured_catalog_exposes_physical_clickhouse_table(self):
+        source = {
+            "id": "source-1",
+            "name": "Network KPIs",
+            "sourceType": "csv",
+            "status": "ready",
+            "tables": [{
+                "id": "table-1",
+                "tableName": "06_datacom_device_inventory",
+                "rowCount": 59,
+                "columnCount": 8,
+                "semanticModel": {"clickhouseTable": "ds_0123456789abcdef01234567_06_datacom_device_invent"},
+            }],
+        }
+        output = io.StringIO()
+        with patch.object(query_structured.sys, "argv", [
+            "query_structured.py", "--list-tables", "--company-id", "company-1", "--format", "json",
+        ]), patch.object(query_structured, "make_request", return_value=[source]), redirect_stdout(output):
+            query_structured.main()
+
+        table = json.loads(output.getvalue())[0]
+        self.assertEqual(table["Table Name"], "06_datacom_device_inventory")
+        self.assertEqual(table["ClickHouse Table"], "ds_0123456789abcdef01234567_06_datacom_device_invent")
+        self.assertEqual(table["tableId"], "table-1")
+        self.assertEqual(table["dataSourceId"], "source-1")
+        self.assertEqual(table["rowCount"], 59)
+        self.assertEqual(table["clickhouseTable"], table["ClickHouse Table"])
+
+    def test_structured_catalog_derives_the_same_physical_name_as_server_fallback(self):
+        table = {"id": "table-1", "tableName": "06_datacom_device_inventory", "semanticModel": {}}
+        self.assertEqual(
+            query_structured.clickhouse_table_name(table),
+            "ds_" + hashlib.sha256(b"table-1").hexdigest()[:24] + "_06_datacom_device_invent",
+        )
+
     def test_structured_request_can_wait_for_server_side_clickhouse_limit(self):
         with patch.object(query_structured.urllib.request, "urlopen", return_value=JsonResponse()) as urlopen:
             result = query_structured.make_request(

@@ -36,14 +36,65 @@ function extractTextContent(content: string | Array<{ type: string; text?: strin
   return { text, thinking };
 }
 
-// Track pending tool calls for proper toolUseId matching
-let pendingToolCalls = new Map<string, { toolName: string; args: unknown }>();
+type PiStdoutParserState = {
+  pendingToolCalls: Map<string, { toolName: string; args: unknown }>;
+  thinkingText: string;
+  assistantText: string;
+};
 
-export function resetParserState(): void {
-  pendingToolCalls.clear();
+function createParserState(): PiStdoutParserState {
+  return { pendingToolCalls: new Map(), thinkingText: "", assistantText: "" };
 }
 
-export function parsePiStdoutLine(line: string, ts: string): TranscriptEntry[] {
+function resetParserStateForRun(state: PiStdoutParserState): void {
+  state.pendingToolCalls.clear();
+  state.thinkingText = "";
+  state.assistantText = "";
+}
+
+function appendSnapshot(
+  kind: "thinking" | "assistant",
+  text: string,
+  ts: string,
+  state: PiStdoutParserState,
+): TranscriptEntry[] {
+  if (!text) return [];
+  const currentText = kind === "thinking" ? state.thinkingText : state.assistantText;
+
+  // Pi reports the same message more than once: streamed deltas are followed
+  // by thinking_end/text_end, message_end, turn_end, and sometimes agent_end
+  // snapshots. Keep one transcript item for that message lifecycle.
+  if (text === currentText || (currentText && currentText.startsWith(text))) return [];
+
+  if (currentText && text.startsWith(currentText)) {
+    const delta = text.slice(currentText.length);
+    if (kind === "thinking") state.thinkingText = text;
+    else state.assistantText = text;
+    return delta ? [{ kind, ts, text: delta, delta: true }] : [];
+  }
+
+  if (kind === "thinking") state.thinkingText = text;
+  else state.assistantText = text;
+  return [{ kind, ts, text }];
+}
+
+function appendDelta(
+  kind: "thinking" | "assistant",
+  text: string,
+  ts: string,
+  state: PiStdoutParserState,
+): TranscriptEntry[] {
+  if (!text) return [];
+  if (kind === "thinking") state.thinkingText += text;
+  else state.assistantText += text;
+  return [{ kind, ts, text, delta: true }];
+}
+
+export function resetParserState(): void {
+  resetParserStateForRun(defaultParserState);
+}
+
+function parsePiStdoutLineWithState(line: string, ts: string, state: PiStdoutParserState): TranscriptEntry[] {
   const parsed = asRecord(safeJsonParse(line));
   if (!parsed) {
     // Non-JSON line, treat as raw stdout
@@ -61,6 +112,7 @@ export function parsePiStdoutLine(line: string, ts: string): TranscriptEntry[] {
 
   // Agent lifecycle
   if (type === "agent_start") {
+    resetParserStateForRun(state);
     return [{ kind: "system", ts, text: "🚀 Pi agent started" }];
   }
 
@@ -75,12 +127,8 @@ export function parsePiStdoutLine(line: string, ts: string): TranscriptEntry[] {
         const content = lastMessage.content as string | Array<{ type: string; text?: string; thinking?: string }>;
         const { text, thinking } = extractTextContent(content);
         
-        if (thinking) {
-          entries.push({ kind: "thinking", ts, text: thinking });
-        }
-        if (text) {
-          entries.push({ kind: "assistant", ts, text });
-        }
+        entries.push(...appendSnapshot("thinking", thinking, ts, state));
+        entries.push(...appendSnapshot("assistant", text, ts, state));
         
         // Extract usage
         const usage = asRecord(lastMessage.usage);
@@ -118,6 +166,8 @@ export function parsePiStdoutLine(line: string, ts: string): TranscriptEntry[] {
 
   // Turn lifecycle
   if (type === "turn_start") {
+    state.thinkingText = "";
+    state.assistantText = "";
     return []; // Skip noisy lifecycle events
   }
 
@@ -131,12 +181,8 @@ export function parsePiStdoutLine(line: string, ts: string): TranscriptEntry[] {
       const content = message.content as string | Array<{ type: string; text?: string; thinking?: string }>;
       const { text, thinking } = extractTextContent(content);
       
-      if (thinking) {
-        entries.push({ kind: "thinking", ts, text: thinking });
-      }
-      if (text) {
-        entries.push({ kind: "assistant", ts, text });
-      }
+      entries.push(...appendSnapshot("thinking", thinking, ts, state));
+      entries.push(...appendSnapshot("assistant", text, ts, state));
     }
     
     // Process tool results - match with pending tool calls
@@ -158,7 +204,7 @@ export function parsePiStdoutLine(line: string, ts: string): TranscriptEntry[] {
         }
         
         // Get tool name from pending calls if available
-        const pendingCall = pendingToolCalls.get(toolCallId);
+        const pendingCall = state.pendingToolCalls.get(toolCallId);
         const toolName = asString(tr.toolName, pendingCall?.toolName || "tool");
         
         entries.push({
@@ -171,7 +217,7 @@ export function parsePiStdoutLine(line: string, ts: string): TranscriptEntry[] {
         });
         
         // Clean up pending call
-        pendingToolCalls.delete(toolCallId);
+        state.pendingToolCalls.delete(toolCallId);
       }
     }
     
@@ -191,33 +237,25 @@ export function parsePiStdoutLine(line: string, ts: string): TranscriptEntry[] {
       // Handle thinking deltas
       if (msgType === "thinking_delta") {
         const delta = asString(assistantEvent.delta);
-        if (delta) {
-          return [{ kind: "thinking", ts, text: delta, delta: true }];
-        }
+        return appendDelta("thinking", delta, ts, state);
       }
       
       // Handle text deltas
       if (msgType === "text_delta") {
         const delta = asString(assistantEvent.delta);
-        if (delta) {
-          return [{ kind: "assistant", ts, text: delta, delta: true }];
-        }
+        return appendDelta("assistant", delta, ts, state);
       }
       
       // Handle thinking end - emit full thinking block
       if (msgType === "thinking_end") {
         const content = asString(assistantEvent.content);
-        if (content) {
-          return [{ kind: "thinking", ts, text: content }];
-        }
+        return appendSnapshot("thinking", content, ts, state);
       }
       
       // Handle text end - emit full text block
       if (msgType === "text_end") {
         const content = asString(assistantEvent.content);
-        if (content) {
-          return [{ kind: "assistant", ts, text: content }];
-        }
+        return appendSnapshot("assistant", content, ts, state);
       }
     }
     return [];
@@ -232,14 +270,8 @@ export function parsePiStdoutLine(line: string, ts: string): TranscriptEntry[] {
       const entries: TranscriptEntry[] = [];
       
       // Emit final thinking block if present
-      if (thinking) {
-        entries.push({ kind: "thinking", ts, text: thinking });
-      }
-      
-      // Emit final text block if present
-      if (text) {
-        entries.push({ kind: "assistant", ts, text });
-      }
+      entries.push(...appendSnapshot("thinking", thinking, ts, state));
+      entries.push(...appendSnapshot("assistant", text, ts, state));
       
       return entries;
     }
@@ -253,7 +285,7 @@ export function parsePiStdoutLine(line: string, ts: string): TranscriptEntry[] {
     const args = parsed.args;
     
     // Track this tool call for later matching
-    pendingToolCalls.set(toolCallId, { toolName, args });
+    state.pendingToolCalls.set(toolCallId, { toolName, args });
     
     return [{
       kind: "tool_call",
@@ -294,7 +326,7 @@ export function parsePiStdoutLine(line: string, ts: string): TranscriptEntry[] {
     }
     
     // Clean up pending call
-    pendingToolCalls.delete(toolCallId);
+    state.pendingToolCalls.delete(toolCallId);
     
     return [{
       kind: "tool_result",
@@ -308,4 +340,20 @@ export function parsePiStdoutLine(line: string, ts: string): TranscriptEntry[] {
 
   // Fallback for unknown event types
   return [{ kind: "stdout", ts, text: line }];
+}
+
+const defaultParserState = createParserState();
+
+/** Stateful parser for callers that build a transcript from one run at a time. */
+export function createPiStdoutParser() {
+  const state = createParserState();
+  return {
+    parseLine: (line: string, ts: string) => parsePiStdoutLineWithState(line, ts, state),
+    reset: () => resetParserStateForRun(state),
+  };
+}
+
+/** Stateless-compatible module entry point retained for existing consumers. */
+export function parsePiStdoutLine(line: string, ts: string): TranscriptEntry[] {
+  return parsePiStdoutLineWithState(line, ts, defaultParserState);
 }

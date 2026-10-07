@@ -20,6 +20,8 @@ Usage:
 import os
 import sys
 import json
+import hashlib
+import re
 import argparse
 import urllib.request
 import urllib.error
@@ -77,6 +79,20 @@ def print_markdown_table(headers, rows):
         else:
             row_vals = [str(r)]
         print("| " + " | ".join(row_vals) + " |")
+
+def clickhouse_table_name(table):
+    """Return the published physical ClickHouse identifier, including its stable fallback."""
+    semantic_model = table.get("semanticModel") or {}
+    stored_name = semantic_model.get("clickhouseTable")
+    if isinstance(stored_name, str) and stored_name:
+        return stored_name
+
+    table_id = table.get("id")
+    if not table_id:
+        return None
+    readable = re.sub(r"[^a-zA-Z0-9_]", "_", str(table.get("tableName") or "table")).lower()[:24] or "table"
+    identity = hashlib.sha256(str(table_id).encode("utf-8")).hexdigest()[:24]
+    return f"ds_{identity}_{readable}"
 
 def main():
     parser = argparse.ArgumentParser(
@@ -156,6 +172,7 @@ def main():
             ds_type = ds.get("sourceType")
             status = ds.get("status")
             for tbl in ds.get("tables", []):
+                physical_table = clickhouse_table_name(tbl)
                 tables_list.append({
                     "Table Name": tbl.get("tableName"),
                     "Collection": col_name or "-",
@@ -164,7 +181,14 @@ def main():
                     "Source Type": ds_type,
                     "Status": status,
                     "Table ID": tbl.get("id"),
-                    "Data Source ID": ds_id
+                    "Data Source ID": ds_id,
+                    "ClickHouse Table": physical_table,
+                    # Keep the human-readable labels above and expose stable,
+                    # typed fields for agents consuming --format json.
+                    "tableId": tbl.get("id"),
+                    "dataSourceId": ds_id,
+                    "rowCount": tbl.get("rowCount", 0),
+                    "clickhouseTable": physical_table,
                 })
 
         if args.format == "json":
@@ -173,7 +197,7 @@ def main():
             scope_label = f" in Collection '{args.collection}'" if args.collection else ""
             print(f"### Structured Tables{scope_label} ({len(tables_list)} found):\n")
             if tables_list:
-                headers = ["Table Name", "Collection", "Row Count", "Column Count", "Source Type", "Status", "Table ID"]
+                headers = ["Table Name", "Collection", "Row Count", "Column Count", "Source Type", "Status", "Table ID", "ClickHouse Table"]
                 print_markdown_table(headers, tables_list)
             else:
                 print("No structured tables accessible to this agent.")
@@ -181,8 +205,14 @@ def main():
 
     # 2. Describe Table
     if args.describe_table:
-        url = f"{api_prefix}/companies/{company_id}/data-sources"
-        sources = make_request(url, api_key=args.api_key, session_token=args.session_token)
+        if args.data_source_id:
+            url = f"{api_prefix}/companies/{company_id}/data-sources/{args.data_source_id}"
+            sources = [make_request(url, api_key=args.api_key, agent_id=agent_id, session_token=args.session_token)]
+        else:
+            url = f"{api_prefix}/companies/{company_id}/data-sources"
+            if agent_id:
+                url += f"?agentId={agent_id}"
+            sources = make_request(url, api_key=args.api_key, agent_id=agent_id, session_token=args.session_token)
         target = args.describe_table.lower()
         found_table = None
         found_ds = None
@@ -201,13 +231,16 @@ def main():
             sys.exit(1)
 
         if args.format == "json":
-            print(json.dumps(found_table, indent=2))
+            result = dict(found_table)
+            result["clickhouseTable"] = clickhouse_table_name(found_table)
+            print(json.dumps(result, indent=2))
             return
 
         print(f"### Schema for Table: `{found_table.get('tableName')}`")
         print(f"- **Data Source**: {found_ds.get('name')} (`{found_ds.get('id')}`)")
         print(f"- **Total Rows**: {found_table.get('rowCount', 0):,}")
         print(f"- **Total Columns**: {found_table.get('columnCount', 0)}\n")
+        print(f"- **ClickHouse Table**: `{clickhouse_table_name(found_table)}`\n")
 
         schema_cols = found_table.get("schemaDefinition", [])
         if schema_cols:

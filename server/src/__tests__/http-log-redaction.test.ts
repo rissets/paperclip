@@ -513,7 +513,9 @@ describe("HTTP logger redaction", () => {
     expect(log.level).toBe(status === 500 ? 50 : status === 403 ? 40 : 30);
     if (status === 500) {
       expect(log.errorContext.message).toBe("Synthetic cloud request failure");
+      expect(log.errorContext.stack).toBeUndefined();
       expect(log.err.message).toBe("Synthetic cloud request failure");
+      expect(log.err.stack).toContain("Synthetic cloud request failure");
     }
   });
 

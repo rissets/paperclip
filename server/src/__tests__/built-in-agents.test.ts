@@ -581,6 +581,34 @@ describeEmbeddedPostgres("built-in agents", () => {
     });
   });
 
+  it("backfills missing legacy Data Agent instructions without replacing later operator edits", async () => {
+    const companyId = await seedCompany();
+    const builtIns = builtInAgentService(db);
+    const created = await builtIns.ensure(companyId, "data-agent");
+    const instructions = agentInstructionsService(db);
+    const initialBundle = await instructions.getBundle(created.agent!);
+
+    // Simulate a pre-instructions built-in row from an older instance.
+    await fs.rm(path.join(initialBundle.managedRootPath, "AGENTS.md"), { force: true });
+    await db.update(agents)
+      .set({ adapterConfig: { model: DEFAULT_PI_LOCAL_MODEL } })
+      .where(and(eq(agents.companyId, companyId), eq(agents.id, created.agentId!)));
+
+    const reconciled = await builtIns.ensure(companyId, "data-agent");
+    const backfilled = await instructions.readFile(reconciled.agent!, "AGENTS.md");
+    expect(backfilled.content).toContain("## Query Workflow and Performance");
+    expect(reconciled.agent?.adapterConfig).toMatchObject({
+      instructionsBundleMode: "managed",
+      instructionsEntryFile: "AGENTS.md",
+    });
+
+    await writeInstructionEntry(reconciled.agent!, "AGENTS.md", "# Operator Data Agent instructions\n");
+    const afterOperatorEdit = await builtIns.ensure(companyId, "data-agent");
+    await expect(instructions.readFile(afterOperatorEdit.agent!, "AGENTS.md")).resolves.toMatchObject({
+      content: "# Operator Data Agent instructions\n",
+    });
+  });
+
   it("resets marked agents back to registry display defaults without replacing adapter setup", async () => {
     const companyId = await seedCompany();
     const builtIns = builtInAgentService(db);

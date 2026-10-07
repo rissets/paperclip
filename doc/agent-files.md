@@ -163,6 +163,13 @@ those hashes and already-applied bytes. Removed, unchanged stock files are
 removed; intervening personal edits stop the retry. This pending operation
 metadata is cleared on success and does not retain file revisions.
 
+Built-in agents that ship default instructions are reconciled non-destructively.
+If an older agent has no committed managed revision, external bundle, legacy
+prompt source, or existing entry file, reconciliation creates its missing
+managed entry from the shipped default and records an activity event. Existing
+operator-authored entries, external bundles, legacy prompt configuration, and
+committed managed revisions are preserved.
+
 External bundles retain their existing behavior. Their migration to managed
 storage is an explicit configuration action. Historical task cwd, provider-home,
 checkpoint, and workspace restoration formats are not rewritten.

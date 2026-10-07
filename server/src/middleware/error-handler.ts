@@ -170,7 +170,6 @@ export function errorHandler(
           ? { message: reportableError.message, name: reportableError.name }
           : {
               message: err.message,
-              stack: err.stack,
               name: err.name,
               details: err.details,
             },
@@ -270,11 +269,10 @@ export function errorHandler(
     isSecretSensitiveHttpRequest(req.method, req.originalUrl)
       ? { message: reportableError.message, name: reportableError.name }
       : err instanceof Error
-        ? { message: err.message, stack: err.stack, name: err.name }
+        ? { message: err.message, name: err.name }
         : {
             message: String(err),
             raw: err,
-            stack: rootError.stack,
             name: rootError.name,
           },
     reportableError,

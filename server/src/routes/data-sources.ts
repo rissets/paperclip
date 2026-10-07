@@ -18,7 +18,11 @@ import { OnboardingOrchestratorService } from "../services/onboarding-orchestrat
 import { EnterpriseOrchestratorService } from "../services/enterprise-orchestrator.js";
 import { DatabaseIntegrationService } from "../services/database-integration.js";
 import { isExternalQueryAbortError } from "../services/external-query-abort.js";
-import { ClickhouseService, clickhouseSourceTableName } from "../services/clickhouse.js";
+import {
+  ClickhouseService,
+  clickhouseSourceTableName,
+  rewriteClickhouseTableReferences,
+} from "../services/clickhouse.js";
 import { badRequest, forbidden, HttpError, notFound } from "../errors.js";
 import { userRbacService } from "../services/user-rbac-service.js";
 import { makeDataSourceCacheKey } from "../services/data-source-cache.js";
@@ -858,6 +862,7 @@ export function dataSourceRoutes(db: Db) {
       }
 
       const agentId = getRequestingAgentId(req);
+      let sqlToRun = sqlQuery;
       if (agentId) {
         const access = await dsService.getAgentDataSources(companyId, agentId);
         if (access.mode === "none") {
@@ -880,12 +885,21 @@ export function dataSourceRoutes(db: Db) {
               ),
             );
 
-          const allowedTableNames = new Set<string>();
+          const aliasTargets = new Map<string, Set<string>>();
+          const addTableAlias = (alias: string, physicalName: string) => {
+            const normalizedAlias = alias.trim().toLowerCase();
+            if (!normalizedAlias) return;
+            const targets = aliasTargets.get(normalizedAlias) ?? new Set<string>();
+            targets.add(physicalName);
+            aliasTargets.set(normalizedAlias, targets);
+          };
           for (const t of allowedTablesResult) {
-            allowedTableNames.add(t.tableName.toLowerCase());
-            allowedTableNames.add(t.tableName.toLowerCase().replace(/[^a-z0-9_]/g, "_"));
             const identity = (t.semanticModel as any)?.clickhouseTable || clickhouseSourceTableName(t.id, t.tableName);
-            allowedTableNames.add(String(identity).toLowerCase());
+            const sanitizedName = t.tableName.toLowerCase().replace(/[^a-z0-9_]/g, "_");
+            addTableAlias(t.tableName, String(identity));
+            addTableAlias(sanitizedName, String(identity));
+            addTableAlias(`ds_${sanitizedName}`, String(identity));
+            addTableAlias(String(identity), String(identity));
           }
 
           // Also allow collection unified ClickHouse views
@@ -903,11 +917,18 @@ export function dataSourceRoutes(db: Db) {
               const views = (col.semanticProfile as any)?.unifiedClickhouseViews || [];
               for (const v of views) {
                 if (v.viewName && v.deploymentStatus === "deployed") {
-                  allowedTableNames.add(v.viewName.toLowerCase());
+                  addTableAlias(v.viewName, v.viewName);
                 }
               }
             }
           }
+          const tableNameAliases = new Map<string, string>();
+          for (const [alias, targets] of aliasTargets) {
+            // Identical logical labels can exist in separate sources. Only
+            // resolve an alias automatically when it identifies one table.
+            if (targets.size === 1) tableNameAliases.set(alias, [...targets][0]!);
+          }
+          const allowedTableNames = new Set(tableNameAliases.keys());
 
           function stripSqlCommentsAndStrings(sql: string): string {
             let result = "";
@@ -1018,12 +1039,13 @@ export function dataSourceRoutes(db: Db) {
               throw forbidden(`Akses ditolak: Tabel '${tbl}' tidak termasuk dalam data source yang ditugaskan ke agen ini`);
             }
           }
+          sqlToRun = rewriteClickhouseTableReferences(sqlQuery, tableNameAliases, cteNames);
         }
       }
 
       const limit = req.body?.limit ? Number(req.body.limit) : undefined;
       try {
-        const result = await dsService.queryClickhouse(companyId, sqlQuery, limit);
+        const result = await dsService.queryClickhouse(companyId, sqlToRun, limit);
         res.json(result);
       } catch (err: any) {
         throw badRequest(err.message || "ClickHouse query execution failed");

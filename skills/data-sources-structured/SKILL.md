@@ -28,21 +28,26 @@ Discover tables within a collection when the user has identified one:
 python3 ~/.pi/agent/skills/data-sources-structured/scripts/query_structured.py --list-tables --collection "<collection_slug_or_id>"
 ```
 
-Or list all tables assigned to this agent (preferred when the request does not name a collection):
+Or list all tables assigned to this agent (preferred when the request does not name a collection). Use JSON when you need exact IDs or ClickHouse table mappings:
 ```bash
-python3 ~/.pi/agent/skills/data-sources-structured/scripts/query_structured.py --list-tables
+python3 ~/.pi/agent/skills/data-sources-structured/scripts/query_structured.py --list-tables --format json
 ```
+
+The JSON catalog's `tableId` and `dataSourceId` are the stable IDs for structured API operations; `rowCount` is numeric. For direct `--sql`, use `clickhouseTable`: the human-facing `Table Name` can be only a logical label and may not exist in ClickHouse. Never guess or rebuild physical table names.
 
 ### B. Describe Table Schema, Columns, and Metrics
 ```bash
-python3 ~/.pi/agent/skills/data-sources-structured/scripts/query_structured.py --describe-table "<table_name_or_id>"
+python3 ~/.pi/agent/skills/data-sources-structured/scripts/query_structured.py \
+  --data-source-id "<data_source_id>" \
+  --describe-table "<table_id>"
 ```
 
 ### C. Run Fast Aggregations (`sum`, `avg`, `count`, `min`, `max`)
 Group by any categorical dimension with optional filters:
 ```bash
 python3 ~/.pi/agent/skills/data-sources-structured/scripts/query_structured.py \
-  --table "<table_name_or_id>" \
+  --table "<table_id>" \
+  --data-source-id "<data_source_id>" \
   --aggregate sum \
   --column "<metric_column>" \
   --group-by "<category_dimension>" \
@@ -52,7 +57,8 @@ python3 ~/.pi/agent/skills/data-sources-structured/scripts/query_structured.py \
 With dimensional filtering:
 ```bash
 python3 ~/.pi/agent/skills/data-sources-structured/scripts/query_structured.py \
-  --table "<table_name_or_id>" \
+  --table "<table_id>" \
+  --data-source-id "<data_source_id>" \
   --aggregate avg \
   --column "<metric_column>" \
   --filter "region=East"
@@ -62,7 +68,7 @@ python3 ~/.pi/agent/skills/data-sources-structured/scripts/query_structured.py \
 For complex analytical queries, quantiles, time-series distributions, CTEs, or window expressions:
 ```bash
 python3 ~/.pi/agent/skills/data-sources-structured/scripts/query_structured.py \
-  --sql "SELECT category_col, count(*), sum(metric_col) AS total FROM <table_name> GROUP BY category_col ORDER BY total DESC"
+  --sql "SELECT category_col, count(*), sum(metric_col) AS total FROM <clickhouse_table_from_catalog> GROUP BY category_col ORDER BY total DESC"
 ```
 
 #### ClickHouse Best Practices for Dynamic SQL:
@@ -82,27 +88,23 @@ python3 ~/.pi/agent/skills/data-sources-structured/scripts/query_structured.py \
    SELECT toStartOfMonth(toDate('1899-12-30') + toInt32(month)) AS m, sum(net_revenue_usd) FROM <table> GROUP BY m ORDER BY m
    ```
    Check the column type first; if it is a real date string use `parseDateTimeBestEffortOrNull(col)` instead.
-4. **Never reference a column you have not verified.** A column that exists in one table
-   (e.g. `package_id` in `18_subscriber_package_assignment`) may not exist in another
-   (`23_subscriber_revenue_monthly`). Verify with `--describe-table <table>` or
-   `DESCRIBE "<table>"` / `SELECT name FROM system.columns WHERE table = '<table>'`
-   (system tables are allowed), and JOIN on the shared key (e.g. `subscriber_id`) to get missing attributes.
-5. **Quote table names that start with digits** with backticks or double quotes: `` `23_subscriber_revenue_monthly` ``.
+4. **Never reference a column you have not verified.** Reuse a schema already verified in the current thread. Otherwise describe only the selected table once, or query its physical identifier from the catalog. A column present in one table may not exist in another; join only on verified shared keys.
+5. The catalog-provided physical ClickHouse identifiers start with `ds_`; use them for direct SQL. Do not use `system.tables` as a shortcut for source row counts: its records describe ClickHouse metadata, not data rows. To count source records, run `count()` against the physical source table.
 6. **On a ClickHouse error, classify it before retrying**. Re-describe only for an unknown table or column; correct a syntax/dialect issue using the schema already fetched. Retry one corrected query at most once.
 7. **Charts**: when a visual helps, follow the `diagram-chart-rendering` skill and emit a ```mermaid block.
-8. **Dynamic Schema Introspection First**:
-   Always run `--describe-table <table_name_or_id>` for each table selected for the analysis. Do not describe every table in a large collection unless the user asks for a catalog.
+8. **Dynamic Schema Introspection First**: Run `--describe-table <table_id>` only when the required columns or types are not already known from the current request/thread or catalog metadata. Do not rediscover a known schema for a presentation-only follow-up.
 
 ---
 
 ## 2. Efficient Query Plan for Large Sources
 
-1. List the assigned tables once. Use row counts, semantic metrics, and the user's question to select the smallest relevant set; do not print or inspect the full catalog in the answer.
-2. Describe only those tables. Confirm the timestamp, entity key, metric columns, types, and any semantic aggregation guidance.
+1. For a new analysis, list the assigned tables once. Use row counts, semantic metrics, and the user's question to select the smallest relevant set; do not print or inspect the full catalog in the answer.
+2. Describe only those tables whose needed columns, timestamp, or entity keys are still unknown. Reuse the verified schema and result already present in the current issue thread when the user asks to redraw or explain the same answer.
 3. Plan one bounded query before running it: project only needed columns, filter the requested date range and entity scope as early as possible, aggregate in ClickHouse, and return grouped results rather than raw records. Avoid `SELECT *` and repeated full-table probes.
 4. For large time-series tables, first compute the requested grain (for example, per hour or per entity/day). If comparing event and baseline windows, restrict the scan to both windows and aggregate each window before joining. Join on the verified entity key and time bucket; never join solely on timestamp.
 5. Prefer `--aggregate` for simple supported aggregates. It can use the structured-result cache. Custom `--sql` is for analyses that need SQL features beyond that API and may execute a fresh scan.
 6. Keep the response result compact with a meaningful `--limit`. A row limit does not reduce the scan needed for an aggregate, so use filters and aggregation as well.
+7. For a presentation-only follow-up such as “buatkan visualisasi ulang”, reuse the latest verified query result, date range, filters, and source citation in the thread. Do not rerun discovery or the same successful query unless the user changes scope or requests fresh data.
 
 ### ClickHouse Dialect and Query-Shaping Rules
 

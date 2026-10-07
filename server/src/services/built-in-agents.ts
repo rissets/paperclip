@@ -390,6 +390,15 @@ const FALLBACK_DATA_AGENT_INSTRUCTIONS = [
   "5. **ClickHouse OLAP Execution**: Execute high-performance aggregations (sum, avg, count, groupBy) on ClickHouse columnar storage.",
   "6. **Self-Correction Retry Loop**: Automatically inspect database error feedback, inspect schemas, and correct column or alias issues dynamically.",
   "",
+  "## Query Workflow and Performance",
+  "- Classify each request as new analysis, refresh, or presentation-only follow-up. For redraw/restyle/explain requests about the immediately preceding answer, reuse its verified result, filters, period, and citations. Do not rediscover tables, rerun a successful query, inspect old Pi session logs, or create temporary scripts just to reformat the same result.",
+  "- For a new structured analysis, call `query_structured.py --list-tables --format json` once. Use `tableId` and `dataSourceId` for structured operations; `rowCount` is numeric. For direct ClickHouse `--sql`, use the exact `clickhouseTable` physical identifier from that catalog; `Table Name` may be only a logical label. Never guess a physical name.",
+  "- Do not use `system.tables` metadata as a substitute for counting source records. Query `count()` against the physical data table when a real row count is needed, and distinguish source rows from returned groups.",
+  "- Prefer one bounded analytical query: filter date/entity early, project only needed columns, aggregate in ClickHouse, and normally return at most 100 rows. Avoid `SELECT *`, whole-dataset retrieval, repeated schema discovery, and parallel copies of the same query. Describe a selected table only when needed columns or types are still unknown.",
+  "- For external databases, inspect/list schemas once only when needed, then use the durable query-job CLI with selective read-only SQL, an explicit limit, and the normal 30-second timeout. Use up to 60 seconds only when justified. After a timeout, narrow the query or report the timeout; do not loop.",
+  "- Retry a failed query at most once after correcting the table, column, or dialect. If still unavailable, name the source and blocker instead of guessing or silently switching sources.",
+  "- State the data source/table, date range, important filters, and whether counts mean source records or groups. Use the user's language and use the same verified values in the chart and its table.",
+  "",
   "## Invariants",
   "- Never execute mutating SQL queries (INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE). All queries must be strictly read-only SELECT.",
   "- Keep queries scoped strictly to the company boundary and assigned data sources.",
@@ -2060,6 +2069,62 @@ export function builtInAgentService(db: Db) {
     return state(definition, await findSingleAgent(companyId, definition));
   }
 
+  async function backfillMissingDefaultInstructions(agent: Agent, definition: BuiltInAgentDefinition): Promise<Agent> {
+    if (!definition.defaultInstructions || definition.bundle) return agent;
+
+    try {
+      const target = { companyId: agent.companyId, agentId: agent.id };
+      const revisions = agentInstructionRevisionService(db);
+      const committed = await revisions.readCommittedForRuntime(target);
+      if (committed) {
+        await revisions.materializeCurrent(target);
+        return (await agentSvc.getById(agent.id)) as Agent ?? agent;
+      }
+
+      const bundle = await instructionsSvc.getBundle(agent);
+      if (
+        bundle.mode === "external"
+        || bundle.legacyPromptTemplateActive
+        || bundle.legacyBootstrapPromptTemplateActive
+        || bundle.files.some((file) => file.path === bundle.entryFile)
+      ) {
+        return agent;
+      }
+
+      // Existing built-in agents predate managed instructions. Add the shipped
+      // entry only when it is absent, preserving any external bundle, legacy
+      // prompt, revision history, and supporting files already owned by the operator.
+      const entryFile = bundle.entryFile || "AGENTS.md";
+      const materialized = await instructionsSvc.materializeManagedBundle(agent, {
+        [entryFile]: definition.defaultInstructions,
+      }, {
+        entryFile,
+        replaceExisting: false,
+      });
+      const updated = await agentSvc.update(agent.id, {
+        adapterConfig: materialized.adapterConfig,
+      }, {
+        allowBuiltInAgentMetadata: true,
+        recordRevision: { source: "built-in-agent:backfill-instructions" },
+      });
+      if (!updated) throw notFound("Built-in agent not found");
+
+      await logActivity(db, {
+        companyId: agent.companyId,
+        actorType: "system",
+        actorId: "built-in-agents",
+        action: "agent.instructions_initialized",
+        entityType: "agent",
+        entityId: agent.id,
+        details: { key: definition.key, entryFile, source: "built-in-default-backfill" },
+      });
+      return updated as Agent;
+    } catch (error) {
+      console.warn(`[paperclip] Failed to backfill missing instructions for ${definition.key}:`, error);
+      return agent;
+    }
+  }
+
   async function ensure(
     companyId: string,
     key: string,
@@ -2123,8 +2188,9 @@ export function builtInAgentService(db: Db) {
         return state(definition, updated as Agent);
       }
       await ensureBuiltInAgentDefaultGrants(updated as Agent, definition);
-      await syncDefaultSkillsToAgent(updated as Agent, definition);
-      const resources = await reconcileBundleResources(updated as Agent, definition, "reconcile");
+      const withInstructions = await backfillMissingDefaultInstructions(updated as Agent, definition);
+      await syncDefaultSkillsToAgent(withInstructions, definition);
+      const resources = await reconcileBundleResources(withInstructions, definition, "reconcile");
       return state(definition, await agentSvc.getById(existing.id) as Agent, resources);
     }
 
