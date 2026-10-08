@@ -1,15 +1,13 @@
 import { createHash } from "node:crypto";
-import { and, eq, sql } from "drizzle-orm";
-import { activityLog, authUsers } from "@paperclipai/db";
+import { Router, type Request, type Response } from "express";
+import { and, eq, inArray, sql } from "drizzle-orm";
+import type { Db } from "@paperclipai/db";
+import { activityLog, agents, authUsers, companyMemberships, instanceUserRoles, projectAccessMembers } from "@paperclipai/db";
 import { projectToolContext } from "../services/project-tool-context.js";
 import { persistActivity, publishActivity } from "../services/activity-log.js";
 import { z } from "zod";
 import { normalizeProjectRepositoryUrl, resolveProjectRepositorySelection } from "../services/project-repositories.js";
 import { toolAccessService } from "../services/tool-access.js";
-import { Router, type Request, type Response } from "express";
-import type { Db } from "@paperclipai/db";
-import { agents, authUsers, companyMemberships, instanceUserRoles, projectAccessMembers } from "@paperclipai/db";
-import { inArray } from "drizzle-orm";
 import {
   addProjectAccessMemberSchema,
   createProjectSchema,
@@ -69,7 +67,7 @@ export function projectRoutes(db: Db) {
     return context;
   }
 
-  async function selectedRepositories(req: Request, companyId: string, ids: string[], existing: import("@paperclipai/shared").ProjectWorkspace[] = []) {
+  async function selectedRepositories(req: Request, companyId: string, ids: string[], existing: import("@paperclipai/shared").ProjectWorkspace[] = []): Promise<import("@paperclipai/shared").ProjectRepository[]> {
     const viewer = await repositoryViewer(req);
     if (!ids.length) return [];
     const available = await toolAccessService(db).listProjectRepositories(companyId, viewer.userId, viewer.localTrusted);
@@ -376,7 +374,7 @@ export function projectRoutes(db: Db) {
       );
     }
     if (workspace && (repositoryIds || repositoryUrls)) throw unprocessable("Use either workspace or repositoryIds/repositoryUrls when creating a project");
-    const urlRepositories = (repositoryUrls ?? []).map(normalizeProjectRepositoryUrl);
+    const urlRepositories: Array<{ fullName: string; url: string }> = (repositoryUrls ?? []).map(normalizeProjectRepositoryUrl);
     const repositories = repositoryIds ? await selectedRepositories(req, companyId, repositoryIds) : null;
     const actor = getActorInfo(req);
     const fingerprint = createHash("sha256").update(JSON.stringify({ projectData, workspace, repositoryIds, repositoryUrls })).digest("hex");
@@ -397,12 +395,11 @@ export function projectRoutes(db: Db) {
         }
       }
       if (runContext) await projectToolContext(tx as unknown as Db, req.actor, true);
-      const service = projectService(tx as unknown as Db);
       const projectPayload = { ...projectData, createdByUserId: req.actor.userId || null };
       const project = repositories ? await service.createWithRepositories(companyId, projectPayload, repositories) : await service.create(companyId, projectPayload);
       if (project.visibility === "private") await addActorAsPrivateProjectPrincipal(req, project, tx as unknown as Db);
-      const attachedUrls = new Set((repositories ?? []).map(repo => repo.url.toLowerCase()));
-      const registeredUrls: typeof urlRepositories = [];
+      const attachedUrls = new Set((repositories ?? []).map((repo: import("@paperclipai/shared").ProjectRepository) => repo.url.toLowerCase()));
+      const registeredUrls: Array<{ fullName: string; url: string }> = [];
       for (const repo of urlRepositories) {
         if (attachedUrls.has(repo.url.toLowerCase())) continue;
         attachedUrls.add(repo.url.toLowerCase());
@@ -419,7 +416,7 @@ export function projectRoutes(db: Db) {
         details: {
           name: project.name, description: project.description, icon: project.icon,
           sourceIssueId: runContext?.issue.id ?? null,
-          repositories: [...(repositories ?? []).map(repo => ({ id: repo.id, name: repo.fullName, url: repo.url })), ...registeredUrls.map(repo => ({ id: repo.url, name: repo.fullName, url: repo.url })),
+          repositories: [...(repositories ?? []).map((repo: import("@paperclipai/shared").ProjectRepository) => ({ id: repo.id, name: repo.fullName, url: repo.url })), ...registeredUrls.map(repo => ({ id: repo.url, name: repo.fullName, url: repo.url })),
             ...(createdWorkspace?.repoUrl ? [{ id: createdWorkspace.id, name: createdWorkspace.name, url: createdWorkspace.repoUrl }] : []),
           ],
           workspaceId: createdWorkspace?.id ?? null,

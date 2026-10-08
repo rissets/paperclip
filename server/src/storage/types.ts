@@ -73,14 +73,15 @@ export interface StorageProvider {
 }
 
 export type PutFileInput = {
-  /** Server-allocated, company-prefixed key for durable idempotent uploads. Never accept from client input. */
+  /**
+   * Server-allocated, company-prefixed key for durable idempotent uploads or
+   * optional deterministic company-scoped key for resumable operator migrations.
+   */
   objectKey?: string;
   companyId: string;
   namespace: string;
   originalFilename: string | null;
   contentType: string;
-  /** Optional deterministic company-scoped key for resumable operator migrations. */
-  objectKey?: string;
 } & ({ body: Buffer } | { body: Readable; byteSize: number; sha256: string });
 
 export interface PutFileResult {
