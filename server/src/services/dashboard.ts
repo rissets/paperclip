@@ -1,4 +1,4 @@
-import { and, eq, gte, inArray, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, lte, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, approvals, companies, costEvents, heartbeatRuns, issues } from "@paperclipai/db";
 import { notFound } from "../errors.js";
@@ -47,11 +47,11 @@ export function dashboardService(db: Db) {
         }
       }
 
-      const agentRows = await db
+      const agentRows = await retryIdempotentDatabaseOperation(() => db
         .select({ status: agents.status, count: sql<number>`count(*)` })
         .from(agents)
         .where(and(...agentConditions))
-        .groupBy(agents.status);
+        .groupBy(agents.status));
 
       const taskConditions = [eq(issues.companyId, companyId), executionIssueCondition()];
       if (allowedAgentIds !== null && allowedAgentIds !== undefined) {
@@ -114,6 +114,7 @@ export function dashboardService(db: Db) {
           and(
             eq(costEvents.companyId, companyId),
             gte(costEvents.occurredAt, monthStart),
+            lte(costEvents.occurredAt, now),
           ),
         ));
 
@@ -141,7 +142,7 @@ export function dashboardService(db: Db) {
             : sql`AND child.agent_id IN (${sql.join(allowedAgentIds.map(id => sql`${id}`), sql`, `)})`
           : sql``;
 
-      const runActivityRows = (await db.execute(sql`
+      const runActivityRows = (await retryIdempotentDatabaseOperation(() => db.execute(sql`
         WITH RECURSIVE recovered_runs(id) AS (
           SELECT parent.id
           FROM ${heartbeatRuns} AS child
@@ -169,7 +170,7 @@ export function dashboardService(db: Db) {
           AND run.created_at >= ${runActivityStart.toISOString()}::timestamptz
           ${agentRunFilter}
         GROUP BY date, run.status, run.error_code, recovered
-      `)) as unknown as Iterable<{
+      `))) as unknown as Iterable<{
         date: string;
         status: string;
         error_code: string | null;

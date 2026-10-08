@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "packageName": "@paperclipai/skills-catalog",
   "packageVersion": "0.3.1",
-  "generatedAt": "2026-10-04T18:59:55.098Z",
+  "generatedAt": "2026-10-08T16:33:56.052Z",
   "skills": [
     {
       "id": "paperclipai:bundled:docs:doc-maintenance",
@@ -185,7 +185,7 @@
       "category": "paperclip-operations",
       "slug": "task-planning",
       "name": "task-planning",
-      "description": "Turn a Primbon issue or request into a structured implementation plan with child task graph, blockers, owners, and acceptance criteria, then save it as the issue `plan` document.",
+      "description": "Turn a Paperclip issue or request into a structured implementation plan with child task graph, blockers, owners, and acceptance criteria, then save it as the issue `plan` document.",
       "path": "catalog/bundled/paperclip-operations/task-planning",
       "entrypoint": "SKILL.md",
       "trustLevel": "markdown_only",
@@ -207,11 +207,11 @@
         {
           "path": "SKILL.md",
           "kind": "skill",
-          "sizeBytes": 4930,
-          "sha256": "672c79e55e042c79e138b3267e30ffba928b7e71b9ad0c89a1d343485e152d0a"
+          "sizeBytes": 5697,
+          "sha256": "879cb270abfbc2561f0a382a2ddaec4300ed6eabf607d9f995db2f59e2b06488"
         }
       ],
-      "contentHash": "sha256:7f6a85b00fd053eac6ebc58667b1d10087618c248bcf2e0aaa1adc7e3d5ff4e4"
+      "contentHash": "sha256:39146a5ee3bfaa692cd6c4fb894b15793be55273f2379a955daab814c3570ee8"
     },
     {
       "id": "paperclipai:bundled:product:paperclip-capsules",

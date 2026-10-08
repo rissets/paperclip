@@ -1,6 +1,6 @@
 ---
 name: task-planning
-description: Turn a Primbon issue or request into a structured implementation plan with child task graph, blockers, owners, and acceptance criteria, then save it as the issue `plan` document.
+description: Turn a Paperclip issue or request into a structured implementation plan with child task graph, blockers, owners, and acceptance criteria, then save it as the issue `plan` document.
 key: paperclipai/bundled/paperclip-operations/task-planning
 recommendedForRoles:
   - manager
@@ -13,16 +13,15 @@ tags:
   - delegation
 ---
 
-# Task Planning
+# Task planning
 
-Produce implementation plans that the Primbon executor can actually run: explicit child issues, real blockers, named owners, and a defined acceptance bar. Avoid plans that read well but cannot be split into work.
+Produce implementation plans that the Paperclip executor can actually run: explicit child issues, real blockers, named owners, and a defined acceptance bar. Avoid plans that read well but cannot be split into work.
 
-## When to use
+Plan only as much as the work needs. If execution is authorized and the next step is small and clear, do it. A request for a plan alone does not require child tasks or a new approval gate.
 
-- An issue asks you to "plan", "scope", "break down", "design the rollout", "propose the work", or similar.
-- A user wants a written plan before approving implementation.
-- A manager needs to delegate non-trivial work and the shape of the work is not obvious yet.
-- You inherited an issue too large to deliver in one heartbeat and need to split it.
+Describe the intended outcome, relevant constraints, chosen approach, and how to verify success. Include uncertainties or decisions that affect execution. Use the user's preferred format; keep implementation steps within one owner's task unless another owner, useful parallel output, dependency, or independent review warrants separate work.
+
+Save a requested plan as the issue document with key `plan`. Update its current revision instead of duplicating it, and link the saved document in your response. Use the native document tools when available; legacy agents follow the `paperclip` skill's document and planning API mechanics.
 
 ## When not to use
 
@@ -66,14 +65,16 @@ Required sections, in order:
 
 ## Filing the plan
 
-Use the Primbon API to write the plan document, then comment:
+Use the Paperclip API to write the plan document, then comment:
 
 - `PUT /api/issues/{issueId}/documents/plan` with the markdown body. If `plan` already exists, include the latest `baseRevisionId`.
 - `POST /api/issues/{issueId}/comments` with a short summary that links the plan: `/<prefix>/issues/<issue-id>#document-plan`.
 - If approval is required: `POST /api/issues/{issueId}/interactions` with `kind: request_confirmation`, `targetRevisionId` set to the new plan revision, `continuationPolicy: wake_assignee`, and `idempotencyKey: "confirmation:{issueId}:plan:{revisionId}"`.
 - Set the issue to `in_review` after creating the confirmation. Stay assigned so the acceptance wakes the planner.
 
-When the plan is accepted, see the companion skill for converting accepted plans into Primbon executable tasks. Key requirements covered there: produce a compact task matrix (task, owner, initial status, blockers); encode every hard dependency as `blockedByIssueIds` — parent/child nesting alone does not block execution; and verify the created issue graph before closing the source planning issue.
+Respect planning mode and explicit approval requests. When approval is required, request confirmation of the latest plan revision and wait for that decision. After acceptance, execute cohesive work on the current ordinary task. Use `paperclip-converting-plans-to-tasks` when delegation is justified.
+
+When the plan is accepted, see the companion skill for converting accepted plans into Paperclip executable tasks. Key requirements covered there: produce a compact task matrix (task, owner, initial status, blockers); encode every hard dependency as `blockedByIssueIds` — parent/child nesting alone does not block execution; and verify the created issue graph before closing the source planning issue.
 
 ## Anti-patterns
 

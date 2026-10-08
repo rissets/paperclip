@@ -45,7 +45,7 @@ function decodeMasterKey(raw: string): Buffer | null {
   return null;
 }
 
-function loadOrCreateMasterKey(): Buffer {
+function loadOrCreateMasterKey(allowCreate = true): Buffer {
   const envKeyRaw = process.env.PAPERCLIP_SECRETS_MASTER_KEY;
   if (envKeyRaw && envKeyRaw.trim().length > 0) {
     const fromEnv = decodeMasterKey(envKeyRaw);
@@ -68,30 +68,24 @@ function loadOrCreateMasterKey(): Buffer {
     return decoded;
   }
 
+  if (!allowCreate) throw new Error(`Secrets master key file is missing: ${keyPath}`);
   const dir = path.dirname(keyPath);
   mkdirSync(dir, { recursive: true });
   const generated = randomBytes(32);
-  // Publish complete bytes atomically. A second process must read the winner's
-  // key, never overwrite it or observe a partially written file.
-  const temporaryPath = `${keyPath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+  const temporaryPath = `${keyPath}.${process.pid}.${randomBytes(12).toString("hex")}.tmp`;
   writeFileSync(temporaryPath, generated.toString("base64"), { encoding: "utf8", mode: 0o600, flag: "wx" });
   try {
-    linkSync(temporaryPath, keyPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    const winner = decodeMasterKey(readFileSync(keyPath, "utf8"));
-    if (!winner) throw badRequest(`Invalid secrets master key at ${keyPath}`);
-    enforceKeyFilePermissionsBestEffort(keyPath);
-    return winner;
+    // A hard link publishes a complete file without overwriting a competitor's
+    // key. Opening the destination with wx would expose an empty/partial file.
+    try {
+      linkSync(temporaryPath, keyPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    }
   } finally {
     unlinkSync(temporaryPath);
   }
-  try {
-    chmodSync(keyPath, 0o600);
-  } catch {
-    // best effort
-  }
-  return generated;
+  return loadOrCreateMasterKey(false);
 }
 
 function enforceKeyFilePermissionsBestEffort(keyPath: string) {
@@ -286,7 +280,7 @@ export const localEncryptedProvider: SecretProviderModule = {
     throw badRequest("local_encrypted does not support external reference secrets");
   },
   async resolveVersion(input) {
-    const masterKey = loadOrCreateMasterKey();
+    const masterKey = loadOrCreateMasterKey(false);
     return decryptValue(masterKey, asLocalEncryptedMaterial(input.material));
   },
   async deleteOrArchive() {
