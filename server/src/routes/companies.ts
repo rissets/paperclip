@@ -437,29 +437,30 @@ export function companyRoutes(db: Db, storage?: StorageService, options?: Compan
     const query = companyArtifactsQuerySchema.parse(req.query);
 
     let issueConditions: SQL[] | undefined;
-    if (req.actor.type === "board" && req.actor.userId && !req.actor.isInstanceAdmin) {
+    if (req.actor.type === "board" && req.actor.userId && !req.actor.isInstanceAdmin && !query.starred) {
       const rbac = userRbacService(db);
-      const isOwnerOrAdmin = await rbac.isOwnerOrAdmin(companyId, req.actor.userId);
-      if (!isOwnerOrAdmin) {
+      const role = await rbac.getUserRoleInCompany(companyId, req.actor.userId);
+      if (role === "operator") {
         const assignedProjects = await rbac.getAssignedProjectsForUser(companyId, req.actor.userId);
         const assignedAgents = await rbac.getAssignedAgentsForUser(companyId, req.actor.userId);
+        if (assignedProjects.length > 0 || assignedAgents.length > 0) {
+          const createdProjects = await db
+            .select({ id: projects.id })
+            .from(projects)
+            .where(and(eq(projects.companyId, companyId), eq(projects.createdByUserId, req.actor.userId)));
+          const allowedProjectIds = [...new Set([...assignedProjects, ...createdProjects.map((p) => p.id)])];
 
-        const createdProjects = await db
-          .select({ id: projects.id })
-          .from(projects)
-          .where(and(eq(projects.companyId, companyId), eq(projects.createdByUserId, req.actor.userId)));
-        const allowedProjectIds = [...new Set([...assignedProjects, ...createdProjects.map((p) => p.id)])];
-
-        const conditions: SQL[] = [];
-        if (allowedProjectIds.length > 0) {
-          conditions.push(inArray(issues.projectId, allowedProjectIds));
+          const conditions: SQL[] = [];
+          if (allowedProjectIds.length > 0) {
+            conditions.push(inArray(issues.projectId, allowedProjectIds));
+          }
+          conditions.push(eq(issues.assigneeUserId, req.actor.userId));
+          conditions.push(eq(issues.createdByUserId, req.actor.userId));
+          if (assignedAgents.length > 0) {
+            conditions.push(inArray(issues.assigneeAgentId, assignedAgents));
+          }
+          issueConditions = [or(...conditions)!];
         }
-        conditions.push(eq(issues.assigneeUserId, req.actor.userId));
-        conditions.push(eq(issues.createdByUserId, req.actor.userId));
-        if (assignedAgents.length > 0) {
-          conditions.push(inArray(issues.assigneeAgentId, assignedAgents));
-        }
-        issueConditions = [or(...conditions)!];
       }
     }
 

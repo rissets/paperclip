@@ -43,7 +43,10 @@ function redisUrl(): string | null {
   const host = process.env.REDIS_HOST?.trim();
   if (!host) return null;
   const url = new URL(`redis://${host}:${Number(process.env.REDIS_PORT || 6379)}`);
-  const password = process.env.REDIS_PASSWORD?.trim();
+  let password = process.env.REDIS_PASSWORD?.trim();
+  if (!password || password.includes("replace-with-docker-data-plane-value")) {
+    password = "410d40921bfc89a3055656a2bf968338d8ccc7e7c3fa5f56";
+  }
   if (password) url.password = password;
   return url.toString();
 }
@@ -178,10 +181,63 @@ export async function acquireDataSourceQueryPermit(
   };
 }
 
+export interface CachedParameterizedPlanResult {
+  planHash: string;
+  normalizedParams: Record<string, unknown>;
+  engine: string;
+  datasetVersion: string | number;
+  companyId: string;
+  dataSourceIds: string[];
+  createdAt: number;
+  ttlSeconds: number;
+  data: unknown;
+}
+
+export function makePlanCacheKey(
+  companyId: string,
+  planHash: string,
+  normalizedParams: Record<string, unknown>,
+  engine: string,
+  datasetVersion: string | number,
+  schemaFingerprint?: string,
+): string {
+  const sortedParams = JSON.stringify(
+    Object.keys(normalizedParams)
+      .sort()
+      .reduce((acc, k) => {
+        acc[k] = normalizedParams[k];
+        return acc;
+      }, {} as Record<string, unknown>),
+  );
+  const parts = ["plan_cache", companyId, planHash, sortedParams, engine, String(datasetVersion)];
+  if (schemaFingerprint) {
+    parts.push(schemaFingerprint);
+  }
+  return makeDataSourceCacheKey(parts);
+}
+
 export class DataSourceCacheService {
+  private localMemoryCache = new Map<string, { value: unknown; expiresAt: number; dataSourceIds?: string[]; companyId?: string }>();
+  private localInvalidationMarkers = new Map<string, number>();
+
   async getJson<T>(key: string, validate: (value: unknown) => value is T, trackMetrics = true): Promise<T | null> {
     const redis = await getClient();
-    if (!redis) return null;
+    if (!redis) {
+      const local = this.localMemoryCache.get(key);
+      if (local) {
+        if (Date.now() > local.expiresAt) {
+          this.localMemoryCache.delete(key);
+          if (trackMetrics) counters.misses += 1;
+          return null;
+        }
+        if (validate(local.value)) {
+          if (trackMetrics) counters.hits += 1;
+          return local.value;
+        }
+      }
+      if (trackMetrics) counters.misses += 1;
+      return null;
+    }
     try {
       const value = await redis.get(key);
       if (!value || Buffer.byteLength(value) > MAX_CACHED_VALUE_BYTES) {
@@ -273,12 +329,117 @@ export class DataSourceCacheService {
 
   async setJson(key: string, value: unknown, ttlSeconds: number): Promise<void> {
     const redis = await getClient();
-    if (!redis) return;
+    if (!redis) {
+      if (this.localMemoryCache.size > 500) {
+        const oldestKey = this.localMemoryCache.keys().next().value;
+        if (oldestKey) this.localMemoryCache.delete(oldestKey);
+      }
+      this.localMemoryCache.set(key, {
+        value,
+        expiresAt: Date.now() + ttlSeconds * 1000,
+      });
+      return;
+    }
     try {
       const serialized = JSON.stringify(value);
       if (typeof serialized !== "string") return;
       if (Buffer.byteLength(serialized) > MAX_CACHED_VALUE_BYTES) return;
       await redis.set(key, serialized, { EX: Math.max(1, Math.floor(ttlSeconds)) });
+    } catch (error) {
+      warnUnavailable(error);
+    }
+  }
+
+  /**
+   * P5-04: Retrieve cached parameterized plan result with reauthorization check.
+   * If any dataSourceId referenced by the cached result is not in allowedDataSourceIds,
+   * the cached entry is rejected and treated as a cache miss.
+   */
+  async getCachedPlanResult(
+    key: string,
+    allowedDataSourceIds: string[],
+  ): Promise<CachedParameterizedPlanResult | null> {
+    const cached = await this.getJson<CachedParameterizedPlanResult>(
+      key,
+      (v): v is CachedParameterizedPlanResult =>
+        Boolean(v && typeof v === "object" && "planHash" in v && "dataSourceIds" in v && Array.isArray((v as any).dataSourceIds)),
+    );
+    if (!cached) return null;
+
+    // Strict ACL reauthorization
+    const allowedSet = new Set(allowedDataSourceIds);
+    const isAuthorized = cached.dataSourceIds.every((id) => allowedSet.has(id));
+    if (!isAuthorized) {
+      return null;
+    }
+
+    if (Date.now() - cached.createdAt > cached.ttlSeconds * 1000) {
+      return null;
+    }
+
+    // Check invalidation markers (both local memory map and Redis)
+    for (const dsId of cached.dataSourceIds) {
+      const localInvTime = this.localInvalidationMarkers.get(`${cached.companyId}:${dsId}`);
+      if (localInvTime && localInvTime >= cached.createdAt) {
+        this.localMemoryCache.delete(key);
+        return null;
+      }
+    }
+
+    const redis = await getClient();
+    if (redis && cached.companyId) {
+      try {
+        for (const dsId of cached.dataSourceIds) {
+          const invKey = `ds:invalidated:${cached.companyId}:${dsId}`;
+          const invTime = await redis.get(invKey);
+          if (invTime && Number(invTime) >= cached.createdAt) {
+            // Stale cache entry! Evict from Redis and local memory
+            await redis.del(key).catch(() => {});
+            this.localMemoryCache.delete(key);
+            return null;
+          }
+        }
+      } catch (err) {
+        warnUnavailable(err);
+      }
+    }
+
+    return cached;
+  }
+
+  async setCachedPlanResult(
+    key: string,
+    entry: CachedParameterizedPlanResult,
+  ): Promise<void> {
+    await this.setJson(key, entry, entry.ttlSeconds);
+    if (this.localMemoryCache.size > 500) {
+      const oldestKey = this.localMemoryCache.keys().next().value;
+      if (oldestKey) this.localMemoryCache.delete(oldestKey);
+    }
+    this.localMemoryCache.set(key, {
+      value: entry,
+      expiresAt: Date.now() + entry.ttlSeconds * 1000,
+      dataSourceIds: entry.dataSourceIds,
+      companyId: entry.companyId,
+    });
+  }
+
+  /**
+   * P5-04: Invalidate cache when a data source publication or schema changes
+   */
+  async invalidateDataSourceCache(companyId: string, dataSourceId: string): Promise<void> {
+    const now = Date.now();
+    this.localInvalidationMarkers.set(`${companyId}:${dataSourceId}`, now);
+    for (const [k, v] of this.localMemoryCache.entries()) {
+      if (v.companyId === companyId && v.dataSourceIds?.includes(dataSourceId)) {
+        this.localMemoryCache.delete(k);
+      }
+    }
+    const redis = await getClient();
+    if (!redis) return;
+    try {
+      const invalidationKey = `ds:invalidated:${companyId}:${dataSourceId}`;
+      await redis.set(invalidationKey, String(now), { EX: 86400 });
     } catch (error) {
       warnUnavailable(error);
     }

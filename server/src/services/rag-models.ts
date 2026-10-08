@@ -143,11 +143,16 @@ export class RagModelService {
         }
         return { vectors, space: "bge-m3", generation: resolvedGeneration || this.embeddingGeneration("bge-m3"), backend: "local-bge-m3" };
       } catch (error) {
-        if (provider === "bge" || preferredSpace === "bge-m3") throw error;
+        // In auto mode the requested BGE space is a preference, not a promise:
+        // callers such as the durable reindex worker can publish the actual
+        // gateway space/generation returned below. Explicit BGE mode remains
+        // strict so an operator can require local-only inference.
+        if (provider === "bge") throw error;
       }
     }
 
-    if (preferredSpace && preferredSpace !== "openrouter-text-embedding-3-small") {
+    if (preferredSpace && preferredSpace !== "openrouter-text-embedding-3-small"
+      && !(preferredSpace === "bge-m3" && provider === "auto")) {
       throw new Error(`No configured embedding provider for embedding space ${preferredSpace}`);
     }
     try {

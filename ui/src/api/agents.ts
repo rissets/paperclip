@@ -174,7 +174,12 @@ export const agentsApi = {
     ),
   updateDataSources: (
     id: string,
-    data: { mode: "all" | "selected" | "none"; dataSourceIds?: string[]; collectionIds?: string[] },
+    data: {
+      mode: "all" | "selected" | "none";
+      dataSourceIds?: string[];
+      collectionIds?: string[];
+      orchestrationMode?: "auto" | "off";
+    },
     companyId?: string,
   ) =>
     api.put<AgentDataSourcesResponse>(

@@ -609,6 +609,43 @@ describeEmbeddedPostgres("built-in agents", () => {
     });
   });
 
+  it("does not attempt revision backfill for externally managed instructions", async () => {
+    const companyId = await seedCompany();
+    const builtIns = builtInAgentService(db);
+    const created = await builtIns.ensure(companyId, "data-agent");
+    const externalRoot = mkdtempSync(path.join(tmpdir(), "paperclip-external-agent-instructions-"));
+    const operatorInstructions = "# Host-owned Data Agent instructions\n";
+    writeFileSync(path.join(externalRoot, "AGENTS.md"), operatorInstructions, "utf8");
+    await db.update(agents)
+      .set({
+        adapterConfig: {
+          ...(created.agent?.adapterConfig as Record<string, unknown>),
+          instructionsBundleMode: "external",
+          instructionsRootPath: externalRoot,
+          instructionsEntryFile: "AGENTS.md",
+        },
+      })
+      .where(and(eq(agents.companyId, companyId), eq(agents.id, created.agentId!)));
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const reconciled = await builtIns.ensure(companyId, "data-agent");
+
+      expect(reconciled.agent?.adapterConfig).toMatchObject({
+        instructionsBundleMode: "external",
+        instructionsRootPath: externalRoot,
+      });
+      expect(await fs.readFile(path.join(externalRoot, "AGENTS.md"), "utf8")).toBe(operatorInstructions);
+      expect(warn).not.toHaveBeenCalledWith(
+        expect.stringContaining("Failed to backfill missing instructions for data-agent"),
+        expect.anything(),
+      );
+    } finally {
+      warn.mockRestore();
+      rmSync(externalRoot, { recursive: true, force: true });
+    }
+  });
+
   it("resets marked agents back to registry display defaults without replacing adapter setup", async () => {
     const companyId = await seedCompany();
     const builtIns = builtInAgentService(db);

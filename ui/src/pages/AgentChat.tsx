@@ -11,6 +11,7 @@ import {
   Search,
   Users,
   X,
+  ExternalLink,
 } from "lucide-react";
 import { agentChatsApi } from "@/api/agentChats";
 import { agentsApi } from "@/api/agents";
@@ -29,6 +30,7 @@ import { useCompany } from "@/context/CompanyContext";
 import { useAgentChatEnabled } from "@/hooks/useAgentChatEnabled";
 import { queryKeys } from "@/lib/queryKeys";
 import { recordAgentChatVisit } from "@/lib/recent-agent-chats";
+import { recordRecentTask } from "@/lib/recent-tasks";
 import { useNavigate, useParams, useSearchParams } from "@/lib/router";
 import { deriveInitials } from "@/components/Identity";
 import { agentRouteRef, cn } from "@/lib/utils";
@@ -114,7 +116,7 @@ export function AgentChat() {
   const { agentRef = "" } = useParams<{ agentRef: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
   const activeChatIdFromUrl = searchParams.get("chatId");
-  const { selectedCompanyId } = useCompany();
+  const { selectedCompanyId, selectedCompany } = useCompany();
   const { enabled, loaded } = useAgentChatEnabled();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -265,6 +267,13 @@ export function AgentChat() {
         : Promise.resolve(null),
     enabled: !!selectedCompanyId && !!currentAgent,
   });
+
+  // Record recent task so chat appears in Recent Tasks
+  useEffect(() => {
+    if (activeIssue) {
+      recordRecentTask(activeIssue, userId);
+    }
+  }, [activeIssue, userId]);
 
   // Ensure Issue handler
   const ensureIssue = useCallback(async () => {
@@ -596,6 +605,26 @@ export function AgentChat() {
               className="size-7 rounded-md bg-card/90 shadow-sm backdrop-blur-sm border border-border hover:bg-accent"
             >
               <PanelLeftOpen className="size-3.5 text-muted-foreground hover:text-foreground" />
+            </Button>
+          </div>
+        )}
+        {activeIssue?.identifier && (
+          <div className="absolute top-2.5 right-4 z-30 flex items-center gap-1.5">
+            <Button
+              variant="outline"
+              size="icon-xs"
+              onClick={() => {
+                const targetRef = activeIssue.identifier ?? activeIssue.id;
+                const path = selectedCompany?.issuePrefix
+                  ? `/${selectedCompany.issuePrefix}/issues/${targetRef}`
+                  : `/issues/${targetRef}`;
+                navigate(path);
+              }}
+              className="h-7 px-2 text-xs font-mono text-muted-foreground hover:text-foreground gap-1 bg-card/90 shadow-sm backdrop-blur-sm border border-border hover:bg-accent"
+              title="Open task view"
+            >
+              <ExternalLink className="size-3" />
+              <span>{activeIssue.identifier}</span>
             </Button>
           </div>
         )}

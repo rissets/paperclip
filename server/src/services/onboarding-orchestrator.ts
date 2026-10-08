@@ -7,6 +7,7 @@ import {
   dataSources,
   dataSourceTables,
   dataSourceRecords,
+  dataSourceChunks,
   dataSourceJobs,
   activityLog,
   agents,
@@ -80,6 +81,7 @@ export interface OnboardingOptions {
   jobLease?: DataSourceJobLease;
   /** Immutable source identity used to reject an unsafe parser resume after file replacement. */
   csvSourceFingerprint?: string;
+  enforcePublicationGate?: boolean;
 }
 
 function jobScopedTableId(companyId: string, sourceId: string, jobId: string, tableName: string): string {
@@ -94,11 +96,13 @@ function jobScopedTableId(companyId: string, sourceId: string, jobId: string, ta
 }
 
 type DurableCsvCheckpoint = {
-  version: 1;
+  version: 1 | 2;
   identityHash: string;
   tableId: string;
   byteOffset: number;
   committedRows: number;
+  sourceRowsCommitted?: number;
+  insertedRows?: number;
   nextBatchIndex: number;
   delimiter: string | null;
 };
@@ -106,12 +110,15 @@ type DurableCsvCheckpoint = {
 function readDurableCsvCheckpoint(value: unknown): DurableCsvCheckpoint | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const checkpoint = value as Partial<DurableCsvCheckpoint>;
-  if (checkpoint.version !== 1
+  if ((checkpoint.version !== 1 && checkpoint.version !== 2)
     || typeof checkpoint.identityHash !== "string" || !/^[a-f0-9]{64}$/.test(checkpoint.identityHash)
     || typeof checkpoint.tableId !== "string" || !/^[0-9a-f-]{36}$/i.test(checkpoint.tableId)
     || !Number.isSafeInteger(checkpoint.byteOffset) || checkpoint.byteOffset! < 0
     || !Number.isSafeInteger(checkpoint.committedRows) || checkpoint.committedRows! < 0
     || !Number.isSafeInteger(checkpoint.nextBatchIndex) || checkpoint.nextBatchIndex! < 0
+    || (checkpoint.version === 2 && (!Number.isSafeInteger(checkpoint.sourceRowsCommitted)
+      || checkpoint.sourceRowsCommitted! < 0 || !Number.isSafeInteger(checkpoint.insertedRows)
+      || checkpoint.insertedRows! < 0))
     || !(checkpoint.delimiter === null
       || (typeof checkpoint.delimiter === "string" && [",", ";", "\t", "|"].includes(checkpoint.delimiter)))) return null;
   return checkpoint as DurableCsvCheckpoint;
@@ -343,15 +350,32 @@ export class OnboardingOrchestratorService {
       } as DataSource;
     }
 
-    return await this.executeOnboardingPipeline(
-      companyId,
-      initialDs,
-      { ...file, buffer: this.readFileBuffer(file) },
-      options,
-      defaultName,
-      ext,
-      sourceType,
-    );
+    const streamingFormat = StructuredIngestionService.streamingFormatFor(sourceType, ext);
+    let cleanupStagedInput: (() => Promise<void>) | null = null;
+    try {
+      let pipelineFile: OnboardingFileInput;
+      if (streamingFormat && !file.filePath) {
+        const staged = await StructuredIngestionService.stageBufferForStreaming(this.readFileBuffer(file), ext);
+        cleanupStagedInput = staged.cleanup;
+        pipelineFile = { ...file, buffer: undefined, filePath: staged.filePath };
+      } else if (file.filePath) {
+        pipelineFile = { ...file, buffer: undefined };
+      } else {
+        pipelineFile = { ...file, buffer: this.readFileBuffer(file) };
+      }
+
+      return await this.executeOnboardingPipeline(
+        companyId,
+        initialDs,
+        pipelineFile,
+        options,
+        defaultName,
+        ext,
+        sourceType,
+      );
+    } finally {
+      await cleanupStagedInput?.();
+    }
   }
 
   /**
@@ -439,10 +463,12 @@ export class OnboardingOrchestratorService {
   ): Promise<DataSource> {
     try {
       if (sourceType === "csv" || sourceType === "excel") {
-        const streamingCsvThreshold = Number(process.env.DATASOURCE_STREAMING_CSV_THRESHOLD_BYTES || 8 * 1024 * 1024);
         const sourceFileSize = file.size ?? file.buffer?.length ?? (file.filePath ? fs.statSync(file.filePath).size : 0);
-        const isStreamingCsv = sourceType === "csv" && Boolean(file.filePath) && sourceFileSize >= streamingCsvThreshold;
-        const isStreamingExcel = ext === "xlsx" && Boolean(file.filePath) && sourceFileSize >= streamingCsvThreshold;
+        const streamingFormat = file.filePath
+          ? StructuredIngestionService.streamingFormatFor(sourceType, ext)
+          : null;
+        const isStreamingCsv = streamingFormat === "csv";
+        const isStreamingExcel = streamingFormat === "xlsx";
         const isStreamingStructuredFile = isStreamingCsv || isStreamingExcel;
         await options.jobLease?.reportProgress?.(isStreamingCsv ? "csv_profile" : sourceType === "excel" ? "excel_parse" : "csv_parse", {
           fileBytes: sourceFileSize,
@@ -537,6 +563,8 @@ export class OnboardingOrchestratorService {
         });
 
         let totalRows = 0;
+        let sourceRows = 0;
+        let quarantinedRows = 0;
         const createdTables: any[] = [];
         const allEntities = new Set<string>();
         const allMetrics: SemanticMetric[] = [];
@@ -550,8 +578,11 @@ export class OnboardingOrchestratorService {
         let hasAiReasoned = false;
 
         for (const [tableIndex, tableData] of tables.entries()) {
-          const tableRowCount = tableData.rowCount ?? tableData.rows.length;
+          const sourceRowCount = tableData.rowCount ?? tableData.rows.length;
+          const tableRowCount = tableData.publishableRowCount ?? sourceRowCount;
           totalRows += tableRowCount;
+          sourceRows += sourceRowCount;
+          quarantinedRows += Math.max(0, sourceRowCount - tableRowCount);
           await options.jobLease?.reportProgress?.("semantic_mapping", {
             tableIndex: tableIndex + 1,
             tableCount: tables.length,
@@ -576,10 +607,11 @@ export class OnboardingOrchestratorService {
               model: agentModel,
               instructionsPath: agentInstructions,
               adapterType: structuredIngestionAgent?.adapterType,
+              signal: options.jobLease?.signal,
             },
           );
 
-          const aiAnalysis = aiLoopRes.result;
+          const aiAnalysis = aiLoopRes.validationStatus === "validated" ? aiLoopRes.result : null;
           if (aiLoopRes.reasoningSteps.length > 0) {
             allReasoningSteps.push(...aiLoopRes.reasoningSteps);
           }
@@ -703,6 +735,26 @@ export class OnboardingOrchestratorService {
 
           createdTables.push(tableRow);
 
+          // Synthesize structured schema chunk for vector store retrieval
+          const colList = (tableData.columns || []).map((c) => `${c.name} (${c.dataType || "string"}${c.role ? `, role: ${c.role}` : ""})`).join(", ");
+          const metricList = (tableSemanticModel.metrics || []).map((m: any) => `${m.name || m}`).join(", ");
+          const chunkContent = `Table: ${tableData.tableName}\nRole: ${tableSemanticModel.tableRole || "table"}\nColumns: ${colList}${metricList ? `\nMetrics: ${metricList}` : ""}`;
+          await this.mutateFileStage(companyId, initialDs.id, options, (db) => db
+            .insert(dataSourceChunks)
+            .values({
+              companyId,
+              dataSourceId: initialDs.id,
+              chunkIndex: tables.indexOf(tableData),
+              title: `Schema: ${tableData.tableName}`,
+              content: chunkContent,
+              metadata: {
+                corpusKind: "schema",
+                tableId: tableRow.id,
+                tableName: tableData.tableName,
+              },
+            })
+          );
+
           // Batch insert records
           const batchSize = 100;
           for (let i = 0; i < tableData.rows.length; i += batchSize) {
@@ -770,11 +822,13 @@ export class OnboardingOrchestratorService {
                     throw new Error("CSV source or schema changed after its durable checkpoint; enqueue a fresh ingestion job");
                   }
                   csvCheckpoint = previousCheckpoint || {
-                    version: 1,
+                    version: 2,
                     identityHash: csvIdentityHash,
                     tableId: tableRow.id,
                     byteOffset: 0,
                     committedRows: 0,
+                    sourceRowsCommitted: 0,
+                    insertedRows: 0,
                     nextBatchIndex: 0,
                     delimiter: null,
                   };
@@ -785,10 +839,16 @@ export class OnboardingOrchestratorService {
                 const rowStream = isStreamingCsv
                   ? StructuredIngestionService.streamCsvRows(file.filePath!, tableData.columns, csvCheckpoint ? {
                     byteOffset: csvCheckpoint.byteOffset,
-                    rowsCommitted: csvCheckpoint.committedRows,
+                    rowsCommitted: csvCheckpoint.sourceRowsCommitted ?? csvCheckpoint.committedRows,
                     delimiter: csvCheckpoint.delimiter || undefined,
                   } : undefined)
-                  : StructuredIngestionService.streamExcelRows(file.filePath!, tableData.tableName, tableData.columns);
+                  : StructuredIngestionService.streamExcelRows(
+                    file.filePath!,
+                    tableData.tableName,
+                    tableData.columns,
+                    undefined,
+                    tableData.headerRowPresent,
+                  );
                 const runFencedOperation = options.jobLease
                   ? async (operation: () => Promise<void>) => this.db.transaction(async (tx) => {
                     await assertDataSourceJobLease(tx, companyId, initialDs.id, options.jobLease!);
@@ -816,19 +876,24 @@ export class OnboardingOrchestratorService {
                       runFencedOperation,
                       ...(isStreamingCsv && csvCheckpoint ? {
                         startBatchIndex: csvCheckpoint.nextBatchIndex,
-                        startInsertedCount: csvCheckpoint.committedRows,
+                        startInsertedCount: csvCheckpoint.insertedRows ?? csvCheckpoint.committedRows,
                         getRowCheckpoint: getCsvSourceRowCheckpoint,
                         onBatchCommitted: async (insertedRows, nextBatchIndex, sourceCheckpoint) => {
                           const rowCheckpoint = sourceCheckpoint as ReturnType<typeof getCsvSourceRowCheckpoint>;
-                          if (!rowCheckpoint || rowCheckpoint.rowNumber !== insertedRows || !csvIdentityHash) {
+                          const previousSourceRows = csvCheckpoint?.sourceRowsCommitted ?? csvCheckpoint?.committedRows ?? 0;
+                          const previousInsertedRows = csvCheckpoint?.insertedRows ?? csvCheckpoint?.committedRows ?? 0;
+                          if (!rowCheckpoint || rowCheckpoint.rowNumber < previousSourceRows
+                            || insertedRows < previousInsertedRows || !csvIdentityHash) {
                             throw new Error("CSV parser did not provide a valid checkpoint for the committed ClickHouse batch");
                           }
                           const nextCheckpoint: DurableCsvCheckpoint = {
-                            version: 1,
+                            version: 2,
                             identityHash: csvIdentityHash,
                             tableId: tableRow.id,
                             byteOffset: rowCheckpoint.byteOffset,
-                            committedRows: insertedRows,
+                            committedRows: rowCheckpoint.rowNumber,
+                            sourceRowsCommitted: rowCheckpoint.rowNumber,
+                            insertedRows,
                             nextBatchIndex,
                             delimiter: rowCheckpoint.delimiter,
                           };
@@ -939,7 +1004,7 @@ export class OnboardingOrchestratorService {
           tableProfiles,
           crossTableClusters,
           relationships: allDiscoveredRelationships,
-          summary: `Dataset terstruktur berisikan ${tables.length} tabel dengan total ${totalRows.toLocaleString()} baris. Dianalisis dan dipetakan oleh ${specialistAgentName} (${inferredDomain || "Structured Data"}).`,
+          summary: `Dataset terstruktur berisikan ${tables.length} tabel: ${totalRows.toLocaleString()} baris valid dipublikasikan dari ${sourceRows.toLocaleString()} baris sumber; ${quarantinedRows.toLocaleString()} baris invalid dikarantina. Dianalisis dan dipetakan oleh ${specialistAgentName} (${inferredDomain || "Structured Data"}).`,
           onboardedAt: new Date().toISOString(),
           suggestedQueries: allSuggestedQueries,
           reasoningSteps: allReasoningSteps,
@@ -951,12 +1016,32 @@ export class OnboardingOrchestratorService {
           completedAt: new Date().toISOString(),
           tableCount: tables.length,
           totalRows,
+          sourceRows,
+          quarantinedRows,
           sheetNames: tables.map((t) => t.tableName),
           onboardedBy: specialistAgentName,
           semanticProfile,
           onboardingReasoning: allReasoningSteps,
           suggestedQueries: allSuggestedQueries,
         };
+        // Enforce publication gate check (mandatory by default)
+        const rejectedTables = tables.filter((t) => t.semanticModel?.publicationGateStatus === "rejected");
+        if (rejectedTables.length > 0 && options.enforcePublicationGate !== false) {
+          const gateErrors = rejectedTables.flatMap((t) => t.semanticModel?.unresolvedDefinitions || []);
+          await this.db
+            .update(dataSources)
+            .set({
+              status: "failed",
+              metadata: {
+                ...completedMetadata,
+                publicationGateErrors: gateErrors,
+              },
+              updatedAt: new Date(),
+            })
+            .where(and(eq(dataSources.id, initialDs.id), eq(dataSources.companyId, companyId)));
+          throw new Error(`Publication gate rejected dataset: ${gateErrors.join("; ")}`);
+        }
+
         const updated = options.deferReady ? initialDs : (await this.db
           .update(dataSources)
           .set({ status: "ready", metadata: completedMetadata, updatedAt: new Date() })
@@ -1149,10 +1234,11 @@ export class OnboardingOrchestratorService {
             model: agentModel,
             instructionsPath: agentInstructions,
             adapterType: knowledgeIngestionAgent?.adapterType,
+            signal: options.jobLease?.signal,
           },
         );
 
-        const docAnalysis = aiDocRes.result;
+        const docAnalysis = aiDocRes.validationStatus === "validated" ? aiDocRes.result : null;
         const reasoningSteps: any[] = [...aiDocRes.reasoningSteps];
 
         let finalDomain = docAnalysis?.domain;
@@ -1287,7 +1373,7 @@ export class OnboardingOrchestratorService {
   async onboardDatabase(
     companyId: string,
     config: DatabaseConnectionConfig,
-    options: { name?: string; description?: string } = {},
+    options: { name?: string; description?: string; async?: boolean } = {},
   ): Promise<DataSource> {
     await this.rosterService.ensureEnterpriseRoster(companyId);
 
@@ -1353,22 +1439,31 @@ export class OnboardingOrchestratorService {
         throw error;
       });
 
-    // 3. Launch autonomous introspection & reasoning via Database Ingestion Agent in background
-    this.processDatabaseAsync(
-      initialDs,
+    // 3. Enqueue durable external DB onboarding job in dataSourceJobs
+    const idempotencyKey = `external-db-onboarding:${companyId}:${sourceId}:v1`;
+    await this.db.insert(dataSourceJobs).values({
       companyId,
-      config,
-      sanitizedConfig,
-      defaultName,
-      testResult.version,
-      specialistAgentId,
-      specialistAgentName,
-      agentModel,
-      agentInstructions,
-      databaseIngestionAgent?.adapterType,
-    ).catch((err) => {
-      console.error(`[onboarding-orchestrator] Background database onboarding failed for ${defaultName}:`, databaseConnectionErrorMessage(err, config));
+      dataSourceId: sourceId,
+      jobType: "external_db_onboarding",
+      status: "queued",
+      stage: "queued",
+      idempotencyKey,
+      progress: {
+        schemaVersion: 1,
+        startedAt: new Date().toISOString(),
+        specialistAgentId,
+        specialistAgentName,
+        agentModel,
+        agentInstructions,
+        adapterType: databaseIngestionAgent?.adapterType,
+      },
     });
+
+    if (options.async === false) {
+      const { DataSourceIngestionWorker } = await import("./data-source-ingestion-worker.js");
+      const worker = new DataSourceIngestionWorker(this.db, "external_db_onboarding");
+      await worker.tick();
+    }
 
     return {
       ...initialDs,
@@ -1405,62 +1500,158 @@ export class OnboardingOrchestratorService {
       let totalRows = 0;
       const createdTables: any[] = [];
 
-      // 2. Execute Autonomous Relational Schema Analysis via Database Ingestion Agent
-      const aiDbRes = await aiReasoningService.analyzeDatabaseSchema(
-        config.type,
-        config.database,
-        tables.map((t) => ({
-          tableName: t.tableName,
-          rowCount: t.rowCount,
-          columns: t.schemaDefinition.map((c) => ({
-            name: c.name,
-            dataType: c.dataType,
-            isPrimary: c.isPrimaryKey,
-            isForeign: c.isForeignKey,
-          })),
-        })),
-        {
-          agentName: specialistAgentName,
-          model: agentModel,
-          instructionsPath: agentInstructions,
-          adapterType,
-        },
-      );
-      console.log(`[onboarding-orchestrator] Autonomous analysis completed in ${aiDbRes.iterations} iterations. Entities: ${aiDbRes.result?.entities?.join(", ")}`);
+      // 2. Execute Autonomous Relational Schema Analysis via Database Ingestion Agent per table & column batch
+      const schemaFingerprint = createHash("sha256")
+        .update(
+          tables
+            .map((t) => {
+              const schemaPrefix = t.schemaName ? `${t.schemaName}.` : "public.";
+              const colSig = (t.schemaDefinition || [])
+                .map((c) => `${c.name}:${c.dataType}:${c.nativeType || ""}:${c.isPrimaryKey ? "PK" : ""}:${c.isForeignKey ? "FK" : ""}`)
+                .sort()
+                .join(",");
+              return `${schemaPrefix}${t.tableName}:${t.rowCount}:${colSig}`;
+            })
+            .sort()
+            .join("|"),
+        )
+        .digest("hex")
+        .slice(0, 32);
 
-      const dbAnalysis = aiDbRes.result;
-      const reasoningSteps: any[] = [...aiDbRes.reasoningSteps];
+      // Invalidate existing checkpoint if schema fingerprint has changed
+      const existingCheckpoint = (initialDs.metadata as any)?.onboardingCheckpoint;
+      let resumedCheckpoint = existingCheckpoint;
+      if (existingCheckpoint && existingCheckpoint.schemaFingerprint !== schemaFingerprint) {
+        console.log(`[onboarding-orchestrator] Schema fingerprint changed from ${existingCheckpoint.schemaFingerprint} to ${schemaFingerprint}. Invalidating stale checkpoint.`);
+        resumedCheckpoint = null;
+      }
+      const completedBatchKeys = new Set<string>(resumedCheckpoint?.completedBatchKeys || []);
 
-      let finalDomain = dbAnalysis?.domain || `${config.type.toUpperCase()} Relational Database`;
-      let finalEntities = dbAnalysis?.entities || [];
-      let finalTopics = dbAnalysis?.primaryTopics || [];
-      let tableRoles: Record<string, string> = dbAnalysis?.tableRoles || {};
-      let relationships: any[] = dbAnalysis?.relationships || [];
-      let suggestedQueries: any[] = dbAnalysis?.suggestedQueries || [];
-      let summary =
-        dbAnalysis?.reasoningSummary ||
-        `Basis data relasional (${config.type}) dengan ${tables.length} tabel terhubung dan dipetakan oleh ${specialistAgentName}.`;
+      let finalDomain = resumedCheckpoint?.finalDomain || `${config.type.toUpperCase()} Relational Database`;
+      const finalEntities: string[] = [...(resumedCheckpoint?.finalEntities || [])];
+      const finalTopics: string[] = [...(resumedCheckpoint?.finalTopics || [])];
+      const tableRoles: Record<string, string> = { ...(resumedCheckpoint?.tableRoles || {}) };
+      const relationships: any[] = [...(resumedCheckpoint?.relationships || [])];
+      const suggestedQueries: any[] = [...(resumedCheckpoint?.suggestedQueries || [])];
+      const reasoningSteps: any[] = [...(resumedCheckpoint?.reasoningSteps || [])];
+      const tableProfiles: Record<string, any> = { ...(resumedCheckpoint?.tableProfiles || {}) };
+      const crossTableClusters: any[] = [...(resumedCheckpoint?.crossTableClusters || [])];
+
+      for (const pt of tables) {
+        const qualifiedName = `${pt.schemaName || "public"}.${pt.tableName}`;
+        const allCols = pt.schemaDefinition || [];
+        const BATCH_SIZE = 20;
+
+        for (let i = 0; i < allCols.length; i += BATCH_SIZE) {
+          const batchKey = `${qualifiedName}:${i}:${i + BATCH_SIZE}`;
+          if (completedBatchKeys.has(batchKey)) {
+            continue;
+          }
+          const colBatch = allCols.slice(i, i + BATCH_SIZE);
+          let batchSuccess = false;
+          try {
+            const aiDbRes = await aiReasoningService.analyzeDatabaseSchema(
+              config.type,
+              config.database,
+              [{
+                tableName: pt.tableName,
+                rowCount: pt.rowCount,
+                columns: colBatch.map((c) => ({
+                  name: c.name,
+                  dataType: c.dataType,
+                  isPrimary: c.isPrimaryKey,
+                  isForeign: c.isForeignKey,
+                })),
+              }],
+              {
+                agentName: specialistAgentName,
+                model: agentModel,
+                instructionsPath: agentInstructions,
+                adapterType,
+                allowDatabaseObservations: false,
+              },
+            );
+
+            if (aiDbRes?.result && aiDbRes.validationStatus === "validated") {
+              finalDomain = aiDbRes.result.domain || finalDomain;
+              if (aiDbRes.result.entities) finalEntities.push(...aiDbRes.result.entities);
+              if (aiDbRes.result.primaryTopics) finalTopics.push(...aiDbRes.result.primaryTopics);
+              if (aiDbRes.result.tableRoles?.[pt.tableName]) tableRoles[pt.tableName] = aiDbRes.result.tableRoles[pt.tableName];
+              if (aiDbRes.result.relationships) relationships.push(...aiDbRes.result.relationships);
+              if (aiDbRes.result.suggestedQueries) suggestedQueries.push(...aiDbRes.result.suggestedQueries);
+
+              // Observation -> Validation -> Correction loop:
+              // Merge column profiles safely instead of overwriting prior batch profiles!
+              if (aiDbRes.result.tableProfiles?.[pt.tableName]) {
+                const existing = tableProfiles[pt.tableName] || {};
+                const incoming = aiDbRes.result.tableProfiles[pt.tableName];
+                tableProfiles[pt.tableName] = {
+                  ...existing,
+                  ...incoming,
+                  metrics: Array.from(new Set([...(existing.metrics || []), ...(incoming.metrics || [])])),
+                  dimensions: Array.from(new Set([...(existing.dimensions || []), ...(incoming.dimensions || [])])),
+                };
+              }
+              if (aiDbRes.result.crossTableClusters) crossTableClusters.push(...aiDbRes.result.crossTableClusters);
+              if (Array.isArray(aiDbRes.reasoningSteps)) reasoningSteps.push(...aiDbRes.reasoningSteps);
+              batchSuccess = true;
+            } else {
+              throw new Error("Database schema mapping did not pass validation");
+            }
+          } catch {
+            // Apply deterministic JEV correction for this batch
+            try {
+              const batchSummary = [{
+                name: pt.tableName,
+                columns: colBatch.map((c) => c.name),
+                rowCount: pt.rowCount,
+              }];
+              const fallbackRes = await this.jevService.evaluateDatabaseTables(batchSummary);
+              if (fallbackRes.entities) finalEntities.push(...fallbackRes.entities);
+              if (fallbackRes.tableRoles?.[pt.tableName] && !tableRoles[pt.tableName]) {
+                tableRoles[pt.tableName] = fallbackRes.tableRoles[pt.tableName];
+              }
+              if (fallbackRes.tableProfiles?.[pt.tableName]) {
+                const existing = tableProfiles[pt.tableName] || {};
+                const incoming = fallbackRes.tableProfiles[pt.tableName];
+                tableProfiles[pt.tableName] = {
+                  ...existing,
+                  ...incoming,
+                  metrics: Array.from(new Set([...(existing.metrics || []), ...(incoming.metrics || [])])),
+                  dimensions: Array.from(new Set([...(existing.dimensions || []), ...(incoming.dimensions || [])])),
+                };
+              }
+              batchSuccess = true;
+            } catch {
+              // Batch could not be analyzed; keep batchSuccess = false
+            }
+          }
+
+          if (batchSuccess) {
+            completedBatchKeys.add(batchKey);
+          }
+        }
+      }
 
       // Fallback to TypeSafe JEV System One if AI reasoning is offline
-      let tableProfiles: Record<string, any> = dbAnalysis?.tableProfiles || {};
-      let crossTableClusters: any[] = dbAnalysis?.crossTableClusters || [];
-
-      if (!dbAnalysis) {
+      if (finalEntities.length === 0) {
         const tableSummaries = tables.map((t) => ({
           name: t.tableName,
           columns: t.schemaDefinition.map((c) => c.name),
           rowCount: t.rowCount,
         }));
         const dbSemanticRes = await this.jevService.evaluateDatabaseTables(tableSummaries);
-        finalEntities = dbSemanticRes.entities;
-        tableRoles = dbSemanticRes.tableRoles;
-        relationships = dbSemanticRes.relationships;
-        finalTopics = dbSemanticRes.primaryTopics;
-        suggestedQueries = dbSemanticRes.suggestedQueries;
-        tableProfiles = dbSemanticRes.tableProfiles || {};
-        crossTableClusters = dbSemanticRes.crossTableClusters || [];
+        finalEntities.push(...dbSemanticRes.entities);
+        Object.assign(tableRoles, dbSemanticRes.tableRoles);
+        relationships.push(...dbSemanticRes.relationships);
+        finalTopics.push(...dbSemanticRes.primaryTopics);
+        suggestedQueries.push(...dbSemanticRes.suggestedQueries);
+        Object.assign(tableProfiles, dbSemanticRes.tableProfiles || {});
+        crossTableClusters.push(...(dbSemanticRes.crossTableClusters || []));
         if (dbSemanticRes.reasoningSteps) reasoningSteps.push(...dbSemanticRes.reasoningSteps);
       }
+
+      const summary = `Basis data relasional (${config.type}) dengan ${tables.length} tabel terhubung dan dipetakan oleh ${specialistAgentName}.`;
 
       for (const tableData of tables) {
         totalRows += tableData.rowCount;
@@ -1513,6 +1704,45 @@ export class OnboardingOrchestratorService {
           }
         } catch (chErr: any) {
           console.warn(`[ClickhouseSync] Optional DB schema sync skipped: ${chErr.message}`);
+        }
+
+        // Synthesize structured schema chunk for vector store retrieval
+        try {
+          const cols = (tableData.schemaDefinition as any[]) || [];
+          const colText = cols.map((c: any) => `${c.name} (${c.dataType || "string"}${c.role ? `, role: ${c.role}` : ""})`).join(", ");
+          const metricText = ((tableData.semanticModel as any)?.metrics || []).map((m: any) => `${m.name || m}`).join(", ");
+          const content = `Table: ${tableData.tableName}\nRole: ${tableSemantic.tableRole}\nColumns: ${colText}${metricText ? `\nMetrics: ${metricText}` : ""}`;
+          let embeddingVector: number[] | null = null;
+          let embeddingSpace: string | null = null;
+          try {
+            const ragModel = new RagModelService();
+            const embedded = await ragModel.embed([content]);
+            if (embedded.vectors?.[0] && embedded.space) {
+              embeddingVector = embedded.vectors[0];
+              embeddingSpace = embedded.space;
+            }
+          } catch {
+            // Graceful fallback
+          }
+          const vectorStore = new DataSourceVectorStore(this.db);
+          const ragModel = new RagModelService();
+          const embeddingGeneration = embeddingSpace ? ragModel.embeddingGeneration(embeddingSpace as any) : undefined;
+          await vectorStore.insertChunks([{
+            companyId,
+            dataSourceId: initialDs.id,
+            chunkIndex: tables.indexOf(tableData),
+            title: `Schema: ${tableData.tableName}`,
+            content,
+            embedding: embeddingVector,
+            metadata: {
+              corpusKind: "schema",
+              tableId: tableRow?.id,
+              tableName: tableData.tableName,
+              ...(embeddingSpace ? { embeddingSpace, embeddingGeneration } : {}),
+            },
+          }]);
+        } catch {
+          // Safe fallback
         }
       }
 

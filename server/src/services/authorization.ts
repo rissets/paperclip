@@ -1691,84 +1691,99 @@ export function authorizationService(db: Db | DbTransaction) {
       userId: string,
       membershipRole: string,
     ): Promise<{ allowed: boolean; reason?: AuthorizationDecision["reason"]; explanation?: string }> {
-      if (["owner", "admin"].includes(membershipRole.toLowerCase())) {
+      if (membershipRole.toLowerCase() !== "operator") {
         return { allowed: true };
       }
 
       const rbac = userRbacService(db as Db);
 
       if (action === "company_scope:read") {
-        return {
-          allowed: false,
-          reason: "deny_scope",
-          explanation: "Operators do not have company-wide issue visibility; issues must be filtered.",
-        };
+        const assignedProjects = await rbac.getAssignedProjectsForUser(targetCompanyId, userId);
+        const assignedAgents = await rbac.getAssignedAgentsForUser(targetCompanyId, userId);
+        if (assignedProjects.length > 0 || assignedAgents.length > 0) {
+          return {
+            allowed: false,
+            reason: "deny_scope",
+            explanation: "Operators with scoped assignments do not have company-wide issue visibility; issues must be filtered.",
+          };
+        }
       }
 
-      if (action === "agent:read" || action === "agent:wake") {
+      if (action === "agent:wake") {
         if (resource.type === "agent" && resource.agentId) {
-          const assigned = await rbac.canUserEditAgent(targetCompanyId, userId, resource.agentId);
-          if (!assigned) {
-            return {
-              allowed: false,
-              reason: "deny_agent_not_assigned",
-              explanation: `Agent ${resource.agentId} is not assigned to user ${userId}.`,
-            };
+          const assignedAgents = await rbac.getAssignedAgentsForUser(targetCompanyId, userId);
+          if (assignedAgents.length > 0) {
+            const assigned = await rbac.canUserEditAgent(targetCompanyId, userId, resource.agentId);
+            if (!assigned) {
+              return {
+                allowed: false,
+                reason: "deny_agent_not_assigned",
+                explanation: `Agent ${resource.agentId} is not assigned to user ${userId}.`,
+              };
+            }
           }
         }
       }
 
       if (action === "project:read") {
-        const projectId =
-          resource.type === "project"
-            ? resource.projectId
-            : resource.type === "issue"
+        const assignedProjects = await rbac.getAssignedProjectsForUser(targetCompanyId, userId);
+        if (assignedProjects.length > 0) {
+          const projectId =
+            resource.type === "project"
               ? resource.projectId
-              : null;
-        if (projectId) {
-          const canAccess = await rbac.canUserAccessProject(targetCompanyId, userId, projectId);
-          if (!canAccess) {
-            return {
-              allowed: false,
-              reason: "deny_missing_grant",
-              explanation: `Project ${projectId} is not assigned to or created by user ${userId}.`,
-            };
+              : resource.type === "issue"
+                ? resource.projectId
+                : null;
+          if (projectId) {
+            const canAccess = await rbac.canUserAccessProject(targetCompanyId, userId, projectId);
+            if (!canAccess) {
+              return {
+                allowed: false,
+                reason: "deny_missing_grant",
+                explanation: `Project ${projectId} is not assigned to or created by user ${userId}.`,
+              };
+            }
           }
         }
       }
 
       if (action === "issue:read") {
         if (resource.type === "issue") {
-          if (resource.projectId) {
-            const canAccessProject = await rbac.canUserAccessProject(targetCompanyId, userId, resource.projectId);
-            if (!canAccessProject) {
-              return {
-                allowed: false,
-                reason: "deny_missing_grant",
-                explanation: `Task belongs to project ${resource.projectId} which is not assigned to user ${userId}.`,
-              };
-            }
-          } else {
-            const assignedAgents = await rbac.getAssignedAgentsForUser(targetCompanyId, userId);
-            const isAssignedToUser = resource.assigneeUserId === userId;
-            const isAssignedToUserAgent = Boolean(resource.assigneeAgentId && assignedAgents.includes(resource.assigneeAgentId));
+          const assignedProjects = await rbac.getAssignedProjectsForUser(targetCompanyId, userId);
+          const assignedAgents = await rbac.getAssignedAgentsForUser(targetCompanyId, userId);
+          const hasScoping = assignedProjects.length > 0 || assignedAgents.length > 0;
 
-            let isCreatedByUser = false;
-            if (resource.issueId) {
-              const issueRow = await (db as Db)
-                .select({ createdByUserId: issues.createdByUserId })
-                .from(issues)
-                .where(eq(issues.id, resource.issueId))
-                .then((r) => r[0] ?? null);
-              isCreatedByUser = issueRow?.createdByUserId === userId;
-            }
+          if (hasScoping) {
+            if (resource.projectId) {
+              const canAccessProject = await rbac.canUserAccessProject(targetCompanyId, userId, resource.projectId);
+              if (!canAccessProject) {
+                return {
+                  allowed: false,
+                  reason: "deny_missing_grant",
+                  explanation: `Task belongs to project ${resource.projectId} which is not assigned to user ${userId}.`,
+                };
+              }
+            } else {
+              const isAssignedToUser = resource.assigneeUserId === userId;
+              const isAssignedToUserAgent = Boolean(resource.assigneeAgentId && assignedAgents.includes(resource.assigneeAgentId));
 
-            if (!isAssignedToUser && !isAssignedToUserAgent && !isCreatedByUser) {
-              return {
-                allowed: false,
-                reason: "deny_missing_grant",
-                explanation: `Task is not assigned to or created by user ${userId}.`,
-              };
+              let isCreatedByUser = false;
+              if (resource.issueId) {
+                const issueRow = await (db as Db)
+                  .select({ createdByUserId: issues.createdByUserId })
+                  .from(issues)
+                  .where(eq(issues.id, resource.issueId))
+                  .then((r) => r[0] ?? null);
+                isCreatedByUser = issueRow?.createdByUserId === userId;
+              }
+
+              if (!isAssignedToUser && !isAssignedToUserAgent && !isCreatedByUser) {
+                return {
+                  allowed: false,
+                  reason: "deny_missing_grant",
+                  explanation: `Task is not assigned to or created by user ${userId}.`,
+                };
+              }
             }
           }
         }
@@ -1956,10 +1971,8 @@ export function authorizationService(db: Db | DbTransaction) {
             });
           }
 
-          // Privileged actions require owner or admin
+          // Privileged secrets actions require owner or admin
           const requiresAdmin =
-            input.action === "runtime:manage" ||
-            input.action === "secrets:read" ||
             input.action === "secrets:propose";
           if (requiresAdmin && !["owner", "admin"].includes(String(membership.membershipRole))) {
             return deny({
@@ -1971,6 +1984,8 @@ export function authorizationService(db: Db | DbTransaction) {
 
           const requiresNonViewer =
             input.action === "agent:wake" ||
+            input.action === "runtime:manage" ||
+            input.action === "secrets:read" ||
             input.action === "decision_queue:manage" ||
             input.action === "decision_triage:manage";
           if (requiresNonViewer && membership.membershipRole === "viewer") {

@@ -9,6 +9,7 @@ import { compareVersions, detectInstallMode, resolveUpdateRequest, rollbackManag
 let root: string;
 let previousHome: string | undefined;
 let previousPaperclipHome: string | undefined;
+let nodeVersionDescriptor: PropertyDescriptor | undefined;
 
 function record(payloadPath: string, version: string, channel: "latest" | "canary" | "pinned" = "latest"): InstallRecord {
   return { source: "npm", version, channel, payloadPath, installedAt: `2026-07-22T00:00:0${version}.000Z` };
@@ -20,6 +21,8 @@ function createPayload(payloadPath: string, version: string): string {
   return entrypoint;
 }
 beforeEach(() => {
+  nodeVersionDescriptor = Object.getOwnPropertyDescriptor(process.versions, "node");
+  Object.defineProperty(process.versions, "node", { ...nodeVersionDescriptor, value: "24.11.0" });
   root = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-update-"));
   previousHome = process.env.HOME;
   previousPaperclipHome = process.env.PAPERCLIP_HOME;
@@ -31,6 +34,9 @@ afterEach(() => {
   vi.unstubAllEnvs();
   if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
   if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME; else process.env.PAPERCLIP_HOME = previousPaperclipHome;
+  if (nodeVersionDescriptor) {
+    Object.defineProperty(process.versions, "node", nodeVersionDescriptor);
+  }
   fs.rmSync(root, { recursive: true, force: true });
   process.exitCode = undefined;
 });

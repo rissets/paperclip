@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import postgres from "postgres";
 import { DatabaseIntegrationService, validateReadOnlySqlQuery } from "../services/database-integration.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
@@ -55,6 +56,45 @@ if (!postgresSupport.supported) console.warn(`SQL safety PostgreSQL integration 
       expect(result.rowCount).toBe(5);
       expect(result.rows.map((row) => row.id)).toEqual([1, 2, 3, 4, 5]);
     } finally {
+      await temporary.cleanup();
+    }
+  }, 90_000);
+
+  it("executes a bounded onboarding observation with quoted catalog identifiers", async () => {
+    const temporary = await startEmbeddedPostgresTestDatabase("paperclip-datasource-observation-");
+    const source = postgres(temporary.connectionString, { max: 1 });
+    const service = new DatabaseIntegrationService();
+    const remote = new URL(temporary.connectionString);
+    const config = {
+      type: "postgres" as const,
+      host: remote.hostname,
+      port: Number(remote.port),
+      database: decodeURIComponent(remote.pathname.slice(1)),
+      username: decodeURIComponent(remote.username),
+      password: decodeURIComponent(remote.password),
+      ssl: false,
+      allowedSchemas: ["public"],
+      allowedTables: ["sales.orders"],
+    };
+
+    try {
+      await source.unsafe('CREATE TABLE "public"."sales.orders" ("status.code" text NOT NULL)');
+      await source.unsafe(
+        'INSERT INTO "public"."sales.orders" ("status.code") VALUES ($1), ($2)',
+        ["paid", "pending"],
+      );
+      const result = await service.observeExternalTableColumns(config, {
+        schemaName: "public",
+        tableName: "sales.orders",
+        columns: ["status.code"],
+      });
+
+      expect(result.valuesByColumn["status.code"]).toEqual(["paid", "pending"]);
+      expect(result.rowCount).toBe(2);
+      expect(result.executionTimeMs).toBeGreaterThanOrEqual(0);
+    } finally {
+      service.invalidatePool(config);
+      await source.end({ timeout: 1 });
       await temporary.cleanup();
     }
   }, 90_000);

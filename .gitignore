@@ -86,3 +86,6 @@ test-results/
 .lifecycle-baseline/
 .commandcode/
 graphify-out/
+services/meeting-notes/storage/
+__pycache__/
+*.pyc

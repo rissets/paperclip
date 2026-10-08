@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -118,12 +118,15 @@ function createBasePaperclipEnv(options: TestPaperclipEnv) {
       delete env[key];
     }
   }
+  delete env.BETTER_AUTH_SECRET;
 
   env.PAPERCLIP_CONFIG = options.configPath;
   env.PAPERCLIP_HOME = options.paperclipHome;
   env.PAPERCLIP_INSTANCE_ID = options.instanceId;
   env.PAPERCLIP_CONTEXT = path.join(options.paperclipHome, "context.json");
   env.PAPERCLIP_AUTH_STORE = path.join(options.paperclipHome, "auth.json");
+  env.PAPERCLIP_DISABLE_CWD_ENV_FILE = "true";
+  env.PAPERCLIP_DEPLOYMENT_MODE = "local_trusted";
   if (options.shellHome) {
     env.HOME = options.shellHome;
   }
@@ -157,6 +160,8 @@ function createServerEnv(
   env.HEARTBEAT_SCHEDULER_ENABLED = "false";
   env.PAPERCLIP_MIGRATION_AUTO_APPLY = "true";
   env.PAPERCLIP_UI_DEV_MIDDLEWARE = "false";
+  env.PAPERCLIP_AGENT_JWT_SECRET = "company-import-export-agent-jwt-secret";
+  env.PAPERCLIP_SKIP_NODE_VERSION_CHECK = "1";
 
   return env;
 }
@@ -171,6 +176,8 @@ function createCliEnv(options: TestPaperclipEnv) {
   delete env.HEARTBEAT_SCHEDULER_ENABLED;
   delete env.PAPERCLIP_MIGRATION_AUTO_APPLY;
   delete env.PAPERCLIP_UI_DEV_MIDDLEWARE;
+  env.PAPERCLIP_AGENT_JWT_SECRET = "company-import-export-agent-jwt-secret";
+  env.PAPERCLIP_SKIP_NODE_VERSION_CHECK = "1";
   return env;
 }
 
@@ -282,9 +289,10 @@ describeEmbeddedPostgres("paperclipai company import/export e2e", () => {
   let paperclipInstanceId = "";
   let serverProcess: ServerProcess | null = null;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+  const output = { stdout: [] as string[], stderr: [] as string[] };
 
   beforeAll(async () => {
-    tempRoot = mkdtempSync(path.join(os.tmpdir(), "paperclip-company-cli-e2e-"));
+    tempRoot = realpathSync(mkdtempSync(path.join(os.tmpdir(), "paperclip-company-cli-e2e-")));
     configPath = path.join(tempRoot, "config", "config.json");
     exportDir = path.join(tempRoot, "exported-company");
     paperclipHome = path.join(tempRoot, "paperclip-home");
@@ -300,7 +308,6 @@ describeEmbeddedPostgres("paperclipai company import/export e2e", () => {
     apiBase = `http://127.0.0.1:${port}`;
 
     const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
-    const output = { stdout: [] as string[], stderr: [] as string[] };
     const child = spawn(
       "pnpm",
       ["paperclipai", "run", "--config", configPath],

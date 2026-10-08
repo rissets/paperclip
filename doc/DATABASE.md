@@ -518,3 +518,24 @@ datasource leaves the upload audit/status row but clears that reference.
 Migrations `0306_polite_roxanne_simpson.sql` and
 `0307_boring_colonel_america.sql` create the table and add the nullable whole
 object checksum field used during completion retries.
+
+### Datasource mapping checkpoints
+
+`data_source_job_checkpoints` stores bounded semantic mapping artifacts keyed by
+the owning durable datasource job, checkpoint kind, and a schema-qualified
+table/column-batch hash. `input_fingerprint` binds each result to the inspected
+source database identity, schema, row count, native types, primary/foreign-key
+constraints and FK targets, plus the configured adapter/model/instruction path.
+The onboarding worker commits each validated result under the active lease before
+using it, so a retry can reuse an acknowledged batch and a stale worker cannot
+replace a successor's result. Checkpoint rows cascade with their job; they are
+not exposed as a datasource query surface. Payload size is checked by the
+service before persistence, and the worker reads one batch at a time rather
+than materializing every checkpoint for a large source.
+For ambiguous external-schema fields, onboarding may perform one bounded observation
+cycle before checkpointing: at most four inspected, non-key, non-sensitive columns
+are selected with identifier quoting, `LIMIT 8`, and a five-second statement timeout.
+The final validated semantic result is checkpointed; raw observation rows are not
+stored as checkpoint payloads.
+Migration `0311_majestic_nemesis.sql` creates the table and its job/fingerprint
+lookup indexes.

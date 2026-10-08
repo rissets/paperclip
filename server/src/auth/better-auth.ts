@@ -274,7 +274,7 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
     emailAndPassword: {
       enabled: true,
       requireEmailVerification: false,
-      disableSignUp: true,
+      disableSignUp: config.authDisableSignUp ?? false,
       sendResetPassword: async ({ user, url, token }: { user: { email: string; name?: string | null }; url: string; token: string }) => {
         const origin = publicUrl || baseUrl || "http://localhost:3100";
         const resetUrl = `${origin}/auth/reset-password?token=${encodeURIComponent(token)}`;

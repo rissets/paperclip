@@ -37,7 +37,9 @@ function safeFailure(error: unknown, abortKind: AbortKind): string {
   if (abortKind === "control_unavailable") return "Query was stopped because job control could not be confirmed.";
   if (isExternalQueryAbortError(error)) return "External database query was cancelled.";
   const message = error instanceof Error ? error.message : "";
-  if (/timeout|timed out|statement.*deadline/i.test(message)) return "External query exceeded its execution deadline.";
+  if (/timeout|timed out|statement.*deadline|max_statement_time|max_execution_time/i.test(message)) {
+    return "External query exceeded its execution deadline (max_statement_time exceeded). On large tables, avoid leading wildcards (e.g. LIKE '%term%') which cause full table scans; use prefix search (LIKE 'term%') or exact match instead.";
+  }
   if (/concurrent query limit|admission is unavailable/i.test(message)) return "External datasource is busy; submit a new query job to retry.";
   return "External database rejected or failed to execute the query.";
 }
@@ -213,6 +215,14 @@ export class DataSourceQueryWorker {
         };
         await this.finishSuccess(job, durableResult);
       } catch (error) {
+        const isTimeoutOrCancel = /cancel|timeout|timed out|statement.*deadline|max_statement_time|max_execution_time/i.test(
+          error instanceof Error ? error.message : String(error),
+        );
+        if (isTimeoutOrCancel) {
+          console.warn("[DataSourceQueryWorker] Query cancelled or timed out:", error instanceof Error ? error.message : String(error));
+        } else {
+          console.error("[DataSourceQueryWorker] Query failed:", error);
+        }
         await this.finishAborted(job, error);
       } finally {
         clearInterval(poll);

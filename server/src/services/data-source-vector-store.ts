@@ -318,4 +318,52 @@ export class DataSourceVectorStore {
       .filter((entry) => Number.isFinite(entry[1]));
     return new Map<string, number>(scoredRows);
   }
+
+  /** Returns cosine similarity for schema vectors specifically, keyed by chunk id. */
+  async searchSchemaVectors(options: VectorSearchOptions): Promise<Map<string, number> | null> {
+    if (options.dataSourceIds?.length === 0) return new Map();
+    const available = await this.availableSpaces();
+    const isBge = options.embeddingSpace === "bge-m3";
+    if ((isBge && !available.bge) || (!isBge && !available.gateway)) return null;
+    assertVector(options.vector, isBge ? BGE_DIMENSIONS : GATEWAY_DIMENSIONS, options.embeddingSpace);
+
+    const table = isBge
+      ? sql.raw('"data_source_chunk_embeddings"')
+      : sql.raw('"data_source_gateway_chunk_embeddings"');
+    const sourcePredicate = options.dataSourceIds === null
+      ? sql`TRUE`
+      : sql`embedding.data_source_id IN (${sql.join(options.dataSourceIds.map((id) => sql`${id}::uuid`), sql`, `)})`;
+    const vectorLiteral = `[${options.vector.join(",")}]`;
+    const result = await this.db.execute(sql<{ targetId: string; score: number | string }>`
+      SELECT COALESCE(chunk.metadata->>'tableId', embedding.chunk_id) AS "targetId",
+             1 - (embedding.embedding <=> ${vectorLiteral}::vector) AS score
+      FROM ${table} AS embedding
+      JOIN data_source_chunks AS chunk ON chunk.id = embedding.chunk_id
+      JOIN data_sources AS source
+        ON source.id = embedding.data_source_id
+       AND source.company_id = embedding.company_id
+      WHERE embedding.company_id = ${options.companyId}
+        AND embedding.embedding_space = ${options.embeddingSpace}
+        AND embedding.embedding_generation = ${options.embeddingGeneration}
+        AND source.status = 'ready'
+        AND source.metadata->>'embeddingSpace' = embedding.embedding_space
+        AND source.metadata->>'embeddingGeneration' = embedding.embedding_generation
+        AND (chunk.metadata->>'corpusKind' = 'schema' OR chunk.metadata->>'tableId' IS NOT NULL)
+        AND ${sourcePredicate}
+      ORDER BY embedding.embedding <=> ${vectorLiteral}::vector
+      LIMIT ${Math.max(1, Math.min(500, options.limit))}
+    `);
+
+    const scoredMap = new Map<string, number>();
+    for (const row of rowsOf<{ targetId: string; score: number | string }>(result)) {
+      const scoreNum = Number(row.score);
+      if (Number.isFinite(scoreNum)) {
+        const existing = scoredMap.get(row.targetId);
+        if (existing === undefined || scoreNum > existing) {
+          scoredMap.set(row.targetId, scoreNum);
+        }
+      }
+    }
+    return scoredMap;
+  }
 }

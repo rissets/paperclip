@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { formatClickhouseQueryError } from "./clickhouse-query-errors.js";
 
 export interface ClickhouseConfig {
   url?: string;
@@ -70,11 +71,109 @@ export function clickhouseSourceTableName(tableId: string, displayName: string):
   return `ds_${identity}_${readable}`;
 }
 
+export interface ClickhouseTableAliasInput {
+  id: string;
+  tableName: string;
+  sourceSchema?: string | null;
+  clickhouseTable?: string | null;
+}
+
+/** Build logical aliases and retain all physical targets for collision diagnostics. */
+export function buildClickhouseTableAliasTargets(
+  tables: ClickhouseTableAliasInput[],
+  collectionViews: Array<{ viewName: string; physicalName?: string }> = [],
+): Map<string, string[]> {
+  const targetsByAlias = new Map<string, Set<string>>();
+  const add = (alias: string, physicalName: string) => {
+    const normalized = alias.trim().toLowerCase();
+    if (!normalized) return;
+    const targets = targetsByAlias.get(normalized) || new Set<string>();
+    targets.add(physicalName);
+    targetsByAlias.set(normalized, targets);
+  };
+
+  for (const table of tables) {
+    const physicalName = table.clickhouseTable || clickhouseSourceTableName(table.id, table.tableName);
+    const sanitizedName = table.tableName.toLowerCase().replace(/[^a-z0-9_]/g, "_");
+    const sourceSchema = table.sourceSchema || "public";
+    const sanitizedSchema = sourceSchema.toLowerCase().replace(/[^a-z0-9_]/g, "_");
+    add(table.tableName, physicalName);
+    add(`${sourceSchema}.${table.tableName}`, physicalName);
+    add(`${sanitizedSchema}.${sanitizedName}`, physicalName);
+    add(sanitizedName, physicalName);
+    add(`ds_${sanitizedName}`, physicalName);
+    add(physicalName, physicalName);
+  }
+  for (const view of collectionViews) add(view.viewName, view.physicalName || view.viewName);
+
+  return new Map(
+    [...targetsByAlias].map(([alias, targets]) => [alias, [...targets].sort((left, right) => left.localeCompare(right))]),
+  );
+}
+
+/** Build only unambiguous logical aliases for the caller's authorized sources. */
+export function buildClickhouseTableAliasMap(
+  tables: ClickhouseTableAliasInput[],
+  collectionViews: Array<{ viewName: string; physicalName?: string }> = [],
+): Map<string, string> {
+  const targetsByAlias = buildClickhouseTableAliasTargets(tables, collectionViews);
+  const aliases = new Map<string, string>();
+  for (const [alias, targets] of targetsByAlias) {
+    if (targets.length === 1) aliases.set(alias, targets[0]!);
+  }
+  return aliases;
+}
+
+/** Extract CTE names while ignoring comments and string literals. */
+export function extractClickhouseCteNames(sql: string): Set<string> {
+  let cleanSql = "";
+  let index = 0;
+  while (index < sql.length) {
+    if (sql[index] === "-" && sql[index + 1] === "-") {
+      while (index < sql.length && sql[index] !== "\n") index++;
+      cleanSql += " ";
+    } else if (sql[index] === "/" && sql[index + 1] === "*") {
+      index += 2;
+      while (index < sql.length && !(sql[index] === "*" && sql[index + 1] === "/")) index++;
+      index = Math.min(sql.length, index + 2);
+      cleanSql += " ";
+    } else if (sql[index] === "'") {
+      index++;
+      while (index < sql.length) {
+        if (sql[index] === "'" && sql[index + 1] === "'") index += 2;
+        else if (sql[index] === "'") { index++; break; }
+        else if (sql[index] === "\\") index += 2;
+        else index++;
+      }
+      cleanSql += " 'str' ";
+    } else {
+      cleanSql += sql[index]!;
+      index++;
+    }
+  }
+
+  const names = new Set<string>();
+  for (const match of cleanSql.matchAll(/(?:\bwith|,)\s*[`"']?([a-zA-Z0-9_]+)[`"']?\s+as\s*\(/gi)) {
+    names.add(match[1]!.toLowerCase());
+  }
+  return names;
+}
+
+export class AmbiguousClickhouseTableAliasError extends Error {
+  constructor(alias: string, physicalTables: string[]) {
+    super(
+      `ClickHouse table alias '${alias}' is ambiguous because it matches multiple data source tables. Use one physical ClickHouse table identifier: ${physicalTables.map((name) => `\`${name}\``).join(", ")}`,
+    );
+    this.name = "AmbiguousClickhouseTableAliasError";
+  }
+}
+
 /** Rewrite assigned logical/legacy table aliases to their published ClickHouse names. */
 export function rewriteClickhouseTableReferences(
   sql: string,
   physicalNameByAlias: ReadonlyMap<string, string>,
   cteNames: ReadonlySet<string> = new Set(),
+  ambiguousPhysicalNamesByAlias: ReadonlyMap<string, readonly string[]> = new Map(),
 ): string {
   type Identifier = { start: number; end: number; value: string };
   const replacements: Array<{ start: number; end: number; value: string }> = [];
@@ -151,17 +250,42 @@ export function rewriteClickhouseTableReferences(
       const first = readIdentifier(firstStart);
       if (first) {
         let table = first;
+        let qualifiedEnd: number | undefined;
+        let qualifiedAlias: string | undefined;
         const dot = skipTrivia(first.end);
         if (sql[dot] === ".") {
           const qualified = readIdentifier(skipTrivia(dot + 1));
-          if (qualified) table = qualified;
+          if (qualified) {
+            table = qualified;
+            qualifiedEnd = qualified.end;
+            qualifiedAlias = `${first.value}.${qualified.value}`.toLowerCase();
+          }
         }
         const normalized = table.value.toLowerCase();
-        const physicalName = physicalNameByAlias.get(normalized);
-        if (physicalName && !lowerCtes.has(normalized) && normalized !== physicalName.toLowerCase()) {
-          replacements.push({ start: table.start, end: table.end, value: `\`${physicalName.replaceAll("`", "``")}\`` });
+        const metadataDatabaseQualifier = qualifiedAlias
+          && /^(system|information_schema)$/i.test(first.value);
+        const qualifiedPhysicalName = qualifiedAlias && !metadataDatabaseQualifier
+          ? physicalNameByAlias.get(qualifiedAlias)
+          : undefined;
+        const physicalName = qualifiedPhysicalName
+          || (metadataDatabaseQualifier ? undefined : physicalNameByAlias.get(normalized));
+        const ambiguousAlias = qualifiedAlias && ambiguousPhysicalNamesByAlias.has(qualifiedAlias)
+          ? qualifiedAlias
+          : normalized;
+        const ambiguousPhysicalNames = metadataDatabaseQualifier
+          ? undefined
+          : ambiguousPhysicalNamesByAlias.get(ambiguousAlias);
+        if (!physicalName && !lowerCtes.has(normalized) && ambiguousPhysicalNames && ambiguousPhysicalNames.length > 1) {
+          throw new AmbiguousClickhouseTableAliasError(ambiguousAlias, [...ambiguousPhysicalNames]);
         }
-        index = table.end;
+        if (physicalName && !lowerCtes.has(normalized) && normalized !== physicalName.toLowerCase()) {
+          replacements.push({
+            start: qualifiedPhysicalName ? first.start : table.start,
+            end: qualifiedPhysicalName ? qualifiedEnd! : table.end,
+            value: `\`${physicalName.replaceAll("`", "``")}\``,
+          });
+        }
+        index = qualifiedEnd || table.end;
         continue;
       }
     }
@@ -188,6 +312,128 @@ export function rewriteClickhouseCreateTableName(ddl: string, tableName: string)
     /(\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)(?:`[^`]+`|"[^"]+"|[a-zA-Z_][a-zA-Z0-9_]*)/i,
     `$1\`${sanitized}\``,
   );
+}
+
+/**
+ * P5-01: Automatically rewrite queries querying ReplacingMergeTree tables with FINAL
+ * so unmerged duplicate versions in ClickHouse parts do not skew count/sum aggregates.
+ */
+export function rewriteClickhouseQueryWithFinal(
+  sql: string,
+  tablesWithReplacingMergeTree: ReadonlySet<string>,
+): string {
+  if (tablesWithReplacingMergeTree.size === 0) return sql;
+  const lowerTargets = new Set([...tablesWithReplacingMergeTree].map((t) => t.toLowerCase().replace(/[`"]/g, "")));
+
+  const skipTrivia = (start: number): number => {
+    let index = start;
+    while (index < sql.length) {
+      if (/\s/.test(sql[index]!)) {
+        index++;
+      } else if (sql[index] === "-" && sql[index + 1] === "-") {
+        index += 2;
+        while (index < sql.length && sql[index] !== "\n") index++;
+      } else if (sql[index] === "/" && sql[index + 1] === "*") {
+        index += 2;
+        while (index < sql.length && !(sql[index] === "*" && sql[index + 1] === "/")) index++;
+        index = Math.min(sql.length, index + 2);
+      } else {
+        break;
+      }
+    }
+    return index;
+  };
+
+  const readIdentifier = (start: number): { start: number; end: number; value: string } | null => {
+    const quote = sql[start];
+    if (quote === "`" || quote === '"') {
+      let value = "";
+      let index = start + 1;
+      while (index < sql.length) {
+        if (sql[index] === quote && sql[index + 1] === quote) {
+          value += quote;
+          index += 2;
+        } else if (sql[index] === quote) {
+          return { start, end: index + 1, value };
+        } else {
+          value += sql[index];
+          index++;
+        }
+      }
+      return null;
+    }
+    const match = sql.slice(start).match(/^[A-Za-z0-9_]+/);
+    return match ? { start, end: start + match[0].length, value: match[0] } : null;
+  };
+
+  const insertions: Array<{ position: number; text: string }> = [];
+  let index = 0;
+  while (index < sql.length) {
+    if (sql[index] === "-" && sql[index + 1] === "-") {
+      index += 2;
+      while (index < sql.length && sql[index] !== "\n") index++;
+      continue;
+    }
+    if (sql[index] === "/" && sql[index + 1] === "*") {
+      index += 2;
+      while (index < sql.length && !(sql[index] === "*" && sql[index + 1] === "/")) index++;
+      index = Math.min(sql.length, index + 2);
+      continue;
+    }
+    if (sql[index] === "'") {
+      index++;
+      while (index < sql.length) {
+        if (sql[index] === "'" && sql[index + 1] === "'") index += 2;
+        else if (sql[index] === "'") { index++; break; }
+        else if (sql[index] === "\\") index += 2;
+        else index++;
+      }
+      continue;
+    }
+
+    const keywordMatch = sql.slice(index).match(/^(from|join)\b/i);
+    if (keywordMatch && (index === 0 || !/[A-Za-z0-9_]/.test(sql[index - 1]!))) {
+      const firstStart = skipTrivia(index + keywordMatch[0].length);
+      const first = readIdentifier(firstStart);
+      if (first) {
+        let table = first;
+        const dot = skipTrivia(first.end);
+        if (sql[dot] === ".") {
+          const qualified = readIdentifier(skipTrivia(dot + 1));
+          if (qualified) table = qualified;
+        }
+        const normalized = table.value.toLowerCase().replace(/[`"]/g, "");
+        if (lowerTargets.has(normalized)) {
+          const afterTable = skipTrivia(table.end);
+          const nextWord = readIdentifier(afterTable);
+          if (!nextWord || nextWord.value.toLowerCase() !== "final") {
+            insertions.push({ position: table.end, text: " FINAL" });
+          }
+        }
+        index = table.end;
+        continue;
+      }
+    }
+
+    if (sql[index] === "`" || sql[index] === '"') {
+      const identifier = readIdentifier(index);
+      index = identifier?.end ?? index + 1;
+    } else {
+      index++;
+    }
+  }
+
+  let result = sql;
+  for (const ins of insertions.reverse()) {
+    result = result.slice(0, ins.position) + ins.text + result.slice(ins.position);
+  }
+  return result;
+}
+
+export interface ClickhouseQueryOptions {
+  deduplicateTables?: string[];
+  signal?: AbortSignal;
+  statementTimeoutSeconds?: number;
 }
 
 export class ClickhouseService {
@@ -287,6 +533,7 @@ export class ClickhouseService {
     sqlQuery: string,
     dbName?: string,
     parameters: Record<string, ClickhouseQueryParameter> = {},
+    options?: ClickhouseQueryOptions,
   ): Promise<ClickhouseQueryResult<T>> {
     const targetDb = dbName || this.defaultDb;
     let formattedSql = sqlQuery.trim();
@@ -294,6 +541,10 @@ export class ClickhouseService {
     // Prevent unsafe multi-statement mutations via analytical query endpoint
     if (/^\s*(drop|alter|truncate|delete|insert|update|create)\b/i.test(formattedSql)) {
       throw new Error("Direct modifying queries are prohibited in analytical query mode. Use syncTable or execute.");
+    }
+
+    if (options?.deduplicateTables && options.deduplicateTables.length > 0) {
+      formattedSql = rewriteClickhouseQueryWithFinal(formattedSql, new Set(options.deduplicateTables));
     }
 
     if (!/\bFORMAT\s+[A-Za-z0-9_]+$/i.test(formattedSql)) {
@@ -309,7 +560,10 @@ export class ClickhouseService {
     // Put hard read budgets on every analytical request. LIMIT bounds result
     // rows, while these server-side settings also stop unbounded scans and
     // memory use when the source has no selective index.
-    url.searchParams.set("max_execution_time", String(boundedQuerySetting("DATASOURCE_CLICKHOUSE_QUERY_MAX_EXECUTION_SECONDS", 60, 300)));
+    const maxExecSec = options?.statementTimeoutSeconds
+      ? Math.max(1, Math.min(300, options.statementTimeoutSeconds))
+      : boundedQuerySetting("DATASOURCE_CLICKHOUSE_QUERY_MAX_EXECUTION_SECONDS", 60, 300);
+    url.searchParams.set("max_execution_time", String(maxExecSec));
     url.searchParams.set("max_memory_usage", String(boundedQuerySetting("DATASOURCE_CLICKHOUSE_QUERY_MAX_MEMORY_BYTES", 1_073_741_824, 8_589_934_592)));
     url.searchParams.set("max_rows_to_read", String(boundedQuerySetting("DATASOURCE_CLICKHOUSE_QUERY_MAX_ROWS", 10_000_000, 1_000_000_000)));
     url.searchParams.set("max_bytes_to_read", String(boundedQuerySetting("DATASOURCE_CLICKHOUSE_QUERY_MAX_BYTES", 1_073_741_824, 8_589_934_592)));
@@ -323,6 +577,11 @@ export class ClickhouseService {
       url.searchParams.set(`param_${name}`, String(parameter.value));
     }
 
+    const abortTimeout = Math.max(2000, (maxExecSec + 5) * 1000);
+    const fetchSignal = options?.signal
+      ? AbortSignal.any([AbortSignal.timeout(abortTimeout), options.signal])
+      : AbortSignal.timeout(abortTimeout);
+
     const res = await fetch(url.toString(), {
       method: "POST",
       headers: {
@@ -330,7 +589,7 @@ export class ClickhouseService {
         "Content-Type": "text/plain; charset=utf-8",
       },
       body: formattedSql,
-      signal: AbortSignal.timeout(60000),
+      signal: fetchSignal,
     });
 
     const executionTimeMs = Date.now() - startTime;
@@ -377,7 +636,7 @@ export class ClickhouseService {
           }
         }
       }
-      throw new Error(`ClickHouse query error (${res.status}): ${errText.trim()}`);
+      throw new Error(formatClickhouseQueryError(res.status, errText));
     }
 
     const json = await res.json();

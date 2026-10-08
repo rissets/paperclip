@@ -1578,10 +1578,14 @@ describe("shared ACPX engine runtime behavior", () => {
     const previousCodexHome = process.env.CODEX_HOME;
     const previousPaperclipHome = process.env.PAPERCLIP_HOME;
     const previousPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
+    const previousOpenaiApiKey = process.env.OPENAI_API_KEY;
+    const previousCodexApiKey = process.env.CODEX_API_KEY;
     try {
       process.env.CODEX_HOME = sourceCodexHome;
       process.env.PAPERCLIP_HOME = paperclipHome;
       process.env.PAPERCLIP_INSTANCE_ID = paperclipInstanceId;
+      delete process.env.OPENAI_API_KEY;
+      delete process.env.CODEX_API_KEY;
       await runExecutor({
         agent: "codex",
         stateDir: path.join(root, "state"),
@@ -1595,6 +1599,10 @@ describe("shared ACPX engine runtime behavior", () => {
       else process.env.PAPERCLIP_HOME = previousPaperclipHome;
       if (previousPaperclipInstanceId === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
       else process.env.PAPERCLIP_INSTANCE_ID = previousPaperclipInstanceId;
+      if (previousOpenaiApiKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previousOpenaiApiKey;
+      if (previousCodexApiKey === undefined) delete process.env.CODEX_API_KEY;
+      else process.env.CODEX_API_KEY = previousCodexApiKey;
     }
 
     const authStat = await fs.lstat(managedAuth);

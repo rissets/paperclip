@@ -31,8 +31,11 @@ const ORIGINAL_ENV = { ...process.env };
 
 describe("managed install commands", () => {
   let root: string;
+  let nodeVersionDescriptor: PropertyDescriptor | undefined;
 
   beforeEach(() => {
+    nodeVersionDescriptor = Object.getOwnPropertyDescriptor(process.versions, "node");
+    Object.defineProperty(process.versions, "node", { ...nodeVersionDescriptor, value: "24.11.0" });
     root = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-install-command-"));
     process.env = {
       ...ORIGINAL_ENV,
@@ -48,6 +51,9 @@ describe("managed install commands", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     process.env = { ...ORIGINAL_ENV };
+    if (nodeVersionDescriptor) {
+      Object.defineProperty(process.versions, "node", nodeVersionDescriptor);
+    }
     fs.rmSync(root, { recursive: true, force: true });
   });
 

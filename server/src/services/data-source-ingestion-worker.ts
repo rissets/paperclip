@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { DataSourcesService } from "./data-sources.js";
+import { EXTERNAL_SCHEMA_MAPPING_CHECKPOINT_TYPE } from "./external-database-mapping-checkpoints.js";
 import { DataSourceDatabaseConfigService } from "./data-source-database-config.js";
 import { DataSourceUploadSessionsService } from "./data-source-upload-sessions.js";
 import { DataSourceLeaseLostError } from "./data-source-job-lease.js";
@@ -17,11 +18,13 @@ type ClaimedDataSourceJob = {
 };
 
 type DurableCsvCheckpoint = {
-  version: 1;
+  version: 1 | 2;
   identityHash: string;
   tableId: string;
   byteOffset: number;
   committedRows: number;
+  sourceRowsCommitted?: number;
+  insertedRows?: number;
   nextBatchIndex: number;
   delimiter: string | null;
 };
@@ -42,6 +45,7 @@ export class DataSourceIngestionWorker {
   private readonly uploadSessions: DataSourceUploadSessionsService;
   private lastUploadSessionSweepAt = 0;
   private lastSnapshotOrphanSweepAt = 0;
+  private lastPendingEmbeddingSweepAt = 0;
   private running = false;
   private activeController: AbortController | undefined;
   private cancellationRequested = false;
@@ -92,7 +96,7 @@ export class DataSourceIngestionWorker {
         SET status = 'error', updated_at = now()
         FROM expired_final_attempts AS expired
         WHERE source.id = expired.data_source_id AND source.company_id = expired.company_id
-          AND expired.job_type = 'ingest_file'
+          AND expired.job_type IN ('ingest_file', 'external_db_onboarding')
         RETURNING source.id
       ), cancelled_sources AS (
         UPDATE data_sources AS source
@@ -104,7 +108,7 @@ export class DataSourceIngestionWorker {
             metadata = source.metadata - 'reprocessingPreviousStatus', updated_at = now()
         FROM expired_cancellations AS cancelled
         WHERE source.id = cancelled.data_source_id AND source.company_id = cancelled.company_id
-          AND cancelled.job_type = 'ingest_file'
+          AND cancelled.job_type IN ('ingest_file', 'external_db_onboarding')
         RETURNING source.id
       ), next_job AS (
         SELECT id
@@ -169,8 +173,18 @@ export class DataSourceIngestionWorker {
       } else if ((key === "targetGeneration" || key === "fromGeneration")
         && typeof value === "string" && /^[a-z0-9._:/@-]{1,256}$/i.test(value)) {
         safeDetails[key] = value;
+      } else if (key === "schemaFingerprint" && typeof value === "string" && /^[a-f0-9]{64}$/i.test(value)) {
+        safeDetails.schemaFingerprint = value;
       } else if (key === "modelBackend" && typeof value === "string" && /^[a-z0-9._/-]{1,80}$/i.test(value)) {
         safeDetails.modelBackend = value;
+      } else if (
+        (key === "schemaVersion" || key === "tablesCount" || key === "columnsCount"
+          || key === "profiledTablesCount" || key === "relationsCount" || key === "connectedComponentCount")
+        && typeof value === "number" && Number.isFinite(value)
+      ) {
+        safeDetails[key] = value;
+      } else if ((key === "currentTable" || key === "checkpointStage" || key === "statusSummary") && typeof value === "string") {
+        safeDetails[key] = value.slice(0, 128);
       }
     }
     const result = await this.db.execute(sql<{ id: string }>`
@@ -193,25 +207,41 @@ export class DataSourceIngestionWorker {
   private isDurableCsvCheckpoint(value: unknown): value is DurableCsvCheckpoint {
     if (!value || typeof value !== "object" || Array.isArray(value)) return false;
     const checkpoint = value as Partial<DurableCsvCheckpoint>;
-    return checkpoint.version === 1
+    return (checkpoint.version === 1 || checkpoint.version === 2)
       && typeof checkpoint.identityHash === "string" && /^[a-f0-9]{64}$/.test(checkpoint.identityHash)
       && typeof checkpoint.tableId === "string" && /^[0-9a-f-]{36}$/i.test(checkpoint.tableId)
       && Number.isSafeInteger(checkpoint.byteOffset) && checkpoint.byteOffset! >= 0
       && Number.isSafeInteger(checkpoint.committedRows) && checkpoint.committedRows! >= 0
+      && (checkpoint.version === 1 || (Number.isSafeInteger(checkpoint.sourceRowsCommitted)
+        && checkpoint.sourceRowsCommitted! >= 0 && Number.isSafeInteger(checkpoint.insertedRows)
+        && checkpoint.insertedRows! >= 0))
       && Number.isSafeInteger(checkpoint.nextBatchIndex) && checkpoint.nextBatchIndex! >= 0
       && (checkpoint.delimiter === null
         || (typeof checkpoint.delimiter === "string" && [",", ";", "\t", "|"].includes(checkpoint.delimiter)));
   }
 
   private async finish(job: ClaimedDataSourceJob): Promise<void> {
-    await this.db.execute(sql`
-      UPDATE data_source_jobs
-      SET status = 'succeeded', stage = 'completed',
-          progress = COALESCE(progress, '{}'::jsonb) || jsonb_build_object('completedAt', now(), 'stage', 'completed'),
-          completed_at = now(), lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-      WHERE id = ${job.id} AND status = 'running' AND lease_owner = ${this.owner}
-        AND attempt = ${job.attempt} AND lease_expires_at > clock_timestamp()
-    `);
+    await this.db.transaction(async (tx) => {
+      const completed = await tx.execute(sql<{ id: string }>`
+        UPDATE data_source_jobs
+        SET status = 'succeeded', stage = 'completed',
+            progress = COALESCE(progress, '{}'::jsonb) || jsonb_build_object('completedAt', now(), 'stage', 'completed'),
+            completed_at = now(), lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+        WHERE id = ${job.id} AND company_id = ${job.companyId} AND data_source_id = ${job.dataSourceId}
+          AND status = 'running' AND lease_owner = ${this.owner}
+          AND attempt = ${job.attempt} AND lease_expires_at > clock_timestamp()
+        RETURNING id
+      `);
+      // Mapping outputs are needed for worker retries, but become dead weight
+      // once the success receipt is committed. Delete them atomically with that
+      // receipt so a stale worker cannot purge another attempt's recovery data.
+      if (Array.from(completed).length === 1 && job.jobType === "external_db_onboarding") {
+        await tx.execute(sql`
+          DELETE FROM data_source_job_checkpoints
+          WHERE job_id = ${job.id} AND checkpoint_type = ${EXTERNAL_SCHEMA_MAPPING_CHECKPOINT_TYPE}
+        `);
+      }
+    });
   }
 
   private async finishCancelled(job: ClaimedDataSourceJob): Promise<void> {
@@ -245,7 +275,21 @@ export class DataSourceIngestionWorker {
         RETURNING data_source_id, company_id, job_type
       )
       UPDATE data_sources AS source
-      SET status = CASE WHEN owned.job_type = 'ingest_file' THEN ${retry ? "processing" : "error"} ELSE source.status END,
+      SET status = CASE WHEN owned.job_type IN ('ingest_file', 'external_db_onboarding') THEN ${retry ? "processing" : "error"} ELSE source.status END,
+          metadata = CASE
+            WHEN owned.job_type = 'embedding_reindex' AND NOT ${retry}
+              THEN COALESCE(source.metadata, '{}'::jsonb) || jsonb_build_object(
+                'embeddingStatus', CASE
+                  WHEN source.metadata->>'embeddingSpace' IN ('bge-m3', 'openrouter-text-embedding-3-small')
+                    AND source.metadata->>'embeddingGeneration' IS NOT NULL
+                    THEN COALESCE(source.metadata->>'embeddingStatus', 'ready')
+                  ELSE 'unavailable'
+                END,
+                'embeddingReindexStatus', 'failed',
+                'embeddingFailedAt', now()
+              )
+            ELSE source.metadata
+          END,
           updated_at = now()
       FROM owned_failure AS owned
       WHERE source.id = owned.data_source_id AND source.company_id = owned.company_id
@@ -269,9 +313,20 @@ export class DataSourceIngestionWorker {
         });
       }
       await new DataSourceDatabaseConfigService(this.db).migrateLegacyBatch();
+      if (this.jobType === "embedding_reindex" && Date.now() - this.lastPendingEmbeddingSweepAt > 60_000) {
+        this.lastPendingEmbeddingSweepAt = Date.now();
+        await this.service.reconcilePendingStructuredEmbeddingJobs(8).catch((error) => {
+          console.warn("[DataSourceEmbeddingWorker] Pending schema embedding reconciliation failed; retrying later:", safeErrorMessage(error));
+        });
+      }
       const job = await this.claim();
       if (!job) return;
-      if (job.jobType !== "ingest_file" && job.jobType !== "external_db_snapshot" && job.jobType !== "embedding_reindex") {
+      if (
+        job.jobType !== "ingest_file"
+        && job.jobType !== "external_db_snapshot"
+        && job.jobType !== "embedding_reindex"
+        && job.jobType !== "external_db_onboarding"
+      ) {
         await this.fail(job, new Error(`Unsupported datasource job type: ${job.jobType}`));
         return;
       }
@@ -317,6 +372,8 @@ export class DataSourceIngestionWorker {
           await this.service.reprocess(job.companyId, job.dataSourceId, lease);
         } else if (job.jobType === "external_db_snapshot") {
           await this.service.runExternalDatabaseSnapshot(job.companyId, job.dataSourceId, job.progress, lease, controller.signal);
+        } else if (job.jobType === "external_db_onboarding") {
+          await this.service.runExternalDatabaseOnboarding(job.companyId, job.dataSourceId, job.progress, lease, controller.signal);
         } else {
           await this.service.runEmbeddingReindex(job.companyId, job.dataSourceId, job.progress, lease);
         }

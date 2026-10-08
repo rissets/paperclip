@@ -34,7 +34,11 @@ function hasManagedArtifacts(paths: InstallStorePaths): boolean {
 }
 
 export function nodeRuntimeCheck(): CheckResult {
-  return isSupportedNodeVersion(process.versions.node)
+  const isSupported =
+    process.env.PAPERCLIP_SKIP_NODE_VERSION_CHECK === "1" ||
+    process.env.PAPERCLIP_SKIP_NODE_VERSION_CHECK === "true" ||
+    isSupportedNodeVersion(process.versions.node);
+  return isSupported
     ? { name: "Node.js runtime", status: "pass", message: `Node.js ${process.versions.node}` }
     : {
         name: "Node.js runtime",

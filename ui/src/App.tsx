@@ -105,6 +105,8 @@ import { NotFoundPage } from "./pages/NotFound";
 import { DataSources } from "./pages/DataSources";
 import { DataSourceDetail } from "./pages/DataSourceDetail";
 import { DataSourceCollectionDetail } from "./pages/DataSourceCollectionDetail";
+import { Meetings } from "./pages/Meetings";
+import { MeetingDetail } from "./pages/MeetingDetail";
 import { useCompany } from "./context/CompanyContext";
 import { useDialogActions, useDialogState } from "./context/DialogContext";
 import { loadLastInboxTab } from "./lib/inbox";
@@ -388,6 +390,8 @@ function boardRoutes(streamlinedUiEnabled: boolean) {
       <Route path="data-sources" element={<DataSources />} />
       <Route path="data-sources/collections/:id" element={<DataSourceCollectionDetail />} />
       <Route path="data-sources/:id" element={<DataSourceDetail />} />
+      <Route path="meetings" element={<Meetings />} />
+      <Route path="meetings/:id" element={<MeetingDetail />} />
       <Route path="approvals" element={<Navigate to="/approvals/pending" replace />} />
       <Route path="approvals/pending" element={<Approvals />} />
       <Route path="approvals/all" element={<Approvals />} />
@@ -805,6 +809,8 @@ export function App() {
           <Route path="artifacts" element={<UnprefixedBoardRedirect />} />
           <Route path="data-sources" element={<UnprefixedBoardRedirect />} />
           <Route path="data-sources/*" element={<UnprefixedBoardRedirect />} />
+          <Route path="meetings" element={<UnprefixedBoardRedirect />} />
+          <Route path="meetings/*" element={<UnprefixedBoardRedirect />} />
           <Route path="audit" element={<UnprefixedBoardRedirect />} />
           {streamlinedUiEnabled ? (
             <>

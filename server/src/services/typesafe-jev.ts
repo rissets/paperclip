@@ -2189,11 +2189,31 @@ export class TypeSafeJevService {
   }> {
     const qTokens = this.tokenize(query);
 
-    let bestMetric = metricNames[0] || "";
-    let maxMetricScore = -1;
+    const METRIC_SYNONYMS: Record<string, string[]> = {
+      penjualan: ["sales", "sales_amount", "revenue", "orders"],
+      pendapatan: ["revenue", "income", "sales"],
+      laba: ["profit", "margin", "gain"],
+      keuntungan: ["profit", "margin"],
+      kuantitas: ["quantity", "qty", "count", "volume"],
+      stok: ["stock", "inventory"],
+      biaya: ["cost", "expense"],
+      harga: ["price", "cost", "amount"],
+    };
+
+    let bestMetric = "";
+    let maxMetricScore = 0;
     for (const m of metricNames) {
       const mTokens = this.tokenize(m);
-      const score = this.calculateOverlap(qTokens, mTokens);
+      let score = this.calculateOverlap(qTokens, mTokens);
+      if (score === 0) {
+        for (const qt of qTokens) {
+          const syns = METRIC_SYNONYMS[qt] || [];
+          if (syns.some((s) => mTokens.includes(s) || m.toLowerCase().includes(s))) {
+            score = 1;
+            break;
+          }
+        }
+      }
       if (score > maxMetricScore) {
         maxMetricScore = score;
         bestMetric = m;

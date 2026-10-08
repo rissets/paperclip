@@ -89,6 +89,37 @@ describe("isSecretSensitiveHttpRequest", () => {
 });
 
 describe("shouldSilenceHttpSuccessLog", () => {
+  it("silences the expected missing issue plan document response", () => {
+    expect(
+      shouldSilenceHttpSuccessLog(
+        "GET",
+        "/issues/2a01822c-ac5b-40d9-b7c9-91a50202a349/documents/plan",
+        404,
+      ),
+    ).toBe(true);
+    expect(
+      shouldSilenceHttpSuccessLog(
+        "GET",
+        "/api/issues/2a01822c-ac5b-40d9-b7c9-91a50202a349/documents/plan?includeSystem=true",
+        404,
+      ),
+    ).toBe(true);
+    expect(
+      shouldSilenceHttpSuccessLog(
+        "GET",
+        "/issues/2a01822c-ac5b-40d9-b7c9-91a50202a349/documents/spec",
+        404,
+      ),
+    ).toBe(false);
+    expect(
+      shouldSilenceHttpSuccessLog(
+        "POST",
+        "/issues/2a01822c-ac5b-40d9-b7c9-91a50202a349/documents/plan",
+        404,
+      ),
+    ).toBe(false);
+  });
+
   it("silences cached 304 responses", () => {
     expect(
       shouldSilenceHttpSuccessLog("GET", "/api/issues/PAP-1383", 304),

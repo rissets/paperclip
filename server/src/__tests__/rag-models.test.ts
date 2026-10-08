@@ -52,6 +52,24 @@ describe("RAG model adapters", () => {
     });
   });
 
+  it("allows auto mode to fall back from a preferred BGE space to OpenRouter", async () => {
+    vi.stubEnv("RAG_EMBEDDING_PROVIDER", "auto");
+    vi.stubEnv("RAG_OPENROUTER_BASE_URL", "https://gateway.test/v1");
+    vi.stubEnv("OPENROUTER_API_KEY", "test-only-not-a-real-key");
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      model: "openai/text-embedding-3-small",
+      data: [{ index: 0, embedding: Array.from({ length: 1_536 }, (_, index) => index === 0 ? 1 : 0) }],
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await new RagModelService().embed(["kebijakan layanan"], "bge-m3");
+
+    expect(result.space).toBe("openrouter-text-embedding-3-small");
+    expect(result.generation).toBe("openrouter-text-embedding-3-small@openai/text-embedding-3-small");
+    expect(result.vectors?.[0]).toHaveLength(1_536);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it("records the model identity resolved by the embedding gateway", async () => {
     vi.stubEnv("RAG_EMBEDDING_PROVIDER", "openrouter");
     vi.stubEnv("RAG_OPENROUTER_EMBEDDING_MODEL", "openrouter/text-embedding-3-small");

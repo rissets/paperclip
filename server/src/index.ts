@@ -1280,6 +1280,9 @@ async function startServerWithDatabaseTeardown(
   const dataSourceEmbeddingReindexWorker = process.env.DATASOURCE_EMBEDDED_WORKER_ENABLED === "false"
     ? null
     : new DataSourceIngestionWorker(db as any, "embedding_reindex");
+  const dataSourceExternalDbWorker = process.env.DATASOURCE_EMBEDDED_WORKER_ENABLED === "false"
+    ? null
+    : new DataSourceIngestionWorker(db as any, "external_db_onboarding");
   const executionControlSweeps = [
     ["finalization", () => reconcileAbandonedExecutionControl(db)],
     ["replacement", () => heartbeat ? reconcileSafeNativeReplacements(db, new Date(), { verifyStoppedSession: run => verifyStoppedNativeSessionForReplacement(db, run) }) : undefined],
@@ -1289,6 +1292,7 @@ async function startServerWithDatabaseTeardown(
     ["local_ai_login_cleanup", () => localAiLoginService(db).reapExpired()],
     ["data_source_ingestion", () => dataSourceIngestionWorker?.tick()],
     ["data_source_embedding_reindex", () => dataSourceEmbeddingReindexWorker?.tick()],
+    ["data_source_external_db_onboarding", () => dataSourceExternalDbWorker?.tick()],
   ] as const;
   const sweepExecutionControl = () => {
     if (heartbeatSchedulerStopped) return;

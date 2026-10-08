@@ -22,6 +22,7 @@ import { KeyboardShortcutsCheatsheet } from "./KeyboardShortcutsCheatsheet";
 import { ToastViewport } from "./ToastViewport";
 import { AnnouncementWell } from "./AnnouncementWell";
 import { QuickChatFloatingWidget } from "./chat/QuickChatFloatingWidget";
+import { MeetingRecorderDrawer } from "./meetings/MeetingRecorderDrawer";
 import { PluginAppShellOverlays } from "./PluginAppShellOverlays";
 import { MobileBottomNav } from "./MobileBottomNav";
 import { WorktreeBanner } from "./WorktreeBanner";
@@ -789,6 +790,7 @@ export function Layout({ sidebarSections }: { sidebarSections?: ReactNode }) {
       <ToastViewport />
       <AnnouncementWell health={health} />
       <QuickChatFloatingWidget />
+      <MeetingRecorderDrawer />
       <PluginAppShellOverlays localTrusted={health?.deploymentMode === "local_trusted"} />
       </div>
     </ChatSetupSidebarProvider>

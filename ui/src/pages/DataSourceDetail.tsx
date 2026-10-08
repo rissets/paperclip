@@ -39,8 +39,20 @@ import {
 import { useCompany } from "@/context/CompanyContext";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { dataSourcesApi } from "@/api/data-sources";
+import { DataSourceMappingReviewPanel } from "@/components/data-sources/DataSourceMappingReviewPanel";
 import { cn } from "@/lib/utils";
 import type { SqlQueryResult, StructuredQueryResult } from "@paperclipai/shared";
+
+function relationBelongsToTable(relation: any, table: any) {
+  if (!relation || !table) return false;
+  const schema = table.semanticModel?.sourceSchema || "public";
+  return (
+    (relation.sourceTable?.toLowerCase() === table.tableName?.toLowerCase() &&
+      (!relation.sourceSchema || relation.sourceSchema === schema)) ||
+    (relation.targetTable?.toLowerCase() === table.tableName?.toLowerCase() &&
+      (!relation.targetSchema || relation.targetSchema === schema))
+  );
+}
 
 export function DataSourceDetail() {
   const { id } = useParams<{ id: string }>();
@@ -85,6 +97,15 @@ export function DataSourceDetail() {
   });
 
   const activeTable = ds?.tables?.[selectedTableIndex];
+  const activeQuality = (activeTable?.semanticModel as any)?.qualityCounters as {
+    totalRows?: number;
+    validRows?: number;
+    quarantinedRows?: number;
+    publishedRows?: number;
+    typeViolations?: number;
+    duplicateRows?: number;
+    quarantineSamples?: Array<{ rowNumber: number; columns: string[]; reason: string }>;
+  } | undefined;
   const activeColumns = (Array.isArray(activeTable?.schemaDefinition) ? activeTable.schemaDefinition : []) as Array<{
     name: string;
     dataType?: string;
@@ -800,6 +821,17 @@ export function DataSourceDetail() {
               Aggregator Tester
             </button>
             <button
+              onClick={() => setActiveTab("readiness")}
+              className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors whitespace-nowrap flex items-center gap-1.5 ${
+                activeTab === "readiness"
+                  ? "bg-muted text-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <CheckCircle2 className="h-4 w-4" />
+              Readiness & Evidence
+            </button>
+            <button
               onClick={() => setActiveTab("jev")}
               className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors whitespace-nowrap flex items-center gap-1.5 ${
                 activeTab === "jev"
@@ -811,6 +843,11 @@ export function DataSourceDetail() {
               JEV Semantic Profile & DecisionSpecs
             </button>
           </div>
+
+          {/* Tab: Readiness & Evidence */}
+          {activeTab === "readiness" && (
+            <ReadinessAndEvidenceView ds={ds} companyId={selectedCompanyId} />
+          )}
 
           {/* Tab: JEV Semantic Profile */}
           {activeTab === "jev" && (
@@ -830,6 +867,32 @@ export function DataSourceDetail() {
                   {activeTable.columnCount} columns, {activeTable.rowCount} rows)
                 </h3>
               </div>
+              {isStructured && typeof activeQuality?.totalRows === "number" && (
+                <div className="border-b border-border px-4 py-3">
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                    <span>Source records: <strong className="text-foreground">{activeQuality.totalRows.toLocaleString()}</strong></span>
+                    <span>Published: <strong className="text-foreground">{(activeQuality.publishedRows ?? activeQuality.validRows ?? activeTable.rowCount).toLocaleString()}</strong></span>
+                    <span>Quarantined: <strong className={activeQuality.quarantinedRows ? "text-amber-600" : "text-foreground"}>{(activeQuality.quarantinedRows ?? 0).toLocaleString()}</strong></span>
+                    <span>Duplicate rows: <strong className="text-foreground">{(activeQuality.duplicateRows ?? 0).toLocaleString()}</strong></span>
+                  </div>
+                  {Boolean(activeQuality.quarantineSamples?.length) && (
+                    <div className="mt-2 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-foreground">
+                      <p className="font-medium">Invalid records are excluded from queries. The original source file is retained for review.</p>
+                      <ul className="mt-1 space-y-0.5 text-muted-foreground">
+                        {activeQuality.quarantineSamples!.slice(0, 5).map((sample, index) => (
+                          <li key={`${sample.rowNumber}-${index}`}>
+                            Source record {sample.rowNumber.toLocaleString()} · {sample.reason.replaceAll("_", " ")}
+                            {sample.columns.length ? ` · ${sample.columns.join(", ")}` : ""}
+                          </li>
+                        ))}
+                      </ul>
+                      {(activeQuality.quarantinedRows ?? 0) > activeQuality.quarantineSamples!.length && (
+                        <p className="mt-1 text-muted-foreground">Showing the first {activeQuality.quarantineSamples!.length} row references; total quarantined: {activeQuality.quarantinedRows!.toLocaleString()}.</p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs">
                   <thead className="bg-muted text-muted-foreground font-medium border-b border-border">
@@ -953,9 +1016,7 @@ export function DataSourceDetail() {
                   activeTable.semanticModel?.relationships && activeTable.semanticModel.relationships.length > 0
                     ? activeTable.semanticModel.relationships
                     : (ds?.semanticProfile?.relationships || []).filter(
-                        (rel: any) =>
-                          rel.sourceTable?.toLowerCase() === activeTable.tableName?.toLowerCase() ||
-                          rel.targetTable?.toLowerCase() === activeTable.tableName?.toLowerCase()
+                        (rel: any) => relationBelongsToTable(rel, activeTable)
                       );
 
                 if (!tableRelationships || tableRelationships.length === 0) return null;
@@ -1512,6 +1573,21 @@ function JevSemanticProfileView({
   const tables: any[] = ds.tables || [];
   const hasTables = tables.length > 0;
   const isRag = ds.sourceType === "rag_document";
+  const hasExternalRelationalTables = ["postgres", "mysql", "mariadb"].includes(ds.sourceType);
+  const tableScopeKey = (table: any) => hasExternalRelationalTables
+    ? `${table.semanticModel?.sourceSchema || "public"}.${table.tableName}`
+    : table.tableName;
+  const tableProfileFor = (table: any) => {
+    const key = tableScopeKey(table);
+    return profile?.tableProfiles?.[key] || profile?.tableProfiles?.[table.tableName] || null;
+  };
+  const tableRoleFor = (table: any) => {
+    const key = tableScopeKey(table);
+    return tableProfileFor(table)?.tableRole
+      || profile?.tableRoles?.[key]
+      || profile?.tableRoles?.[table.tableName]
+      || table.semanticModel?.tableRole;
+  };
   const docProfiles: any[] = profile?.documentProfiles || [];
 
   const activeSelectedTable = hasTables && selectedTableIndex !== undefined && tables[selectedTableIndex]
@@ -1519,15 +1595,15 @@ function JevSemanticProfileView({
     : null;
 
   const [selectedScope, setSelectedScope] = useState<string>(() => {
-    return activeSelectedTable ? activeSelectedTable.tableName : "global";
+    return activeSelectedTable ? tableScopeKey(activeSelectedTable) : "global";
   });
 
   // Automatically update selectedScope when user picks a table from the top table selector
   useEffect(() => {
     if (activeSelectedTable) {
-      setSelectedScope(activeSelectedTable.tableName);
+      setSelectedScope(tableScopeKey(activeSelectedTable));
     }
-  }, [selectedTableIndex, activeSelectedTable?.tableName]);
+  }, [selectedTableIndex, activeSelectedTable?.tableName, activeSelectedTable?.semanticModel?.sourceSchema]);
 
   const [tableFilter, setTableFilter] = useState<string>("");
   const [copiedJoin, setCopiedJoin] = useState<string | null>(null);
@@ -1545,8 +1621,14 @@ function JevSemanticProfileView({
   }
 
   // Active table if a table scope is selected
+  const exactScopedTable = hasTables
+    ? tables.find((table) => tableScopeKey(table).toLowerCase() === selectedScope.toLowerCase())
+    : null;
+  const legacyNameMatches = hasTables
+    ? tables.filter((table) => table.tableName.toLowerCase() === selectedScope.toLowerCase())
+    : [];
   const activeTable = hasTables
-    ? tables.find((t) => t.tableName.toLowerCase() === selectedScope.toLowerCase()) || activeSelectedTable || null
+    ? exactScopedTable || (legacyNameMatches.length === 1 ? legacyNameMatches[0] : null) || activeSelectedTable || null
     : null;
 
   // Active document if RAG and document scope is selected
@@ -1554,7 +1636,7 @@ function JevSemanticProfileView({
     ? docProfiles.find((dp) => (dp.documentId || dp.fileName) === selectedScope) || docProfiles[0] || null
     : null;
 
-  const currentTableProfile = activeTable ? profile.tableProfiles?.[activeTable.tableName] : null;
+  const currentTableProfile = activeTable ? tableProfileFor(activeTable) : null;
   const currentModel = activeTable?.semanticModel || {};
 
   // Table role badge helper
@@ -1647,18 +1729,15 @@ function JevSemanticProfileView({
           {/* Per-Table Scope Buttons */}
           {hasTables &&
             filteredTables.map((tbl, idx) => {
-              const isSelected = selectedScope.toLowerCase() === tbl.tableName.toLowerCase();
-              const role =
-                profile.tableProfiles?.[tbl.tableName]?.tableRole ||
-                profile.tableRoles?.[tbl.tableName] ||
-                tbl.semanticModel?.tableRole;
+              const isSelected = selectedScope.toLowerCase() === tableScopeKey(tbl).toLowerCase();
+              const role = tableRoleFor(tbl);
               const roleBadge = getTableRoleBadge(role);
 
               return (
                 <button
                   key={tbl.id || tbl.tableName}
                   onClick={() => {
-                    setSelectedScope(tbl.tableName);
+                    setSelectedScope(tableScopeKey(tbl));
                     onSelectTableIndex?.(idx);
                   }}
                   className={`rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all whitespace-nowrap flex items-center gap-1.5 border ${
@@ -1720,11 +1799,12 @@ function JevSemanticProfileView({
                 <div className="flex items-center gap-2">
                   <Table2 className="h-5 w-5 text-primary" />
                   <h3 className="text-base font-bold text-foreground font-mono">
-                    {activeTable.tableName}
+                    {tableScopeKey(activeTable)}
                   </h3>
                   {(() => {
                     const role =
                       currentTableProfile?.tableRole ||
+                      profile.tableRoles?.[tableScopeKey(activeTable)] ||
                       profile.tableRoles?.[activeTable.tableName] ||
                       currentModel.tableRole;
                     const badge = getTableRoleBadge(role);
@@ -1737,6 +1817,20 @@ function JevSemanticProfileView({
                       </span>
                     );
                   })()}
+                  {currentModel.semanticMapping && (
+                    <span
+                      className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium border ${
+                        currentModel.semanticMapping.status === "complete"
+                          ? "bg-emerald-500/10 text-emerald-600 border-emerald-500/20"
+                          : currentModel.semanticMapping.status === "partial"
+                            ? "bg-amber-500/10 text-amber-600 border-amber-500/20"
+                            : "bg-muted text-muted-foreground border-border"
+                      }`}
+                      title={currentModel.semanticMapping.timeBudgetExceeded ? "Per-table semantic mapping budget was exhausted; deterministic catalog metadata was retained." : undefined}
+                    >
+                      Mapping {currentModel.semanticMapping.status} · {currentModel.semanticMapping.validatedBatches}/{currentModel.semanticMapping.expectedBatches} batches
+                    </span>
+                  )}
                 </div>
                 <p className="text-xs text-muted-foreground">
                   JEV Table Profile & Schema Semantics ({activeTable.columnCount ?? activeTable.columns?.length ?? 0} columns,{" "}
@@ -1796,12 +1890,18 @@ function JevSemanticProfileView({
             </div>
           </div>
 
+          {ds.companyId && ["csv", "excel", "postgres", "mysql", "mariadb", "clickhouse"].includes(ds.sourceType) && (
+            <DataSourceMappingReviewPanel
+              companyId={ds.companyId}
+              dataSource={ds}
+              table={activeTable}
+            />
+          )}
+
           {/* Multi-Table Connections for this table */}
           {(() => {
             const tableRels = (profile.relationships || []).filter(
-              (r: any) =>
-                r.sourceTable?.toLowerCase() === activeTable.tableName?.toLowerCase() ||
-                r.targetTable?.toLowerCase() === activeTable.tableName?.toLowerCase()
+              (r: any) => relationBelongsToTable(r, activeTable)
             );
 
             return (
@@ -1826,9 +1926,12 @@ function JevSemanticProfileView({
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                     {tableRels.map((rel: any, idx: number) => {
                       const isOutbound =
-                        rel.sourceTable.toLowerCase() === activeTable.tableName.toLowerCase();
+                        rel.sourceTable.toLowerCase() === activeTable.tableName.toLowerCase()
+                        && (!rel.sourceSchema || rel.sourceSchema === (activeTable.semanticModel?.sourceSchema || "public"));
                       const otherTable = isOutbound ? rel.targetTable : rel.sourceTable;
-                      const joinSql = `JOIN ${rel.targetTable} ON ${rel.sourceTable}.${rel.sourceColumn} = ${rel.targetTable}.${rel.targetColumn}`;
+                      const sourceName = rel.sourceSchema ? `${rel.sourceSchema}.${rel.sourceTable}` : rel.sourceTable;
+                      const targetName = rel.targetSchema ? `${rel.targetSchema}.${rel.targetTable}` : rel.targetTable;
+                      const joinSql = `JOIN ${targetName} ON ${sourceName}.${rel.sourceColumn} = ${targetName}.${rel.targetColumn}`;
 
                       return (
                         <div
@@ -2166,7 +2269,9 @@ function JevSemanticProfileView({
                                 onClick={() => {
                                   setSelectedScope(tName);
                                   const tIdx = tables.findIndex(
-                                    (t) => t.tableName.toLowerCase() === tName.toLowerCase()
+                                    (t) => tableScopeKey(t).toLowerCase() === tName.toLowerCase()
+                                      || (tables.filter((candidate) => candidate.tableName.toLowerCase() === tName.toLowerCase()).length === 1
+                                        && t.tableName.toLowerCase() === tName.toLowerCase())
                                   );
                                   if (tIdx >= 0) onSelectTableIndex?.(tIdx);
                                 }}
@@ -2412,6 +2517,360 @@ function JevSemanticProfileView({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function ReadinessAndEvidenceView({
+  ds,
+  companyId,
+}: {
+  ds: any;
+  companyId: string;
+}) {
+  const queryClient = useQueryClient();
+  const [executionFeedbackNotes, setExecutionFeedbackNotes] = useState<Record<string, string>>({});
+  const metadata = (ds?.metadata || {}) as Record<string, any>;
+  const ingestionQuality = metadata.ingestionQuality as {
+    totalRows?: number;
+    validRows?: number;
+    invalidRows?: number;
+    duplicateRows?: number;
+    typeViolations?: number;
+  } | undefined;
+  const metricGate = metadata.metricRegistryGate as {
+    passed?: boolean;
+    reasons?: string[];
+    publishedAt?: string;
+  } | undefined;
+
+  const tables: any[] = ds?.tables || [];
+  const indexedTableCount = tables.filter((t) => Array.isArray(t.indexDefinitions) && t.indexDefinitions.length > 0).length;
+  const hasApproximateCounts = tables.some((t) => t.isApproximateCount === true);
+
+  const { data: expData, isLoading: expLoading } = useQuery({
+    queryKey: ["query-experiences", companyId, ds.id],
+    queryFn: () => dataSourcesApi.getQueryExperiences(companyId, ds.id),
+    enabled: !!companyId && !!ds?.id,
+  });
+
+  const { data: executionData, isLoading: executionsLoading, error: executionsError } = useQuery({
+    queryKey: ["query-executions", companyId, ds.id],
+    queryFn: () => dataSourcesApi.getQueryExecutions(companyId, ds.id),
+    enabled: !!companyId && !!ds?.id,
+    refetchInterval: 15_000,
+  });
+
+  const promoteMutation = useMutation({
+    mutationFn: ({ experienceId, status }: { experienceId: string; status: "reference_verified" | "user_approved" }) =>
+      dataSourcesApi.promoteQueryExperience(companyId, ds.id, experienceId, {
+        status,
+        verificationEvidence: "Verified by Paperclip operator review",
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["query-experiences", companyId, ds.id] });
+    },
+  });
+
+  const feedbackMutation = useMutation({
+    mutationFn: ({ executionId, verdict, comment }: {
+      executionId: string;
+      verdict: "correct" | "needs_correction";
+      comment?: string;
+    }) => dataSourcesApi.submitQueryFeedback(companyId, ds.id, executionId, {
+      verdict,
+      ...(comment ? { comment, correctionNote: comment } : {}),
+    }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["query-executions", companyId, ds.id] });
+      queryClient.invalidateQueries({ queryKey: ["query-experiences", companyId, ds.id] });
+    },
+  });
+
+  const experiences = expData?.experiences || [];
+  const executions = executionData?.executions || [];
+
+  return (
+    <div className="space-y-6">
+      {/* Overview Grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* Card 1: Catalog & Schema Readiness */}
+        <div className="rounded-xl border border-border bg-card p-4 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Catalog Readiness</span>
+            <span
+              className={cn(
+                "rounded-full px-2 py-0.5 text-xs font-semibold uppercase",
+                ds.status === "ready" ? "bg-emerald-500/10 text-emerald-600" : "bg-amber-500/10 text-amber-500"
+              )}
+            >
+              {ds.status}
+            </span>
+          </div>
+          <div className="text-2xl font-bold text-foreground">
+            {tables.length} <span className="text-xs font-normal text-muted-foreground">tables</span>
+          </div>
+          <div className="text-xs text-muted-foreground space-y-1">
+            <p>{indexedTableCount} tables with verified indexes</p>
+            {hasApproximateCounts && (
+              <span className="inline-flex items-center gap-1 text-amber-500 font-medium">
+                <AlertCircle className="h-3 w-3" /> Approximate stats active
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Card 2: Full-Data Quality Counters */}
+        <div className="rounded-xl border border-border bg-card p-4 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Quality Counters</span>
+            <span className="text-xs font-mono text-muted-foreground">P3 Full-Scan</span>
+          </div>
+          <div className="text-2xl font-bold text-foreground">
+            {ingestionQuality?.totalRows != null ? ingestionQuality.totalRows.toLocaleString() : "—"}{" "}
+            <span className="text-xs font-normal text-muted-foreground">total rows</span>
+          </div>
+          <div className="text-xs text-muted-foreground grid grid-cols-2 gap-1 pt-1 border-t border-border">
+            <span>Valid: <strong className="text-foreground">{ingestionQuality?.validRows ?? "—"}</strong></span>
+            <span>Invalid: <strong className="text-foreground">{ingestionQuality?.invalidRows ?? 0}</strong></span>
+            <span>Dups: <strong className="text-foreground">{ingestionQuality?.duplicateRows ?? 0}</strong></span>
+            <span>Violations: <strong className="text-foreground">{ingestionQuality?.typeViolations ?? 0}</strong></span>
+          </div>
+        </div>
+
+        {/* Card 3: Semantic Gate & Publication */}
+        <div className="rounded-xl border border-border bg-card p-4 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Metric Registry Gate</span>
+            <span
+              className={cn(
+                "rounded-full px-2 py-0.5 text-xs font-semibold",
+                metricGate?.passed ? "bg-emerald-500/10 text-emerald-600" : "bg-muted text-muted-foreground"
+              )}
+            >
+              {metricGate?.passed ? "Passed" : "Standard"}
+            </span>
+          </div>
+          <div className="text-2xl font-bold text-foreground">
+            {metricGate?.passed ? "Verified" : "Catalogued"}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {metricGate?.publishedAt
+              ? `Published: ${new Date(metricGate.publishedAt).toLocaleDateString()}`
+              : "Direct schema mapping active"}
+          </p>
+        </div>
+
+        {/* Card 4: Vector & Routing Readiness */}
+        <div className="rounded-xl border border-border bg-card p-4 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Execution Routing</span>
+            <span className="rounded-full bg-primary/10 text-primary px-2 py-0.5 text-xs font-medium uppercase">
+              Hybrid
+            </span>
+          </div>
+          <div className="text-sm font-semibold text-foreground">
+            {metadata.embeddingSpace || "bge-m3"} (1024d)
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Point lookups: live driver. Aggregations: ClickHouse snapshot engine.
+          </p>
+        </div>
+      </div>
+
+      <section className="rounded-xl border border-border bg-card overflow-hidden shadow-sm">
+        <div className="p-4 border-b border-border">
+          <h3 className="text-sm font-semibold text-foreground">Query execution history & trace</h3>
+          <p className="text-xs text-muted-foreground mt-1">
+            Recent executions using this datasource. Results are omitted from this list; feedback is recorded against the execution trace.
+          </p>
+        </div>
+        {executionsError ? (
+          <p className="p-4 text-xs text-destructive" role="alert">
+            {(executionsError as Error).message || "Could not load query execution history."}
+          </p>
+        ) : executionsLoading ? (
+          <div className="p-8 text-center text-xs text-muted-foreground">
+            <Loader2 className="h-5 w-5 animate-spin mx-auto mb-2 text-primary" />
+            Loading execution history...
+          </div>
+        ) : executions.length === 0 ? (
+          <p className="p-6 text-center text-xs text-muted-foreground">No query executions recorded for this datasource yet.</p>
+        ) : (
+          <div className="divide-y divide-border">
+            {executions.map((execution) => (
+              <article key={execution.id} className="p-4 space-y-3">
+                <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+                  <div className="min-w-0 space-y-1">
+                    <p className="text-sm font-medium text-foreground break-words">{execution.query}</p>
+                    {execution.resultsSummary && (
+                      <p className="text-xs text-muted-foreground break-words">{execution.resultsSummary}</p>
+                    )}
+                    {execution.errorMessage && (
+                      <p className="text-xs text-destructive break-words">{execution.errorMessage}</p>
+                    )}
+                    <p className="text-xs text-muted-foreground font-mono break-all">
+                      Trace: {execution.traceId || execution.id}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 flex-wrap items-center gap-2 text-xs">
+                    <span className={cn(
+                      "rounded-full px-2 py-0.5 font-medium uppercase",
+                      execution.status === "completed" ? "bg-emerald-500/10 text-emerald-600"
+                        : execution.status === "failed" || execution.status === "cancelled" ? "bg-destructive/10 text-destructive"
+                          : "bg-amber-500/10 text-amber-500",
+                    )}>{execution.status}</span>
+                    <span className="text-muted-foreground">{execution.engine || "unknown engine"}</span>
+                    <span className="text-muted-foreground">
+                      {execution.stageTimings?.totalMs != null ? `${Math.round(execution.stageTimings.totalMs)} ms` : "duration unavailable"}
+                    </span>
+                    <span className="text-muted-foreground">{new Date(execution.createdAt).toLocaleString()}</span>
+                  </div>
+                </div>
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                  <label className="sr-only" htmlFor={`execution-feedback-${execution.id}`}>Correction note</label>
+                  <textarea
+                    id={`execution-feedback-${execution.id}`}
+                    value={executionFeedbackNotes[execution.id] || ""}
+                    onChange={(event) => setExecutionFeedbackNotes((current) => ({ ...current, [execution.id]: event.target.value }))}
+                    placeholder="Catatan koreksi (opsional untuk jawaban benar)"
+                    rows={2}
+                    className="min-h-9 flex-1 resize-y rounded-md border border-input bg-background px-3 py-2 text-xs text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  />
+                  <div className="flex shrink-0 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => feedbackMutation.mutate({ executionId: execution.id, verdict: "correct" })}
+                      disabled={feedbackMutation.isPending}
+                      className="rounded-md border border-border bg-muted px-3 py-2 text-xs font-medium text-foreground hover:bg-background disabled:opacity-50"
+                    >
+                      Benar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => feedbackMutation.mutate({
+                        executionId: execution.id,
+                        verdict: "needs_correction",
+                        comment: executionFeedbackNotes[execution.id]?.trim(),
+                      })}
+                      disabled={feedbackMutation.isPending || !executionFeedbackNotes[execution.id]?.trim()}
+                      className="rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
+                    >
+                      Kirim koreksi
+                    </button>
+                  </div>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+        {feedbackMutation.isError && (
+          <p className="border-t border-border p-3 text-xs text-destructive" role="alert">
+            {(feedbackMutation.error as Error).message || "Could not submit feedback."}
+          </p>
+        )}
+        {feedbackMutation.isSuccess && (
+          <p className="border-t border-border p-3 text-xs text-emerald-600" role="status">Feedback tersimpan untuk execution tersebut.</p>
+        )}
+      </section>
+
+      {/* Query Learning & Experience Evidence */}
+      <div className="rounded-xl border border-border bg-card overflow-hidden shadow-sm">
+        <div className="p-4 border-b border-border flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
+              <Sparkles className="h-4 w-4 text-primary" />
+              Query Experience Memory & Provenance (P6)
+            </h3>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Candidate executions are recorded upon success. Unreviewed candidates are never reused until verified.
+            </p>
+          </div>
+          <span className="text-xs text-muted-foreground font-mono">
+            {experiences.length} recorded experiences
+          </span>
+        </div>
+
+        {expLoading ? (
+          <div className="p-8 text-center text-xs text-muted-foreground">
+            <Loader2 className="h-5 w-5 animate-spin mx-auto mb-2 text-primary" />
+            Loading query experiences...
+          </div>
+        ) : experiences.length === 0 ? (
+          <div className="p-8 text-center text-xs text-muted-foreground">
+            No query experiences recorded yet for this data source. Query executions will record candidate templates here.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-muted text-muted-foreground font-medium border-b border-border">
+                <tr>
+                  <th className="p-3">Normalized Question</th>
+                  <th className="p-3">Route / Engine</th>
+                  <th className="p-3">Fingerprint</th>
+                  <th className="p-3">Status</th>
+                  <th className="p-3">Recorded</th>
+                  <th className="p-3 text-right">Review Action</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {experiences.map((exp: any) => (
+                  <tr key={exp.id} className="hover:bg-muted/50 transition-colors">
+                    <td className="p-3 font-medium text-foreground max-w-xs truncate" title={exp.normalizedQuery}>
+                      {exp.normalizedQuery}
+                    </td>
+                    <td className="p-3 text-muted-foreground font-mono">
+                      {exp.executionRoute || "orchestrated"}
+                    </td>
+                    <td className="p-3 text-muted-foreground font-mono text-xs">
+                      {exp.schemaFingerprint ? exp.schemaFingerprint.slice(0, 10) : "—"}
+                    </td>
+                    <td className="p-3">
+                      <span
+                        className={cn(
+                          "rounded-full px-2 py-0.5 text-xs font-medium uppercase",
+                          exp.status === "reference_verified"
+                            ? "bg-emerald-500/10 text-emerald-600"
+                            : exp.status === "user_approved"
+                            ? "bg-sky-500/10 text-sky-600"
+                            : exp.status === "rejected"
+                            ? "bg-destructive/10 text-destructive"
+                            : "bg-amber-500/10 text-amber-500"
+                        )}
+                      >
+                        {exp.status.replaceAll("_", " ")}
+                      </span>
+                    </td>
+                    <td className="p-3 text-muted-foreground whitespace-nowrap">
+                      {new Date(exp.createdAt).toLocaleDateString()}
+                    </td>
+                    <td className="p-3 text-right">
+                      {exp.status === "candidate" ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            promoteMutation.mutate({
+                              experienceId: exp.id,
+                              status: "user_approved",
+                            })
+                          }
+                          disabled={promoteMutation.isPending}
+                          className="inline-flex items-center gap-1 rounded border border-border bg-muted px-2 py-1 text-xs font-medium text-foreground hover:bg-background transition-colors disabled:opacity-50"
+                        >
+                          <Check className="h-3 w-3 text-emerald-600" />
+                          Approve
+                        </button>
+                      ) : (
+                        <span className="text-xs text-muted-foreground italic">Reviewed</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

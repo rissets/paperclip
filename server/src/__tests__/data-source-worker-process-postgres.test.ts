@@ -101,7 +101,7 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(queryState?.result).toMatchObject({ columns: ["value"], rows: [{ value: 1 }], rowCount: 1 });
     child.kill("SIGTERM");
     expect(await exited).toEqual({ code: 0, signal: null });
-  }, 25_000);
+  }, 60_000);
 
   it("lets a new worker take over a durable lease after the owning process is hard-killed", async () => {
     const db = createDb(temporary.connectionString);

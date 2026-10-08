@@ -2150,6 +2150,34 @@
       "when": 1791299584072,
       "tag": "0308_motionless_rocket_racer",
       "breakpoints": true
+    },
+    {
+      "idx": 309,
+      "version": "7",
+      "when": 1791337795503,
+      "tag": "0309_tricky_madripoor",
+      "breakpoints": true
+    },
+    {
+      "idx": 310,
+      "version": "7",
+      "when": 1791341691958,
+      "tag": "0310_old_maverick",
+      "breakpoints": true
+    },
+    {
+      "idx": 311,
+      "version": "7",
+      "when": 1791373910635,
+      "tag": "0311_majestic_nemesis",
+      "breakpoints": true
+    },
+    {
+      "idx": 312,
+      "version": "7",
+      "when": 1791388756949,
+      "tag": "0312_unique_captain_universe",
+      "breakpoints": true
     }
   ]
 }

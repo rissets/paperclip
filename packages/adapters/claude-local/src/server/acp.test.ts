@@ -467,6 +467,7 @@ describe("claude_local ACP lane", () => {
   });
 
   it.each([undefined, "/sandbox/configured-workspace"])("checks sandbox directories on the sandbox (configured cwd=%s)", async (configuredCwd) => {
+    setNodeVersion("v24.11.0");
     const remoteCwd = "/sandbox/workspace";
     const mkdir = vi.spyOn(fs, "mkdir").mockRejectedValue(new Error("Host filesystem must not be used"));
     const execute = vi.fn(async () => ({

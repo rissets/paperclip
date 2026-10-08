@@ -132,8 +132,8 @@ function extractCustomProviderModels(rawProviders: string | undefined): AdapterM
   }
 }
 
-async function loadHostProviderModels(): Promise<AdapterModel[]> {
-  const hostDir = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
+async function loadHostProviderModels(env: Record<string, string> = process.env as Record<string, string>): Promise<AdapterModel[]> {
+  const hostDir = env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
   const modelsPath = path.join(hostDir, "models.json");
   const models: AdapterModel[] = [];
 
@@ -167,6 +167,16 @@ async function loadHostProviderModels(): Promise<AdapterModel[]> {
   return models;
 }
 
+async function loadConfiguredProviderModels(
+  command: string,
+  runtimeEnv: Record<string, string>,
+): Promise<AdapterModel[]> {
+  const customModels = extractCustomProviderModels(runtimeEnv.PAPERCLIP_PI_PROVIDERS);
+  const isExplicitMissingCommand = command.includes("__paperclip_missing_pi_command__");
+  const hostModels = isExplicitMissingCommand ? [] : await loadHostProviderModels(runtimeEnv);
+  return dedupeModels([...customModels, ...hostModels]);
+}
+
 export async function discoverPiModels(input: {
   command?: unknown;
   cwd?: unknown;
@@ -176,12 +186,8 @@ export async function discoverPiModels(input: {
   const cwd = asString(input.cwd, process.cwd());
   const env = normalizeEnv(input.env);
   const runtimeEnv = normalizeEnv({ ...process.env, ...env });
-  const customModels = extractCustomProviderModels(
-    runtimeEnv.PAPERCLIP_PI_PROVIDERS ?? process.env.PAPERCLIP_PI_PROVIDERS,
-  );
-  const isExplicitMissingCommand = command.includes("__paperclip_missing_pi_command__");
-  const hostModels = isExplicitMissingCommand ? [] : await loadHostProviderModels();
-  const fallbackModels = dedupeModels([...customModels, ...hostModels]);
+  const fallbackModels = await loadConfiguredProviderModels(command, runtimeEnv);
+  const defaultModelEntry: AdapterModel = { id: DEFAULT_PI_LOCAL_MODEL, label: DEFAULT_PI_LOCAL_MODEL };
 
   try {
     const result = await runChildProcess(
@@ -213,7 +219,7 @@ export async function discoverPiModels(input: {
     const stderrModels = parseModelsOutput(result.stderr || "");
     const parsedCli = [...stdoutModels, ...stderrModels];
 
-    return sortModels(dedupeModels([...fallbackModels, ...parsedCli]));
+    return sortModels(dedupeModels([defaultModelEntry, ...fallbackModels, ...parsedCli]));
   } catch (err) {
     if (fallbackModels.length > 0) return sortModels(fallbackModels);
     throw err;
@@ -286,10 +292,23 @@ export async function ensurePiModelConfiguredAndAvailable(input: {
 }): Promise<AdapterModel[]> {
   const rawModel = asString(input.model, DEFAULT_PI_LOCAL_MODEL).trim() || DEFAULT_PI_LOCAL_MODEL;
 
+  // Model validation runs before every local Pi execution. Avoid calling
+  // `pi --list-models` (which can trigger provider/network discovery and wait
+  // up to 20 seconds) when the configured provider catalog already confirms
+  // the requested model. Keep dynamic discovery for models absent from the
+  // static provider metadata so newly available models still work.
+  const command = resolvePiCommand(input.command);
+  const runtimeEnv = normalizeEnv({ ...process.env, ...normalizeEnv(input.env) });
+  const configuredModels = await loadConfiguredProviderModels(command, runtimeEnv);
+  const configuredModel = normalizePiModelId(rawModel, configuredModels);
+  if (configuredModels.some((entry) => entry.id === configuredModel)) {
+    return sortModels(configuredModels);
+  }
+
   const models = await discoverPiModelsCached({
-    command: input.command,
+    command,
     cwd: input.cwd,
-    env: input.env,
+    env: runtimeEnv,
   });
 
   if (models.length === 0) {

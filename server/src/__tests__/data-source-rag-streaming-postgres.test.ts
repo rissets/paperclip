@@ -23,6 +23,7 @@ vi.mock("../services/ai-reasoning.js", () => ({
         documentProfiles: [{ name: "service-policy", description: "Service policies" }],
       },
       reasoningSteps: [],
+      validationStatus: "validated",
     })),
   },
 }));

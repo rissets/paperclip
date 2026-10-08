@@ -165,6 +165,7 @@ export function Issues() {
       participantAgentId,
       workspaceId: workspaceIdFilter,
       includeRoutineExecutions: true,
+      includeConversations: true,
       limit: issuePageSize,
       offset: pageParam,
       sortField: "updated",

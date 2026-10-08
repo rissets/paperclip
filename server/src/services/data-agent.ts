@@ -6,6 +6,15 @@ import { TypeSafeJevService } from "./typesafe-jev.js";
 import { aiReasoningService } from "./ai-reasoning.js";
 import type { SpecialistExecution } from "@paperclipai/shared";
 import { makeDataSourceCacheKey } from "./data-source-cache.js";
+import { DataSourceQueryTracer } from "./data-source-query-trace.js";
+import { DataSourcePlanValidator } from "./data-source-plan-validator.js";
+import {
+  resolveDimensionBinding,
+  resolveRequestedDimension,
+  resolveSemanticDimensionBindings,
+  resolveSemanticMetricBindings,
+  resolveTemporalRangeFilter,
+} from "./data-source-query-semantics.js";
 
 export class DataAgentService {
   private dataSourcesService: DataSourcesService;
@@ -26,9 +35,28 @@ export class DataAgentService {
       collectionId?: string;
       agentId?: string;
       dataSourceIds?: string[];
+      tableIds?: string[];
       authzFingerprint?: string;
+      traceId?: string;
+      runId?: string;
+      sessionId?: string;
+      signal?: AbortSignal;
+      preferredMode?: "live" | "snapshot";
     },
   ): Promise<SpecialistExecution> {
+    if (options?.signal?.aborted) {
+      throw new Error("Query execution was cancelled or exceeded deadline budget");
+    }
+    const tracer = new DataSourceQueryTracer({
+      companyId,
+      query,
+      traceId: options?.traceId,
+      agentId: options?.agentId,
+      runId: options?.runId,
+      sessionId: options?.sessionId,
+    });
+    const startTime = Date.now();
+
     let allSources = await this.db
       .select()
       .from(dataSources)
@@ -52,6 +80,12 @@ export class DataAgentService {
       allSources = allSources.filter((source) => allowed.has(source.id));
       tables = tables.filter((table) => allowed.has(table.dataSourceId));
     }
+    if (options?.tableIds) {
+      const selectedTableIds = new Set(options.tableIds);
+      tables = tables.filter((table) => selectedTableIds.has(table.id));
+      const selectedSourceIds = new Set(tables.map((table) => table.dataSourceId));
+      allSources = allSources.filter((source) => selectedSourceIds.has(source.id));
+    }
     const authzFingerprint = options?.authzFingerprint || makeDataSourceCacheKey([
       "data-agent-acl",
       options?.agentId || "internal-company-scope",
@@ -68,10 +102,13 @@ export class DataAgentService {
     }
 
     if (allSources.length === 0 && tables.length === 0) {
+      const trace = tracer.finish({ outcome: "abstained" });
       return {
         agent: "data_agent",
         task: "Query internal data sources",
         resultsSummary: "No internal data sources or tables currently available in this company.",
+        traceId: trace.traceId,
+        stageTimings: trace.timings,
       };
     }
 
@@ -119,18 +156,23 @@ export class DataAgentService {
     }
 
     // 2. Dynamic Entity Profiling Across All Connected External Databases & Tables
-    if (isProfiling) {
+    // Snapshot routing has already selected a complete, validated ClickHouse
+    // copy for this request. Keep the selective live lookup path for fresh
+    // entity lookups, but do not let this heuristic bypass the chosen engine.
+    if (isProfiling && options?.preferredMode !== "snapshot") {
       const dbSources = allSources.filter(
         (s) => s.sourceType === "mariadb" || s.sourceType === "mysql" || s.sourceType === "postgres",
       );
 
-      // 1. Clean generic conversational lead-in phrases (command/intent verbs)
+      // 1. Clean generic conversational lead-in phrases (command/intent verbs and generic entity nouns)
       const cleanQuery = query
         .replace(/^(profiling|profil|tolong\s+profiling|cari\s+profil|carikan|cari|info|data|tampilkan|detail|siapa|cek|search|lookup|find|show)\s+/i, "")
+        .replace(/^(perusahaan|organisasi|entitas|koperasi|badan\s+hukum|yayasan|pt|cv)\s+/i, "")
         .replace(/[?.,!]+$/, "")
         .trim();
 
       if (cleanQuery.length >= 2) {
+        const allCheckedTables: string[] = [];
         for (const dbSource of dbSources) {
           const dsTables = tables.filter((t) => t.dataSourceId === dbSource.id);
           const quote = dbSource.sourceType === "postgres" ? `"` : "`";
@@ -167,6 +209,9 @@ export class DataAgentService {
 
           // Focus search on matching tables, or at most the top 2 sorted tables
           const targetTables = relevantTables.length > 0 ? relevantTables : sortedTables.slice(0, 2);
+          for (const t of targetTables) {
+            allCheckedTables.push(t.tableName);
+          }
 
           const isNumericTerm = /^\d+$/.test(cleanQuery);
 
@@ -199,6 +244,18 @@ export class DataAgentService {
             ).filter((e: string) => e && e.length > 1);
 
             const candidateTerms: string[] = [cleanQuery];
+            const strippedLeadIn = cleanQuery.replace(/^(perusahaan|organisasi|entitas|koperasi|badan\s+hukum|yayasan|pt|cv)\s+/i, "").trim();
+            if (strippedLeadIn && !candidateTerms.includes(strippedLeadIn)) {
+              candidateTerms.push(strippedLeadIn);
+            }
+            const coreName = (strippedLeadIn || cleanQuery).trim();
+            if (coreName.length >= 2) {
+              const upper = coreName.toUpperCase();
+              if (!candidateTerms.includes(upper)) candidateTerms.push(upper);
+              if (!candidateTerms.includes(`PT ${upper}`)) candidateTerms.push(`PT ${upper}`);
+              if (!candidateTerms.includes(`PT. ${upper}`)) candidateTerms.push(`PT. ${upper}`);
+              if (!candidateTerms.includes(`KOPERASI ${upper}`)) candidateTerms.push(`KOPERASI ${upper}`);
+            }
 
             // If the clean query starts with an entity word known to this table, also generate stripped candidate
             for (const ent of tableEntities) {
@@ -218,15 +275,17 @@ export class DataAgentService {
               for (const colName of searchableColNames) {
                 try {
                   const escapedExact = sTerm.replace(/'/g, "''");
+                  const schemaName = (semModel as any)?.schemaName;
+                  const schemaPrefix = schemaName ? `${quote}${schemaName}${quote}.` : "";
                   // 1. Exact match
-                  let sql = `SELECT * FROM ${quote}${tbl.tableName}${quote} WHERE ${quote}${colName}${quote} = '${escapedExact}' LIMIT 5`;
-                  let res = await this.dataSourcesService.querySql(companyId, dbSource.id, sql, 5);
+                  let sql = `SELECT * FROM ${schemaPrefix}${quote}${tbl.tableName}${quote} WHERE ${quote}${colName}${quote} = '${escapedExact}' LIMIT 5`;
+                  let res = await this.dataSourcesService.querySql(companyId, dbSource.id, sql, 5, options?.signal, { statementTimeoutMs: 10_000 });
 
                   // 2. Prefix match fallback if exact match returns 0 rows
                   if (res.rows.length === 0) {
                     const prefixTerm = sTerm.split(" ").slice(0, 2).join(" ");
-                    sql = `SELECT * FROM ${quote}${tbl.tableName}${quote} WHERE ${quote}${colName}${quote} LIKE '${prefixTerm.replace(/'/g, "''")}%' LIMIT 5`;
-                    res = await this.dataSourcesService.querySql(companyId, dbSource.id, sql, 5);
+                    sql = `SELECT * FROM ${schemaPrefix}${quote}${tbl.tableName}${quote} WHERE ${quote}${colName}${quote} LIKE '${prefixTerm.replace(/'/g, "''")}%' LIMIT 5`;
+                    res = await this.dataSourcesService.querySql(companyId, dbSource.id, sql, 5, options?.signal, { statementTimeoutMs: 10_000 });
                   }
 
                   if (res.rows.length > 0) {
@@ -239,12 +298,18 @@ export class DataAgentService {
                       semModel.jsonStructures,
                       semModel.entities
                     );
+                    const trace = tracer.finish({
+                      engine: dbSource.sourceType === "postgres" ? "postgres" : "mysql",
+                      outcome: "success",
+                    });
                     return {
                       agent: "data_agent",
                       task: `Profil entitas internal: ${matchedRow[colName] || sTerm}`,
                       query: sql,
                       resultsSummary: summary,
                       dataPreview: res.rows,
+                      traceId: trace.traceId,
+                      stageTimings: trace.timings,
                     };
                   }
                 } catch (err: any) {
@@ -255,6 +320,22 @@ export class DataAgentService {
             }
           }
         }
+
+        if (allCheckedTables.length > 0) {
+          const uniqueChecked = Array.from(new Set(allCheckedTables));
+          const trace = tracer.finish({
+            engine: dbSources[0]?.sourceType === "postgres" ? "postgres" : "mysql",
+            outcome: "success",
+          });
+          return {
+            agent: "data_agent",
+            task: `Pencarian entitas: ${cleanQuery}`,
+            resultsSummary: `### 🔍 Hasil Pencarian Entitas: "${cleanQuery}"\n\nPencarian telah dilakukan secara otomatis pada tabel kandidat terkait:\n${uniqueChecked.map((t) => `- **\`${t}\`**: Tidak ditemukan catatan yang cocok dengan nama atau awalan tersebut.`).join("\n")}\n\n*Catatan: Tidak ada data profil yang terdaftar dengan nama tersebut dalam database yang terhubung (${dbSources.map(s => s.name).join(", ")}).*`,
+            dataPreview: [],
+            traceId: trace.traceId,
+            stageTimings: trace.timings,
+          };
+        }
       }
     }
 
@@ -263,7 +344,10 @@ export class DataAgentService {
       (s) => s.sourceType === "mariadb" || s.sourceType === "mysql" || s.sourceType === "postgres" || s.sourceType === "clickhouse",
     );
 
-    if (dbSources.length > 0) {
+    // The orchestrator may select an already-published ClickHouse snapshot
+    // for this request. Do not let the legacy dynamic-SQL lane bypass that
+    // route and reopen a potentially slow external connection.
+    if (dbSources.length > 0 && options?.preferredMode !== "snapshot") {
       // Find candidate DB source matching user query or first available DB source
       let targetDbSource = dbSources[0];
       for (const dbs of dbSources) {
@@ -300,10 +384,35 @@ export class DataAgentService {
               dbType: targetDbSource.sourceType,
               tables: tablesInput,
               previousError,
+              signal: options?.signal,
             });
 
             if (sqlDecision?.sql) {
-              const res = await this.dataSourcesService.querySql(companyId, targetDbSource.id, sqlDecision.sql, 25);
+              // P1-04: Validate LLM-generated dynamic SQL against schema and authorized sources
+              const sqlTableMatches = Array.from(sqlDecision.sql.matchAll(/\b(?:from|join)\s+([a-zA-Z0-9_."]+)/gi))
+                .map((m) => m[1].replace(/["`]/g, "").split(".").pop() || "")
+                .filter(Boolean);
+
+              const validator = new DataSourcePlanValidator();
+              const planValidation = validator.validatePlan({
+                companyId,
+                allowedDataSourceIds: [targetDbSource.id],
+                tables: dbTables.map((t) => ({
+                  id: t.id,
+                  tableName: t.tableName,
+                  dataSourceId: t.dataSourceId,
+                  schemaDefinition: (t.schemaDefinition as any[]) || [],
+                  rowCount: t.rowCount || 0,
+                })),
+                referencedTables: sqlTableMatches.length > 0 ? sqlTableMatches : dbTables.map((t) => t.tableName),
+                referencedColumns: [],
+              });
+
+              if (!planValidation.valid) {
+                throw new Error(`Plan validation failed for generated SQL: ${planValidation.errors.join("; ")}`);
+              }
+
+              const res = await this.dataSourcesService.querySql(companyId, targetDbSource.id, sqlDecision.sql, 25, options?.signal, { statementTimeoutMs: 20_000 });
               if (res && res.rows && res.rows.length > 0) {
                 let summary = `### Hasil Query Analitik Database: ${targetDbSource.name}\n\n`;
                 summary += `> **Strategi Query:** ${sqlDecision.explanation}\n`;
@@ -325,12 +434,18 @@ export class DataAgentService {
                   summary += `\n*(Menampilkan 15 teratas dari ${res.rowCount} total baris &bull; Waktu eksekusi: ${res.executionTimeMs || 10}ms)*\n`;
                 }
 
+                const trace = tracer.finish({
+                  engine: targetDbSource.sourceType === "postgres" ? "postgres" : "mysql",
+                  outcome: "success",
+                });
                 return {
                   agent: "data_agent",
                   task: `Eksekusi SQL analitik pada ${targetDbSource.name}`,
                   query: sqlDecision.sql,
                   resultsSummary: summary,
                   dataPreview: res.rows,
+                  traceId: trace.traceId,
+                  stageTimings: trace.timings,
                 };
               }
             }
@@ -344,16 +459,19 @@ export class DataAgentService {
 
     // 3. Handle Tabular Analytics (CSV / Excel / Structured metrics)
     if (tables.length === 0) {
+      const trace = tracer.finish({ outcome: "abstained" });
       return {
         agent: "data_agent",
         task: "Query structured database",
         resultsSummary: "Data tidak ditemukan dalam tabel internal yang aktif.",
+        traceId: trace.traceId,
+        stageTimings: trace.timings,
       };
     }
 
     // 3. Multi-table evaluation: score ALL tables to pick the best candidate based on tokens, entities, metrics, dimensions, and sample values
-    let bestTable = tables[0];
-    let bestScore = -1;
+    let bestTable: (typeof tables)[0] | null = null;
+    let bestScore = 0;
 
     for (const tbl of tables) {
       let score = 0;
@@ -409,28 +527,119 @@ export class DataAgentService {
       }
     }
 
+    if (!bestTable || bestScore <= 0) {
+      const trace = tracer.finish({ outcome: "abstained" });
+      return {
+        agent: "data_agent",
+        task: "Analisis Data Internal",
+        resultsSummary: "Pertanyaan tidak cocok dengan topik, tabel, atau metrik yang tersedia dalam data source saat ini.",
+        traceId: trace.traceId,
+        stageTimings: trace.timings,
+      };
+    }
+
     let matchedMetric: string | undefined;
     let matchedDimension: string | undefined;
+    let unverifiedGroupBy: string | undefined;
     let matchedAggregation: "sum" | "avg" | "count" | "min" | "max" = "sum";
 
     // Use Jev for structured metric decision on the best candidate table
     const semModel: any = bestTable.semanticModel || {};
-    const metricNames = (semModel.metrics || []).map((m: any) => m.name);
-    const dimNames = (semModel.dimensions || []).map((d: any) => d.name);
+    const columnDefinitions = (bestTable.schemaDefinition as any[]) || [];
+    const metricBindings = resolveSemanticMetricBindings(
+      semModel.metrics || [],
+      columnDefinitions,
+      semModel.synonyms || {},
+    );
+    const knownMetricColumns = new Set(metricBindings.map((binding) => binding.column.toLowerCase()));
+    for (const column of columnDefinitions) {
+      if (column.role === "metric" && typeof column.name === "string" && !knownMetricColumns.has(column.name.toLowerCase())) {
+        metricBindings.push({ name: column.name, column: column.name, synonyms: [] });
+        knownMetricColumns.add(column.name.toLowerCase());
+      }
+    }
+    const metricNames = metricBindings.map((binding) => binding.name);
+    const dimensionBindings = resolveSemanticDimensionBindings(
+      semModel.dimensions || [],
+      columnDefinitions,
+      semModel.synonyms || {},
+    );
+    const dimNames = dimensionBindings.map((dimension) => dimension.name);
+    const requestedDimension = resolveRequestedDimension(query, dimensionBindings);
+    if (requestedDimension.status === "ambiguous" || requestedDimension.status === "unmatched") {
+      const trace = tracer.finish({ outcome: "abstained" });
+      const detail = requestedDimension.status === "ambiguous"
+        ? `Dimensi pengelompokan ambigu (${requestedDimension.names.join(", ")}).`
+        : "Dimensi pengelompokan yang diminta tidak memiliki binding kolom terverifikasi.";
+      return {
+        agent: "data_agent",
+        task: `Analisis Data (${bestTable.tableName})`,
+        resultsSummary: `${detail} Query tidak dijalankan agar hasil agregasi tidak salah dikelompokkan.`,
+        traceId: trace.traceId,
+        stageTimings: trace.timings,
+      };
+    }
+    if (requestedDimension.status === "resolved") matchedDimension = requestedDimension.column;
 
-    if (metricNames.length > 0) {
+    const normalizedQuery = queryLower.replace(/[^a-z0-9]+/g, "");
+    const explicitMetricBindings = metricBindings.filter((binding) => {
+      const values = [binding.column, binding.name, ...binding.synonyms]
+        .map((value) => String(value).trim())
+        .filter((value) => value.length >= 3);
+      return values.some((value) => queryLower.includes(value.toLowerCase())
+        || normalizedQuery.includes(value.toLowerCase().replace(/[^a-z0-9]+/g, "")));
+    });
+    const aggregationFromQuestion = /\b(rata-rata|average|mean|avg)\b/i.test(query)
+      ? "avg"
+      : /\b(tertinggi|highest|max(?:imum)?)\b/i.test(query)
+        ? "max"
+        : /\b(terendah|lowest|min(?:imum)?)\b/i.test(query)
+          ? "min"
+          : /\b(berapa banyak|jumlah baris|total baris|count|hit(?:ung)?)\b/i.test(query)
+            ? "count"
+            : /\b(total|jumlah|sum|biaya|cost|omzet|revenue|sales)\b/i.test(query)
+              ? "sum"
+              : undefined;
+
+    // Exact physical-column and unambiguous semantic-label matches are
+    // deterministic; avoid an extra model call for those common queries.
+    if (explicitMetricBindings.length === 1) {
+      matchedMetric = explicitMetricBindings[0].column;
+      if (aggregationFromQuestion) matchedAggregation = aggregationFromQuestion;
+    } else if (metricNames.length > 0) {
       try {
         const jevMetricDecision = await this.jevService.decideStructuredMetric(
           query,
           metricNames,
           dimNames,
         );
-        matchedMetric = jevMetricDecision.metric;
-        matchedAggregation = jevMetricDecision.aggregation;
-        matchedDimension = jevMetricDecision.groupBy;
+        const requestedMetric = jevMetricDecision.metric || undefined;
+        const matchedBinding = metricBindings.find((binding) => binding.name.toLowerCase() === String(requestedMetric || "").toLowerCase()
+          || binding.column.toLowerCase() === String(requestedMetric || "").toLowerCase());
+        matchedMetric = matchedBinding?.column;
+        if (aggregationFromQuestion) matchedAggregation = aggregationFromQuestion;
+        else if (["sum", "avg", "count", "min", "max"].includes(jevMetricDecision.aggregation)) {
+          matchedAggregation = jevMetricDecision.aggregation;
+        }
+        if (!matchedDimension && jevMetricDecision.groupBy) {
+          const dimensionBinding = resolveDimensionBinding(jevMetricDecision.groupBy, dimensionBindings);
+          matchedDimension = dimensionBinding?.column;
+          if (!dimensionBinding) unverifiedGroupBy = jevMetricDecision.groupBy;
+        }
       } catch {
         // fallback to keyword matching
       }
+    }
+
+    if (unverifiedGroupBy) {
+      const trace = tracer.finish({ outcome: "abstained" });
+      return {
+        agent: "data_agent",
+        task: `Analisis Data (${bestTable.tableName})`,
+        resultsSummary: `Jev mengusulkan pengelompokan '${unverifiedGroupBy}' yang tidak terikat ke kolom terverifikasi. Query tidak dijalankan.`,
+        traceId: trace.traceId,
+        stageTimings: trace.timings,
+      };
     }
 
     // Heuristic detection if JEV did not resolve a metric
@@ -445,20 +654,12 @@ export class DataAgentService {
         matchedAggregation = "count";
       }
 
-      for (const m of semModel.metrics || []) {
-        const mName = m.name.toLowerCase();
-        if (queryLower.includes(mName)) {
-          matchedMetric = m.name;
+      for (const binding of metricBindings) {
+        const identities = [binding.name, binding.column, ...binding.synonyms];
+        if (identities.some((identity) => queryLower.includes(identity.toLowerCase()))) {
+          matchedMetric = binding.column;
           break;
         }
-        const syns = semModel.synonyms?.[m.name] || [];
-        for (const s of syns) {
-          if (queryLower.includes(String(s).toLowerCase())) {
-            matchedMetric = m.name;
-            break;
-          }
-        }
-        if (matchedMetric) break;
       }
 
       for (const d of semModel.dimensions || []) {
@@ -469,16 +670,25 @@ export class DataAgentService {
         }
       }
 
-      if (!matchedMetric && semModel.metrics?.length > 0) {
-        matchedMetric = semModel.metrics[0].name;
-      }
-      if (!matchedDimension && semModel.dimensions?.length > 0) {
-        matchedDimension = semModel.dimensions[0].name;
+      if (!matchedMetric && (matchedAggregation === "count" || /berapa banyak|jumlah baris|total baris|count/i.test(queryLower))) {
+        matchedAggregation = "count";
+        matchedMetric = metricBindings[0]?.column || "*";
       }
     }
 
+    if (!matchedMetric && matchedAggregation !== "count") {
+      const trace = tracer.finish({ outcome: "abstained" });
+      return {
+        agent: "data_agent",
+        task: `Analisis Data (${bestTable.tableName})`,
+        resultsSummary: `Metrik yang dimaksud dalam pertanyaan tidak ditemukan pada tabel ${bestTable.tableName}. Kolom/metrik yang tersedia: ${(semModel.metrics || []).map((m: any) => m.name).join(", ") || "tidak ada"}.`,
+        traceId: trace.traceId,
+        stageTimings: trace.timings,
+      };
+    }
+
     // Detect exact sample value filters from dimensions (e.g., wilayah = "Jakarta")
-    const detectedFilter: Record<string, string> = {};
+    const detectedFilter: Record<string, any> = {};
     for (const d of semModel.dimensions || []) {
       for (const val of d.sampleValues || []) {
         const valStr = String(val);
@@ -488,17 +698,38 @@ export class DataAgentService {
       }
     }
 
+    const temporalRange = resolveTemporalRangeFilter(query, columnDefinitions);
+    if (temporalRange.status === "unsafe") {
+      const trace = tracer.finish({ outcome: "abstained" });
+      return {
+        agent: "data_agent",
+        task: `Analisis Data (${bestTable.tableName})`,
+        resultsSummary: `${temporalRange.reason} Tabel yang cocok adalah ${bestTable.tableName}; saya tidak akan menghitung tanpa filter periode yang dapat diverifikasi.`,
+        traceId: trace.traceId,
+        stageTimings: trace.timings,
+      };
+    }
+    if (temporalRange.status === "resolved") {
+      detectedFilter[temporalRange.column] = { gte: temporalRange.gte, lt: temporalRange.lt };
+    }
+
+    const structuredFilter = Object.keys(detectedFilter).length > 0 ? detectedFilter : undefined;
+    const periodDescription = temporalRange.status === "resolved"
+      ? ` (period: ${temporalRange.label} on ${temporalRange.column})`
+      : "";
+
     const bestSource = allSources.find((source) => source.id === bestTable.dataSourceId);
     const snapshot = (bestTable.semanticModel as any)?.externalSnapshot;
     const freshnessSensitive = /\b(latest|current|live|real[ -]?time|sekarang|terkini|hari ini|saat ini|terbaru)\b/i.test(query);
-    const queryMode: "live" | "snapshot" =
+    const queryMode: "live" | "snapshot" = options?.preferredMode ?? (
       bestSource && ["postgres", "mysql", "mariadb"].includes(bestSource.sourceType)
         && bestTable.rowCount >= 100_000
         && Boolean(matchedMetric)
         && snapshot?.status === "ready"
         && !freshnessSensitive
         ? "snapshot"
-        : "live";
+        : "live"
+    );
 
     // 4. Execute deterministic query on table
     let queryResult;
@@ -519,9 +750,9 @@ export class DataAgentService {
       : "";
 
     if (matchedMetric && matchedDimension) {
-      queryDescription = `Aggregate ${matchedAggregation}(${matchedMetric}) grouped by ${matchedDimension} on table '${bestTable.tableName}'${filterDesc}; ${querySourceDescription}`;
+      queryDescription = `Aggregate ${matchedAggregation}(${matchedMetric}) grouped by ${matchedDimension} on table '${bestTable.tableName}'${filterDesc}${periodDescription}; ${querySourceDescription}`;
       queryResult = await this.dataSourcesService.queryTable(companyId, bestTable.id, {
-        filter: Object.keys(detectedFilter).length > 0 ? detectedFilter : undefined,
+        filter: structuredFilter,
         aggregate: {
           column: matchedMetric,
           fn: matchedAggregation,
@@ -530,23 +761,26 @@ export class DataAgentService {
         mode: queryMode,
         limit: 15,
         authzFingerprint,
+        signal: options?.signal,
       });
     } else if (matchedMetric) {
-      queryDescription = `Compute ${matchedAggregation}(${matchedMetric}) on table '${bestTable.tableName}'${filterDesc}; ${querySourceDescription}`;
+      queryDescription = `Compute ${matchedAggregation}(${matchedMetric}) on table '${bestTable.tableName}'${filterDesc}${periodDescription}; ${querySourceDescription}`;
       queryResult = await this.dataSourcesService.queryTable(companyId, bestTable.id, {
-        filter: Object.keys(detectedFilter).length > 0 ? detectedFilter : undefined,
+        filter: structuredFilter,
         aggregate: {
           column: matchedMetric,
           fn: matchedAggregation,
         },
         mode: queryMode,
         authzFingerprint,
+        signal: options?.signal,
       });
     } else {
       queryDescription = `Preview top records from table '${bestTable.tableName}' using live source query`;
       queryResult = await this.dataSourcesService.queryTable(companyId, bestTable.id, {
         limit: 10,
         authzFingerprint,
+        signal: options?.signal,
       });
     }
 
@@ -576,12 +810,19 @@ export class DataAgentService {
       summary += "Tidak ada baris yang sesuai dengan kriteria yang diminta.";
     }
 
+    const trace = tracer.finish({
+      engine: queryMode === "snapshot" ? "clickhouse" : (bestSource?.sourceType as any) || "fast_path",
+      outcome: "success",
+    });
+
     return {
       agent: "data_agent",
       task: queryDescription,
       query: queryDescription,
       resultsSummary: summary,
       dataPreview: queryResult.rows,
+      traceId: trace.traceId,
+      stageTimings: trace.timings,
     };
   }
 

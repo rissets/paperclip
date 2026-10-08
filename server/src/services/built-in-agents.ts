@@ -383,20 +383,21 @@ const FALLBACK_DATA_AGENT_INSTRUCTIONS = [
   "Your dedicated mission is to execute data analytics, SQL queries, and entity lookups across internal structured datasets (CSV/Excel) and connected external relational databases (PostgreSQL, MariaDB, MySQL).",
   "",
   "## Primary Capabilities & Responsibilities",
-  "1. **Actionable Structured Queries**: Inspect and aggregate tabular datasets using `python3 ~/.pi/agent/skills/data-sources-structured/scripts/query_structured.py --list-tables` and `--aggregate <fn> --column <col>`.",
-  "2. **External Relational Database Analytics**: Query live connected databases using `python3 ~/.pi/agent/skills/database-integration/scripts/query_database.py --db \"<id>\" --query-sql \"<sql>\"`.",
-  "3. **Fast B-Tree Entity Profiling**: Look up business and legal entities using indexed searchable columns discovered via `--describe-table`.",
+  "1. **Actionable Structured Queries**: Use `--orchestrate` for analytical data questions. Use `--list-tables` or `--describe-table` only to read ACL-filtered metadata missing from runtime context; these commands do not execute data queries.",
+  "2. **External Relational Database Analytics**: Query assigned relational databases through `query_database.py --orchestrate` with the complete user question.",
+  "3. **Fast B-Tree Entity Profiling**: Use indexed searchable columns from the onboarding schema. If required schema detail is missing, read it with `--describe-table`, then route the data lookup through the coordinator.",
   "4. **Multi-Table Relational JOINs**: Connect related tables using foreign keys and cross-table topology discovered during onboarding.",
   "5. **ClickHouse OLAP Execution**: Execute high-performance aggregations (sum, avg, count, groupBy) on ClickHouse columnar storage.",
   "6. **Self-Correction Retry Loop**: Automatically inspect database error feedback, inspect schemas, and correct column or alias issues dynamically.",
   "",
   "## Query Workflow and Performance",
+  "- **Enterprise Orchestrator is the default for data questions.** When the run context contains `[Enterprise Datasource Orchestration Active]`, make one call with the complete user question: `python3 ~/.pi/agent/skills/data-sources-structured/scripts/query_structured.py --orchestrate \"<complete question>\" --format json`. This shared path selects assigned CSV/Excel, ClickHouse, or external database lanes and returns trace/provenance. Prefer the injected catalog/schema; authorized `--list-tables` and `--describe-table` metadata reads are allowed only when required details are missing. Do not run `--aggregate` or direct SQL in Auto; these data queries require orchestration or a specific fallback reason returned by the coordinator. The CLI emits compact single-line JSON in JSON mode; parse the entire line, not Markdown output. Presentation-only follow-ups should reuse the injected verified result reference. RAG document search remains a separate `search_knowledge.py` call.",
   "- Classify each request as new analysis, refresh, or presentation-only follow-up. For redraw/restyle/explain requests about the immediately preceding answer, reuse its verified result, filters, period, and citations. Do not rediscover tables, rerun a successful query, inspect old Pi session logs, or create temporary scripts just to reformat the same result.",
-  "- For a new structured analysis, call `query_structured.py --list-tables --format json` once. Use `tableId` and `dataSourceId` for structured operations; `rowCount` is numeric. For direct ClickHouse `--sql`, use the exact `clickhouseTable` physical identifier from that catalog; `Table Name` may be only a logical label. Never guess a physical name.",
+  "- For new structured analysis in orchestration Auto, use the --orchestrate command above. Read catalog/schema metadata only when the preflight does not contain the needed information; keep `tableId` and `dataSourceId` separate. `rowCount` is numeric. In orchestration Off or a coordinator-authorized fallback, direct ClickHouse SQL must use the exact `clickhouseTable` physical identifier from the ACL-filtered catalog; the displayed `Table Name` may only be a logical label. Never guess or construct a physical name.",
   "- Do not use `system.tables` metadata as a substitute for counting source records. Query `count()` against the physical data table when a real row count is needed, and distinguish source rows from returned groups.",
   "- Prefer one bounded analytical query: filter date/entity early, project only needed columns, aggregate in ClickHouse, and normally return at most 100 rows. Avoid `SELECT *`, whole-dataset retrieval, repeated schema discovery, and parallel copies of the same query. Describe a selected table only when needed columns or types are still unknown.",
-  "- For external databases, inspect/list schemas once only when needed, then use the durable query-job CLI with selective read-only SQL, an explicit limit, and the normal 30-second timeout. Use up to 60 seconds only when justified. After a timeout, narrow the query or report the timeout; do not loop.",
-  "- Retry a failed query at most once after correcting the table, column, or dialect. If still unavailable, name the source and blocker instead of guessing or silently switching sources.",
+  "- For external databases in orchestration Auto, use query_database.py --orchestrate with the complete question; when the coordinator requests schema details, pass that exact requirement as --direct-fallback-reason before using the durable query-job CLI with selective read-only SQL and an explicit limit, and the normal 30-second timeout. Use up to 60 seconds only when justified. After a timeout, narrow the query or report the timeout; do not loop.",
+  "- For ClickHouse `UNKNOWN_IDENTIFIER`, use the exact identifier and CTE scope from the error, compare them with verified columns and the current CTE projection/aliases, then correct from real fields; never invent a replacement such as `sinx`. Retry a corrected query at most once. If still unavailable, name the source and blocker instead of guessing or silently switching sources.",
   "- State the data source/table, date range, important filters, and whether counts mean source records or groups. Use the user's language and use the same verified values in the chart and its table.",
   "",
   "## Invariants",
@@ -428,6 +429,28 @@ const FALLBACK_KNOWLEDGE_AGENT_INSTRUCTIONS = [
 
 const DATA_AGENT_INSTRUCTIONS = readBuiltInText("data-agent/AGENTS.md", FALLBACK_DATA_AGENT_INSTRUCTIONS);
 const KNOWLEDGE_AGENT_INSTRUCTIONS = readBuiltInText("knowledge-agent/AGENTS.md", FALLBACK_KNOWLEDGE_AGENT_INSTRUCTIONS);
+
+const FALLBACK_MEETING_AGENT_INSTRUCTIONS = [
+  "# Meeting Copilot Agent",
+  "",
+  "You are Primbon's built-in Meeting Copilot Agent Specialist.",
+  "Your dedicated mission is to assist teams during and after meetings by analyzing live transcripts, answering participant queries grounded in discussion context and enterprise data sources, and extracting structured meeting summaries and actionable tasks.",
+  "",
+  "## Primary Capabilities & Responsibilities",
+  "1. **Live Transcript Analysis**: Read recent snippets and search meeting transcripts using `python3 ~/.pi/agent/skills/meeting-notes/scripts/meeting_notes.py --meeting-id \"<id>\" --recent 10` and `--search \"<keyword>\"`.",
+  "2. **Real-time Meeting Q&A**: Answer questions from participants about what was said, decisions reached, or topics discussed during the meeting.",
+  "3. **Enterprise Data Source Cross-Referencing**: Connect discussion topics with enterprise knowledge and database metrics using `python3 ~/.pi/agent/skills/data-sources-structured/scripts/query_structured.py --orchestrate \"<query>\"`.",
+  "4. **Structured Meeting Notes Synthesis**: Summarize meetings into key takeaways, discussed decisions, and structured outlines.",
+  "5. **Action Items Extraction**: Identify concrete follow-up tasks, assignees, deadlines, and convert them to Paperclip issues.",
+  "",
+  "## Invariants",
+  "- Ground all meeting factual claims in recorded transcript segments.",
+  "- Keep all meeting data, transcripts, and queries strictly company-scoped.",
+  "- When creating tasks or answering questions, verify accuracy against live context.",
+  "",
+].join("\n");
+
+const MEETING_AGENT_INSTRUCTIONS = readBuiltInText("meeting-agent/AGENTS.md", FALLBACK_MEETING_AGENT_INSTRUCTIONS);
 
 const DEFINITIONS = validateBuiltInAgentDefinitions([
   {
@@ -739,6 +762,36 @@ const DEFINITIONS = validateBuiltInAgentDefinitions([
       "paperclipai/paperclip/paperclip",
     ],
   },
+  {
+    key: "meeting-agent",
+    displayName: "Meeting Copilot Agent",
+    featureKeys: ["meeting-agent", "runtime", "meeting-notes", "transcription"],
+    shortPurpose:
+      "Real-time meeting copilot, live transcription listener, structured summarization, action items extractor, enterprise data source retrieval during live meetings.",
+    defaultInstructions: MEETING_AGENT_INSTRUCTIONS,
+    defaultRole: "general",
+    defaultTitle: "Meeting Copilot Agent Specialist",
+    defaultIcon: "mic",
+    defaultPermissions: {
+      canCreateAgents: false,
+      canCreateSkills: false,
+    },
+    defaultStatus: "idle",
+    defaultManager: "single_root_agent",
+    allowedAdapterTypes: ["pi_local", "codex_local", "claude_local", "gemini_local", "opencode_local", "cursor_local", "process"],
+    defaultAdapterType: "pi_local",
+    defaultAdapterConfig: {
+      model: DEFAULT_PI_LOCAL_MODEL,
+    },
+    defaultBudgetMonthlyCents: 0,
+    defaultSkillKeys: [
+      "paperclipai/paperclip/meeting-notes",
+      "paperclipai/paperclip/data-sources-structured",
+      "paperclipai/paperclip/database-integration",
+      "paperclipai/paperclip/data-sources",
+      "paperclipai/paperclip/paperclip",
+    ],
+  },
 ]);
 
 const DEFINITIONS_BY_KEY = new Map(DEFINITIONS.map((definition) => [definition.key, definition]));
@@ -751,6 +804,7 @@ const AUTO_PROVISION_ON_COMPANY_CREATE_KEYS = new Set<string>([
   "database-ingestion",
   "data-agent",
   "knowledge-agent",
+  "meeting-agent",
 ]);
 
 const ROOT_AGENT_DEFAULT_CHANGE_GRANTS: PermissionKey[] = ["agents:configure", "skills:create"];
@@ -1039,7 +1093,11 @@ async function assertKnownBuiltInAgentModel(
   if (!model || !hasCompleteAdapterConfig(adapterType, adapterConfig)) return;
 
   const models = await listAdapterModels(adapterType);
-  if (models.length === 0 || models.some((candidate) => candidate.id === model)) return;
+  if (
+    models.length === 0 ||
+    models.some((candidate) => candidate.id === model) ||
+    (adapterType === "pi_local" && model === DEFAULT_PI_LOCAL_MODEL)
+  ) return;
 
   throw unprocessable(`Model "${model}" is not available for adapter ${adapterType}.`, {
     code: "built_in_agent_model_unknown",
@@ -2070,7 +2128,11 @@ export function builtInAgentService(db: Db) {
   }
 
   async function backfillMissingDefaultInstructions(agent: Agent, definition: BuiltInAgentDefinition): Promise<Agent> {
-    if (!definition.defaultInstructions || definition.bundle) return agent;
+    if (
+      !definition.defaultInstructions
+      || definition.bundle
+      || agentInstructionsBundleMode(agent) === "external"
+    ) return agent;
 
     try {
       const target = { companyId: agent.companyId, agentId: agent.id };

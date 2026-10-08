@@ -92,7 +92,17 @@ const invalidTokenStdout = [
   '{"type":"result","subtype":"success","is_error":true,"api_error_status":401,"error":"authentication_failed","result":"Failed to authenticate. API Error: 401 Invalid bearer token","session_id":"abc"}',
 ].join("\n");
 
+const originalNodeVersion = process.version;
+function setNodeVersion(version: string): void {
+  Object.defineProperty(process, "version", {
+    configurable: true,
+    enumerable: true,
+    value: version,
+  });
+}
+
 afterEach(() => {
+  setNodeVersion(originalNodeVersion);
   vi.clearAllMocks();
   probeResult.value = { exitCode: 1, stdout: "", stderr: "", timedOut: false };
   probeResult.throwError = null;
@@ -506,6 +516,7 @@ describe("Claude ACP hello probe on local and SSH targets", () => {
   });
 
   it("reports an explicitly selected API key as normal authentication on the ACP lane", async () => {
+    setNodeVersion("v24.11.0");
     const result = await testClaudeAcpEnvironment({
       companyId: "company-1",
       adapterType: "claude_local",

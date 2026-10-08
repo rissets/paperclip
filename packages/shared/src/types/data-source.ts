@@ -65,11 +65,14 @@ export interface CctvConnectionConfig {
 export interface SemanticMetric {
   name: string;
   column?: string;
+  physicalColumn?: string;
   expression?: string;
   aggregation: "sum" | "avg" | "count" | "min" | "max";
   format?: string;
   description?: string;
   synonyms?: string[];
+  provenance?: "inferred" | "verified" | "user_defined";
+  publicationGateStatus?: "pending" | "verified" | "rejected";
 }
 
 export interface SemanticDimension {
@@ -77,7 +80,29 @@ export interface SemanticDimension {
   column?: string;
   type?: string;
   description?: string;
+  synonyms?: string[];
   sampleValues?: string[];
+  provenance?: "inferred" | "verified" | "user_defined";
+}
+
+export interface DataSourceMappingReviewHistoryEntry {
+  id: string;
+  decision: "approved" | "corrected";
+  reviewerId: string;
+  reviewedAt: string;
+  schemaFingerprint: string;
+  note?: string;
+  metricCorrections: Array<{ index: number; name: string; column: string; aggregation: string; description?: string }>;
+  dimensionCorrections: Array<{ index: number; name: string; column: string; description?: string }>;
+}
+
+export interface DataSourceMappingReviewState {
+  status: "not_reviewed" | "approved" | "corrected";
+  revision: number;
+  reviewerId?: string;
+  reviewedAt?: string;
+  schemaFingerprint?: string;
+  note?: string;
 }
 
 export interface OnboardingReasoningStep {
@@ -151,7 +176,25 @@ export interface DataSourceSemanticProfile {
   jsonStructures?: Record<string, JsonColumnStructure>;
   tableProfiles?: Record<string, TableSemanticProfile>;
   crossTableClusters?: CrossTableCluster[];
+  semanticMappingSummary?: {
+    tablesCount: number;
+    completeTables: number;
+    partialTables: number;
+    fallbackTables: number;
+    expectedBatches: number;
+    validatedBatches: number;
+    fallbackBatches: number;
+    budgetExceededTables: number;
+  };
   documentProfiles?: DocumentSemanticProfile[];
+}
+
+export interface TableSemanticMappingCoverage {
+  status: "complete" | "partial" | "fallback";
+  expectedBatches: number;
+  validatedBatches: number;
+  fallbackBatches: number;
+  timeBudgetExceeded: boolean;
 }
 
 export interface DatabaseConnectionTestResult {
@@ -171,6 +214,15 @@ export interface TableRelation {
   targetTableId?: string;
   targetColumn: string;
   relationType: "one_to_many" | "many_to_one" | "one_to_one";
+  provenance?: "foreign_key" | "inferred" | "candidate";
+  confidence?: number;
+  sourceSchema?: string;
+  targetSchema?: string;
+  cardinalityEvidence?: {
+    sourceDistinctCount?: number;
+    targetDistinctCount?: number;
+    sampleMatchRatio?: number;
+  };
 }
 
 export interface JsonSubField {
@@ -190,6 +242,7 @@ export interface JsonColumnStructure {
 export interface ColumnDefinition {
   name: string;
   dataType: "string" | "number" | "boolean" | "date" | "json" | "unknown";
+  nativeType?: string;
   nullCount: number;
   nullRatio: number;
   distinctCount: number;
@@ -202,10 +255,21 @@ export interface ColumnDefinition {
   isSearchable?: boolean;
   isPrimaryKey?: boolean;
   isForeignKey?: boolean;
-  foreignKeyTarget?: { table: string; column: string };
+  foreignKeyTarget?: { schema?: string; table: string; column: string };
   isJson?: boolean;
   jsonStructure?: JsonColumnStructure;
   clickhouseType?: string;
+}
+
+export interface TableIndexDefinition {
+  name: string;
+  columns: string[];
+  isUnique: boolean;
+  isPrimary?: boolean;
+  predicate?: string | null;
+  expression?: string | null;
+  indexType?: string;
+  capabilityFailure?: string | null;
 }
 
 export interface NestedSemanticDimension {
@@ -222,6 +286,40 @@ export interface ClickhouseSchemaDefinition {
   engine: string;
   orderBy: string[];
   columnTypes: Record<string, string>;
+  versionColumn?: string;
+  deduplicationStrategy?: "final" | "arg_max" | "none";
+  projectionDdl?: string;
+}
+
+export interface IngestionQualityCounters {
+  totalRows: number;
+  validRows: number;
+  invalidRows: number;
+  /** Invalid rows excluded from the published analytical table. */
+  quarantinedRows?: number;
+  /** Rows actually published to the queryable table after quality quarantine. */
+  publishedRows?: number;
+  /** Bounded, value-free row references for operator review. */
+  quarantineSamples?: Array<{
+    rowNumber: number;
+    columns: string[];
+    reason: "type_violation" | "field_count";
+  }>;
+  nullValueCount: Record<string, number>;
+  typeViolations: number;
+  duplicateRows: number;
+  duplicateKeyRows?: number;
+  duplicateDetection?: "complete" | "deferred";
+  temporalBounds?: {
+    minDate?: string;
+    maxDate?: string;
+  };
+  /** Full-data temporal bounds keyed by the physical date/timestamp column. */
+  temporalBoundsByColumn?: Record<string, {
+    minDate?: string;
+    maxDate?: string;
+  }>;
+  sampleErrors?: Array<{ rowNumber: number; column?: string; error: string }>;
 }
 
 export interface TableSemanticModel {
@@ -233,16 +331,47 @@ export interface TableSemanticModel {
   decisionSpecs?: string[];
   entities?: string[];
   searchableColumns?: string[];
-  dimensions: { name: string; description: string; sampleValues?: string[] }[];
+  dimensions: {
+    name: string;
+    column?: string;
+    description: string;
+    sampleValues?: string[];
+    synonyms?: string[];
+    provenance?: "inferred" | "verified" | "user_defined";
+  }[];
   nestedDimensions?: NestedSemanticDimension[];
-  metrics: { name: string; expression: string; description: string; aggregation: "sum" | "avg" | "count" | "min" | "max" }[];
+  metrics: {
+    name: string;
+    column?: string;
+    expression?: string;
+    description: string;
+    aggregation: "sum" | "avg" | "count" | "min" | "max";
+    physicalColumn?: string;
+    synonyms?: string[];
+    grain?: string;
+    timezone?: string;
+    nullPolicy?: "zero" | "exclude" | "error";
+    provenance?: "inferred" | "verified" | "user_defined";
+    publicationGateStatus?: "pending" | "verified" | "rejected";
+  }[];
   primaryKey?: string;
   foreignKeys?: { column: string; foreignTable: string; foreignColumn: string }[];
   relationships?: TableRelation[];
   synonyms: Record<string, string[]>;
+  sourceSchema?: string;
+  rowCountEstimated?: boolean;
+  indexes?: TableIndexDefinition[];
+  connectedComponentId?: string;
   clickhouseSchema?: ClickhouseSchemaDefinition;
   suggestedQueries?: SuggestedQueryTemplate[];
   jsonStructures?: Record<string, JsonColumnStructure>;
+  qualityCounters?: IngestionQualityCounters;
+  publicationGateStatus?: "pending" | "verified" | "rejected";
+  unresolvedDefinitions?: string[];
+  version?: number;
+  semanticMapping?: TableSemanticMappingCoverage;
+  mappingReview?: DataSourceMappingReviewState;
+  mappingReviewHistory?: DataSourceMappingReviewHistoryEntry[];
 }
 
 export interface CrossDocumentCorrelation {
@@ -281,10 +410,35 @@ export interface CollectionSemanticProfile {
   crossTableRelationships: TableRelation[];
   crossDocumentCorrelations: CrossDocumentCorrelation[];
   crossModalCorrelations: CrossModalCorrelation[];
+  temporalOverlapAnalysis?: TemporalOverlapAnalysis;
   unifiedClickhouseViews?: UnifiedClickhouseView[];
   suggestedQueries: SuggestedQueryTemplate[];
   summary: string;
   lastCorrelatedAt: string;
+}
+
+export interface TemporalOverlapFinding {
+  sourceTableId: string;
+  sourceId: string;
+  sourceTable: string;
+  targetTableId: string;
+  targetSourceId: string;
+  targetTable: string;
+  sourceDateColumn: string;
+  targetDateColumn: string;
+  overlapStart: string;
+  overlapEnd: string;
+  matchedOn: "same_table_name" | "shared_entity_and_metric";
+  reviewRequired: true;
+}
+
+export interface TemporalOverlapAnalysis {
+  status: "complete" | "limited";
+  tablesAnalyzed: number;
+  tablesWithTemporalBounds: number;
+  comparedPairs: number;
+  findingsTruncated: boolean;
+  findings: TemporalOverlapFinding[];
 }
 
 export interface DataSourceCollection {
@@ -437,4 +591,47 @@ export interface SqlQueryResult {
   rowCount: number;
   executionTimeMs: number;
   sql: string;
+}
+
+export type QueryExperienceStatus =
+  | "candidate"
+  | "execution_checked"
+  | "reference_verified"
+  | "user_approved"
+  | "rejected"
+  | "deprecated";
+
+export interface QueryExperienceRecord {
+  id: string;
+  companyId: string;
+  originatingExecutionId: string;
+  intent: string;
+  parameterizedSql: string;
+  parameterSchema?: Record<string, { type: string; description?: string }>;
+  referencedDataSourceIds: string[];
+  referencedTables: string[];
+  referencedColumns: string[];
+  metricBindings: string[];
+  schemaFingerprint: string;
+  engine: "clickhouse" | "live_external" | "hybrid";
+  status: QueryExperienceStatus;
+  validationEvidence?: Record<string, unknown>;
+  feedbackCount: number;
+  lastUsedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface QueryFeedbackRecord {
+  id: string;
+  companyId: string;
+  executionId: string;
+  experienceId?: string | null;
+  actorType: "board" | "agent" | "user";
+  actorId: string;
+  sentiment: "positive" | "negative";
+  businessFieldsToFix?: string[];
+  correctionNote?: string | null;
+  createdAt: string;
+  updatedAt: string;
 }

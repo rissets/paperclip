@@ -40,6 +40,18 @@ python3 ~/.pi/agent/skills/data-sources/scripts/data_sources.py --id "<data_sour
 
 ## 2. Delegation to Specialized Tools
 
+### Enterprise orchestration for analytical questions
+
+When the agent run includes `[Enterprise Datasource Orchestration Active]`, send the complete natural-language question once through the Enterprise Orchestrator before using a source-specific query tool:
+
+```bash
+python3 ~/.pi/agent/skills/data-sources-structured/scripts/query_structured.py \
+  --orchestrate "<the user's complete question>" \
+  --format json
+```
+
+The shared coordinator handles assigned CSV/Excel, ClickHouse, and external relational sources. Do not list/describe/query those sources first for the same question, since that repeats discovery and bypasses the shared plan, deadline, cache, and provenance path. If the prompt says orchestration is `Off`, follow the direct workflows below. Document-only RAG questions still use `search_knowledge.py`; mixed document and structured questions use the structured coordinator for numeric facts and RAG for document evidence, then clearly distinguish their provenance.
+
 Depending on the data source type, use the corresponding specialized action tool:
 
 1. **Unstructured Documents (PDF, DOCX, TXT, MD)**:

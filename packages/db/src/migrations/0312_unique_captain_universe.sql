@@ -1,0 +1,2 @@
+ALTER TABLE "data_source_query_executions" ADD COLUMN "data_source_ids" jsonb;--> statement-breakpoint
+CREATE INDEX "data_source_query_executions_data_source_ids_gin_idx" ON "data_source_query_executions" USING gin ("data_source_ids");

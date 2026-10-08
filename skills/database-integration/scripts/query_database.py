@@ -28,7 +28,19 @@ import urllib.error
 def get_env_or_default(key, default=None):
     return os.environ.get(key, default)
 
-def make_request(url, method="GET", payload=None, api_key=None, agent_id=None, session_token=None):
+def print_json(value, stream=None):
+    (stream or sys.stdout).write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+def print_cli_error(message, output_format="table", *, code="query_error", status=None):
+    if output_format == "json":
+        error = {"code": code, "message": str(message)}
+        if status is not None:
+            error["status"] = status
+        print_json({"error": error}, sys.stderr)
+    else:
+        print(f"Error: {message}", file=sys.stderr)
+
+def make_request(url, method="GET", payload=None, api_key=None, agent_id=None, session_token=None, output_format="table", timeout_seconds=25):
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json",
@@ -52,14 +64,14 @@ def make_request(url, method="GET", payload=None, api_key=None, agent_id=None, s
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
 
     try:
-        with urllib.request.urlopen(req, timeout=25) as resp:
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         err = e.read().decode("utf-8", errors="ignore")
-        print(f"Error ({e.code}): {err}", file=sys.stderr)
+        print_cli_error(err or f"HTTP {e.code}", output_format, code="http_error", status=e.code)
         sys.exit(1)
     except Exception as e:
-        print(f"Connection error to {url}: {e}", file=sys.stderr)
+        print_cli_error(f"Connection error to {url}: {e}", output_format, code="connection_error")
         sys.exit(1)
 
 def print_markdown_table(headers, rows):
@@ -90,6 +102,7 @@ def run_durable_query_job(
     api_key=None,
     agent_id=None,
     session_token=None,
+    output_format="table",
     poll_interval_seconds=1.0,
 ):
     """Submit a bounded read-only query and retrieve its durable result."""
@@ -103,6 +116,7 @@ def run_durable_query_job(
         "api_key": api_key,
         "agent_id": agent_id,
         "session_token": session_token,
+        "output_format": output_format,
     }
     submitted = make_request(
         endpoint,
@@ -148,6 +162,7 @@ def main():
     group.add_argument("--inspect-tables", action="store_true", help="Inspect all tables in the specified database")
     group.add_argument("--describe-table", type=str, metavar="TABLE", help="Describe table columns, types, and keys")
     group.add_argument("--query-sql", type=str, metavar="SQL", help="Execute safe read-only SQL query on the database")
+    group.add_argument("--orchestrate", type=str, metavar="QUERY", help="Execute query through Enterprise Orchestrator facade")
 
     parser.add_argument("--db", type=str, help="Database Data Source ID or Name (required for inspect/describe/query)")
     parser.add_argument("--limit", type=int, default=50, help="Maximum number of rows returned")
@@ -158,12 +173,20 @@ def main():
         help="Maximum external database execution time in milliseconds (1000-60000)",
     )
     parser.add_argument("--format", choices=["table", "json"], default="table", help="Output format")
+    parser.add_argument(
+        "--direct-fallback-reason",
+        type=str,
+        help="Coordinator-provided reason required for a direct data-query fallback in orchestration Auto",
+    )
 
     parser.add_argument("--company-id", type=str, default=get_env_or_default("PAPERCLIP_COMPANY_ID"))
     parser.add_argument("--agent-id", type=str, default=get_env_or_default("PAPERCLIP_AGENT_ID"))
     parser.add_argument("--api-url", type=str, default=get_env_or_default("PAPERCLIP_API_URL", "http://localhost:3100"))
     parser.add_argument("--api-key", type=str, default=get_env_or_default("PAPERCLIP_API_KEY"))
     parser.add_argument("--session-token", type=str, default=get_env_or_default("PAPERCLIP_SESSION_TOKEN"))
+    parser.add_argument("--run-id", type=str, default=get_env_or_default("PAPERCLIP_RUN_ID"))
+    parser.add_argument("--submitted-at", type=str, default=get_env_or_default("PAPERCLIP_SUBMITTED_AT"))
+    parser.add_argument("--deadline-ms", type=int, default=int(get_env_or_default("PAPERCLIP_DEADLINE_MS", "55000")))
 
     args = parser.parse_args()
     base_url = args.api_url.rstrip("/")
@@ -171,20 +194,33 @@ def main():
     company_id = args.company_id
     agent_id = args.agent_id
     access_mode = get_env_or_default("PAPERCLIP_DATA_SOURCES_MODE", "all")
+    orchestration_mode = get_env_or_default("PAPERCLIP_DATASOURCE_ORCHESTRATION_MODE", "off").strip().lower()
     assigned_raw = get_env_or_default("PAPERCLIP_ASSIGNED_DATA_SOURCES", "")
     assigned_ids = set([x.strip() for x in assigned_raw.split(",") if x.strip()])
     assigned_col_raw = get_env_or_default("PAPERCLIP_ASSIGNED_COLLECTIONS", "")
     assigned_col_ids = set([x.strip() for x in assigned_col_raw.split(",") if x.strip()])
 
     if not company_id:
-        print("Error: Company ID is required (set $PAPERCLIP_COMPANY_ID or pass --company-id)", file=sys.stderr)
+        print_cli_error("Company ID is required (set $PAPERCLIP_COMPANY_ID or pass --company-id)", args.format, code="company_id_required")
         sys.exit(1)
+
+    metadata_only_operation = args.list_dbs or args.inspect_tables or bool(args.describe_table)
+    if orchestration_mode == "auto" and not args.orchestrate and not metadata_only_operation and not (args.direct_fallback_reason or "").strip():
+        print_cli_error(
+            "Datasource orchestration is active. Submit the complete question with --orchestrate; direct data queries require a specific fallback reason returned by the coordinator.",
+            args.format,
+            code="orchestration_required",
+        )
+        sys.exit(2)
 
     if access_mode == "none":
         if args.list_dbs:
-            print("*(Agen tidak memiliki izin akses ke database apa pun. Mode: Terisolasi)*")
+            if args.format == "json":
+                print_json([])
+            else:
+                print("*(Agen tidak memiliki izin akses ke database apa pun. Mode: Terisolasi)*")
             return
-        print("Error: Akses ditolak. Agen ini tidak memiliki izin akses ke database apa pun.", file=sys.stderr)
+        print_cli_error("Akses ditolak. Agen ini tidak memiliki izin akses ke database apa pun.", args.format, code="source_access_denied")
         sys.exit(1)
 
     # 1. List Databases
@@ -192,7 +228,7 @@ def main():
         url = f"{api_prefix}/companies/{company_id}/data-sources"
         if agent_id:
             url += f"?agentId={agent_id}"
-        sources = make_request(url, api_key=args.api_key, agent_id=agent_id, session_token=args.session_token)
+        sources = make_request(url, api_key=args.api_key, agent_id=agent_id, session_token=args.session_token, output_format=args.format)
         
         db_sources = []
         for ds in sources:
@@ -216,7 +252,7 @@ def main():
                 })
 
         if args.format == "json":
-            print(json.dumps(db_sources, indent=2))
+            print_json(db_sources)
         else:
             print(f"### Connected External Databases ({len(db_sources)} active):\n")
             if db_sources:
@@ -226,16 +262,59 @@ def main():
                 print("No external databases accessible to this agent.")
         return
 
+    # Orchestrate Query Facade
+    if args.orchestrate:
+        url = f"{api_prefix}/companies/{company_id}/orchestrator/query-executions"
+        payload = {
+            "query": args.orchestrate,
+            "agentId": agent_id,
+        }
+        if args.run_id:
+            payload["runId"] = args.run_id
+        if args.submitted_at:
+            payload["submittedAt"] = int(args.submitted_at) if str(args.submitted_at).isdigit() else args.submitted_at
+        if args.deadline_ms:
+            payload["deadlineMs"] = args.deadline_ms
+        res = make_request(
+            url,
+            method="POST",
+            payload=payload,
+            api_key=args.api_key,
+            agent_id=agent_id,
+            session_token=args.session_token,
+            timeout_seconds=70,
+            output_format=args.format,
+        )
+        if args.format == "json":
+            print_json(res)
+            return
+
+        print(f"### Hasil Orchestrator Query (Status: {res.get('status', 'unknown')})\n")
+        if res.get("resultsSummary"):
+            print(f"{res['resultsSummary']}\n")
+
+        timings = res.get("stageTimings") or {}
+        if timings:
+            print(f"- **Trace ID**: `{res.get('traceId')}`")
+            print(f"- **Stage Timings**: Preflight {timings.get('preflightMs', 0)}ms | Planning {timings.get('planningMs', 0)}ms | Exec {timings.get('databaseExecutionMs', 0)}ms | Total {timings.get('totalMs', 0)}ms\n")
+
+        data = res.get("data")
+        if isinstance(data, list) and data:
+            columns = list(data[0].keys()) if isinstance(data[0], dict) else []
+            if columns:
+                print_markdown_table(columns, data)
+        return
+
     # Check for --db argument
     if not args.db:
-        print("Error: --db <data_source_id_or_name> is required for this operation.", file=sys.stderr)
+        print_cli_error("--db <data_source_id_or_name> is required for this operation.", args.format, code="database_required")
         sys.exit(1)
 
     # Resolve DB ID
     url = f"{api_prefix}/companies/{company_id}/data-sources"
     if agent_id:
         url += f"?agentId={agent_id}"
-    sources = make_request(url, api_key=args.api_key, agent_id=agent_id, session_token=args.session_token)
+    sources = make_request(url, api_key=args.api_key, agent_id=agent_id, session_token=args.session_token, output_format=args.format)
     target_ds = None
     for ds in sources:
         if ds.get("id") == args.db or ds.get("name", "").lower() == args.db.lower():
@@ -243,7 +322,7 @@ def main():
             break
 
     if not target_ds:
-        print(f"Error: Database '{args.db}' not found.", file=sys.stderr)
+        print_cli_error(f"Database '{args.db}' not found.", args.format, code="database_not_found")
         sys.exit(1)
 
     if access_mode == "selected":
@@ -251,7 +330,7 @@ def main():
         allowed_by_ds = target_ds.get("id") in assigned_ids if assigned_ids else False
         allowed_by_col = col_id in assigned_col_ids if (col_id and assigned_col_ids) else False
         if not allowed_by_ds and not allowed_by_col and (assigned_ids or assigned_col_ids):
-            print(f"Error: Akses ditolak. Database '{target_ds.get('name')}' ({target_ds.get('id')}) tidak ditugaskan ke agen ini.", file=sys.stderr)
+            print_cli_error(f"Akses ditolak. Database '{target_ds.get('name')}' ({target_ds.get('id')}) tidak ditugaskan ke agen ini.", args.format, code="source_access_denied")
             sys.exit(1)
 
     ds_id = target_ds.get("id")
@@ -260,7 +339,7 @@ def main():
     if args.inspect_tables:
         tables = target_ds.get("tables", [])
         if args.format == "json":
-            print(json.dumps(tables, indent=2))
+            print_json(tables)
             return
 
         print(f"### Tables in Database `{target_ds.get('name')}` ({len(tables)} tables):\n")
@@ -286,11 +365,11 @@ def main():
                 break
 
         if not target_tbl:
-            print(f"Table '{args.describe_table}' not found in database '{target_ds.get('name')}'.", file=sys.stderr)
+            print_cli_error(f"Table '{args.describe_table}' not found in database '{target_ds.get('name')}'.", args.format, code="table_not_found")
             sys.exit(1)
 
         if args.format == "json":
-            print(json.dumps(target_tbl, indent=2))
+            print_json(target_tbl)
             return
 
         print(f"### Schema for Table: `{target_tbl.get('tableName')}`")
@@ -323,7 +402,7 @@ def main():
         # Basic client-side read-only guard
         first_word = sql.split()[0].upper() if sql else ""
         if first_word not in ["SELECT", "WITH", "SHOW", "DESCRIBE", "EXPLAIN"]:
-            print(f"Error: Only read-only queries (SELECT, WITH, SHOW, DESCRIBE, EXPLAIN) are allowed.", file=sys.stderr)
+            print_cli_error("Only read-only queries (SELECT, WITH, SHOW, DESCRIBE, EXPLAIN) are allowed.", args.format, code="read_only_query_required")
             sys.exit(1)
 
         try:
@@ -337,13 +416,14 @@ def main():
                 api_key=args.api_key,
                 agent_id=agent_id,
                 session_token=args.session_token,
+                output_format=args.format,
             )
         except (RuntimeError, TimeoutError, ValueError) as error:
-            print(f"Error: {error}", file=sys.stderr)
+            print_cli_error(error, args.format, code="query_execution_failed")
             sys.exit(1)
 
         if args.format == "json":
-            print(json.dumps(res, indent=2))
+            print_json(res)
             return
 
         rows = res.get("rows", [])

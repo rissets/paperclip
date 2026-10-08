@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
-import { activityLog } from "@paperclipai/db";
+import { activityLog, authUsers } from "@paperclipai/db";
 import { projectToolContext } from "../services/project-tool-context.js";
 import { persistActivity, publishActivity } from "../services/activity-log.js";
 import { z } from "zod";
@@ -317,15 +317,33 @@ export function projectRoutes(db: Db) {
     if (result.publication) publishActivity(result.publication);
     if (result.project.env) await secretsSvc.syncEnvBindingsForTarget?.(companyId, { targetType: "project", targetId: result.project.id }, result.project.env);
     if (result.duplicate) { res.status(200).json(result.project); return; }
-    if (req.actor.type === "board" && req.actor.userId) {
-      const currentProjects = await rbac.getAssignedProjectsForUser(companyId, req.actor.userId);
-      if (!currentProjects.includes(result.project.id)) {
-        await rbac.assignProjectsToUser(
-          companyId,
-          req.actor.userId,
-          [...currentProjects, result.project.id],
-          req.actor.userId,
-        );
+    if (
+      req.actor.type === "board" &&
+      req.actor.userId &&
+      req.actor.source !== "local_implicit" &&
+      !req.actor.isInstanceAdmin
+    ) {
+      const isOwnerOrAdmin = await rbac.isOwnerOrAdmin(companyId, req.actor.userId);
+      if (!isOwnerOrAdmin) {
+        const userExists =
+          typeof (db as any)?.select === "function"
+            ? await db
+                .select({ id: authUsers.id })
+                .from(authUsers)
+                .where(eq(authUsers.id, req.actor.userId))
+                .then((r) => r.length > 0)
+            : false;
+        if (userExists) {
+          const currentProjects = await rbac.getAssignedProjectsForUser(companyId, req.actor.userId);
+          if (!currentProjects.includes(result.project.id)) {
+            await rbac.assignProjectsToUser(
+              companyId,
+              req.actor.userId,
+              [...currentProjects, result.project.id],
+              req.actor.userId,
+            );
+          }
+        }
       }
     }
     const telemetryClient = getTelemetryClient();

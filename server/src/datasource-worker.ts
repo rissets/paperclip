@@ -26,19 +26,23 @@ async function main() {
   let snapshotWorker: { tick: () => Promise<void>; stop: () => void } | undefined;
   let queryWorker: { tick: () => Promise<void>; stop: () => void } | undefined;
   let embeddingWorker: { tick: () => Promise<void>; stop: () => void } | undefined;
+  let externalDbWorker: { tick: () => Promise<void>; stop: () => void } | undefined;
+  let externalDbRuntime: DataSourceWorkerRuntime | undefined;
   const healthServer = createServer((req, res) => {
     if (req.url !== "/health" || req.method !== "GET") { res.writeHead(404).end(); return; }
     const ingestion = runtime?.health();
     const snapshots = snapshotRuntime?.health();
     const queries = queryRuntime?.health();
     const embeddings = embeddingRuntime?.health();
+    const externalDb = externalDbRuntime?.health();
     const health = {
-      ready: Boolean(ingestion?.ready && snapshots?.ready && queries?.ready && embeddings?.ready),
-      busy: Boolean(ingestion?.busy || snapshots?.busy || queries?.busy || embeddings?.busy),
+      ready: Boolean(ingestion?.ready && snapshots?.ready && queries?.ready && embeddings?.ready && externalDb?.ready),
+      busy: Boolean(ingestion?.busy || snapshots?.busy || queries?.busy || embeddings?.busy || externalDb?.busy),
       ingestion,
       externalSnapshots: snapshots,
       queryJobs: queries,
       embeddingReindex: embeddings,
+      externalDbOnboarding: externalDb,
     };
     res.writeHead(health.ready ? 200 : 503, { "Content-Type": "application/json" });
     res.end(JSON.stringify(health));
@@ -68,6 +72,10 @@ async function main() {
     embeddingRuntime = new DataSourceWorkerRuntime(() => embeddingWorker!.tick(), pollMs, () => {
       console.error("[DatasourceEmbeddingWorker] Poll failed; retrying on the next interval");
     });
+    externalDbWorker = new DataSourceIngestionWorker(db, "external_db_onboarding");
+    externalDbRuntime = new DataSourceWorkerRuntime(() => externalDbWorker!.tick(), pollMs, () => {
+      console.error("[DatasourceExternalDbWorker] Poll failed; retrying on the next interval");
+    });
     await new Promise<void>((resolve, reject) => {
       healthServer.once("error", reject);
       healthServer.listen(port, "0.0.0.0", resolve);
@@ -76,6 +84,7 @@ async function main() {
     snapshotRuntime.start();
     queryRuntime.start();
     embeddingRuntime.start();
+    externalDbRuntime.start();
     console.info("[DatasourceWorker] Started");
     let stopping = false;
     const stop = async () => {
@@ -85,14 +94,19 @@ async function main() {
       snapshotWorker?.stop();
       queryWorker?.stop();
       embeddingWorker?.stop();
-      await Promise.all([runtime!.stop(), snapshotRuntime!.stop(), queryRuntime!.stop(), embeddingRuntime!.stop()]);
+      externalDbWorker?.stop();
+      await Promise.all([runtime!.stop(), snapshotRuntime!.stop(), queryRuntime!.stop(), embeddingRuntime!.stop(), externalDbRuntime!.stop()]);
       await new Promise<void>((resolve) => healthServer.close(() => resolve()));
       const { shutdownDataSourceCache } = await import("./services/data-source-cache.js");
       await shutdownDataSourceCache();
       await db.$client.end({ timeout: 5 });
     };
     for (const signal of ["SIGTERM", "SIGINT"] as const) {
-      process.once(signal, () => { void stop().catch(() => process.exit(1)); });
+      process.once(signal, () => {
+        void stop()
+          .then(() => { process.exit(0); })
+          .catch(() => process.exit(1));
+      });
     }
   } catch (error) {
     ingestionWorker?.stop();

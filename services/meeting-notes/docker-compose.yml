@@ -1,0 +1,27 @@
+services:
+  meeting-notes:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: paperclip-meeting-notes:latest
+    container_name: paperclip-meeting-notes
+    ports:
+      - "5001:5001"
+    environment:
+      - MEETING_SERVICE_PORT=5001
+      - MEETING_SERVICE_HOST=0.0.0.0
+      - PRIMARY_STT_URL=${PRIMARY_STT_URL:-https://router.rissets.com/v1/audio/transcriptions}
+      - PRIMARY_STT_KEY=${PRIMARY_STT_KEY:-sk-f874f548c166ae39-b8b98d-c8e05721}
+      - PRIMARY_STT_MODEL=${PRIMARY_STT_MODEL:-groq/whisper-large-v3-turbo}
+      - FALLBACK_STT_URL=${FALLBACK_STT_URL:-https://llm-v1.hellodigi.id/v1/audio/transcriptions}
+      - FALLBACK_STT_KEY=${FALLBACK_STT_KEY:-fe85e354c928821e4e01242b3a8624ce1268b7bd683a439771a723d79ede56f5}
+      - FALLBACK_STT_MODEL=${FALLBACK_STT_MODEL:-openai/whisper-large-v3-turbo}
+    volumes:
+      - .:/app
+      - ./storage:/app/storage
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5001/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3

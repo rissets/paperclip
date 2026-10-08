@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:f
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { getActiveStepContext, measureStartupStep } from "./acpx-engine/startup-timing.js";
 import { prepareCommandManagedRuntime } from "./command-managed-runtime.js";
@@ -24,7 +24,7 @@ import {
   startSandboxCallbackBridgeWorker,
 } from "./sandbox-callback-bridge.js";
 import type { SandboxCallbackBridgeQueueClient } from "./sandbox-callback-bridge.js";
-import { createHttp2BridgeServer } from "./http2-bridge-server.js";
+import { createHttp2BridgeServer, resetBridgeBodyReservationsForTest } from "./http2-bridge-server.js";
 import type { Http2BridgeForwardRequest, Http2BridgeForwardResult } from "./http2-bridge-server.js";
 import type { CommandManagedDuplexChannel } from "./command-managed-runtime.js";
 import type { RuntimeSpanRunner } from "./acpx-engine/startup-timing.js";
@@ -112,7 +112,12 @@ describe("sandbox callback bridge", () => {
     throw new Error(`Timed out waiting for a JSON file in ${directory}.`);
   }
 
+  beforeEach(() => {
+    resetBridgeBodyReservationsForTest();
+  });
+
   afterEach(async () => {
+    resetBridgeBodyReservationsForTest();
     while (cleanupFns.length > 0) {
       const cleanup = cleanupFns.pop();
       if (!cleanup) continue;

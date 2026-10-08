@@ -2799,6 +2799,7 @@ export * from "./validators/data-source-snapshot.js";
 export * from "./validators/data-source-embedding-reindex.js";
 export * from "./validators/data-source-embedding-prune.js";
 export * from "./validators/data-source-upload-session.js";
+export * from "./validators/data-source-mapping-review.js";
 export * from "./validators/complete-data-source-upload-session.js";
 export * from "./validators/email.js";
 export { configureRailwaySshSchema, type ConfigureRailwaySsh, type RailwaySshSetup } from "./railway-connection.js";

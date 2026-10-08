@@ -9,18 +9,19 @@ import multer from "multer";
 import { eq, and, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, dataSourceTables, dataSourceCollections } from "@paperclipai/db";
-import { assertCompanyAccess, getActorInfo } from "./authz.js";
+import { assertCompanyAccess, getActorInfo, hasCompanyAccess } from "./authz.js";
 import { DataSourcesService } from "../services/data-sources.js";
 import { DataSourceQueryJobsService } from "../services/data-source-query-jobs.js";
 import { DataSourceUploadSessionsService } from "../services/data-source-upload-sessions.js";
 import { DataSourceCollectionsService } from "../services/data-source-collections.js";
+import { DataSourceMappingReviewService } from "../services/data-source-mapping-review.js";
 import { OnboardingOrchestratorService } from "../services/onboarding-orchestrator.js";
 import { EnterpriseOrchestratorService } from "../services/enterprise-orchestrator.js";
 import { DatabaseIntegrationService } from "../services/database-integration.js";
 import { isExternalQueryAbortError } from "../services/external-query-abort.js";
 import {
+  buildClickhouseTableAliasMap,
   ClickhouseService,
-  clickhouseSourceTableName,
   rewriteClickhouseTableReferences,
 } from "../services/clickhouse.js";
 import { badRequest, forbidden, HttpError, notFound } from "../errors.js";
@@ -29,6 +30,7 @@ import { makeDataSourceCacheKey } from "../services/data-source-cache.js";
 import {
   completeDataSourceUploadSessionSchema,
   createDataSourceUploadSessionSchema,
+  dataSourceMappingReviewRequestSchema,
   dataSourceQueryJobRequestSchema,
   dataSourceSnapshotRequestSchema,
   dataSourceEmbeddingReindexRequestSchema,
@@ -156,6 +158,7 @@ export function dataSourceRoutes(db: Db) {
   const queryJobsService = new DataSourceQueryJobsService(db);
   const uploadSessionsService = new DataSourceUploadSessionsService(db);
   const collectionsService = new DataSourceCollectionsService(db);
+  const mappingReviewService = new DataSourceMappingReviewService(db);
   const onboardingOrchestrator = new OnboardingOrchestratorService(db);
   const dbIntegration = new DatabaseIntegrationService();
   const clickhouse = new ClickhouseService();
@@ -238,10 +241,20 @@ export function dataSourceRoutes(db: Db) {
 
   const getRequestingAgentId = (req: Request): string | null => {
     if (req.actor.type === "agent" && req.actor.agentId) {
+      const explicitAgentId =
+        (typeof req.query.agentId === "string" ? req.query.agentId.trim() : null) ||
+        (typeof (req.body as any)?.agentId === "string" ? (req.body as any).agentId.trim() : null) ||
+        (typeof req.headers["x-agent-id"] === "string" ? req.headers["x-agent-id"].trim() : null) ||
+        (typeof req.headers["x-paperclip-agent-id"] === "string" ? req.headers["x-paperclip-agent-id"].trim() : null);
+      if (explicitAgentId && explicitAgentId !== req.actor.agentId) {
+        throw forbidden("Agent identity mismatch: cannot access or query under a different agent identity");
+      }
       return req.actor.agentId;
     }
     const queryAgentId = typeof req.query.agentId === "string" ? req.query.agentId.trim() : null;
     if (queryAgentId) return queryAgentId;
+    const bodyAgentId = typeof (req.body as any)?.agentId === "string" ? (req.body as any).agentId.trim() : null;
+    if (bodyAgentId) return bodyAgentId;
     const headerAgentId =
       (typeof req.headers["x-agent-id"] === "string" ? req.headers["x-agent-id"].trim() : null) ??
       (typeof req.headers["x-paperclip-agent-id"] === "string" ? req.headers["x-paperclip-agent-id"].trim() : null);
@@ -259,6 +272,35 @@ export function dataSourceRoutes(db: Db) {
     const allowedIds = access.effectiveDataSourceIds || access.dataSourceIds || [];
     if (access.mode === "selected" && !allowedIds.includes(dataSourceId)) {
       throw forbidden(`Akses ditolak: Data source '${dataSourceId}' tidak ditugaskan ke agen ini`);
+    }
+  }
+
+  async function allowedBoardExecutionSources(req: Request, companyId: string): Promise<string[] | undefined> {
+    if (req.actor.type !== "board" || !req.actor.userId || req.actor.isInstanceAdmin) return undefined;
+    if (await rbac.isOwnerOrAdmin(companyId, req.actor.userId)) return undefined;
+    return rbac.getAllowedDataSourcesForUser(companyId, req.actor.userId);
+  }
+
+  async function assertExecutionAccess(req: Request, companyId: string, execution: any) {
+    if (req.actor.type === "agent") {
+      if (!req.actor.agentId || execution.agentId !== req.actor.agentId) {
+        throw forbidden("Agents can only access their own query executions");
+      }
+      if (!Array.isArray(execution.dataSourceIds)) {
+        throw forbidden("Query execution datasource scope cannot be verified");
+      }
+      const access = await dsService.getAgentDataSources(companyId, req.actor.agentId);
+      const allowed = new Set(access.effectiveDataSourceIds || []);
+      if (access.mode === "none" || execution.dataSourceIds.some((id: string) => !allowed.has(id))) {
+        throw forbidden("Query execution uses a datasource that is no longer assigned to this agent");
+      }
+      return;
+    }
+
+    const allowedIds = await allowedBoardExecutionSources(req, companyId);
+    if (allowedIds && (!Array.isArray(execution.dataSourceIds)
+      || execution.dataSourceIds.some((id: string) => !allowedIds.includes(id)))) {
+      throw forbidden("Query execution uses a datasource outside your current access");
     }
   }
 
@@ -499,6 +541,27 @@ export function dataSourceRoutes(db: Db) {
     res.json(ds);
   });
 
+  router.post(
+    "/companies/:companyId/data-sources/:id/tables/:tableId/mapping-review",
+    async (req: Request, res: Response) => {
+      const companyId = req.params.companyId as string;
+      await assertCanManageDataSources(req, companyId);
+      if (req.actor.type !== "board") {
+        throw forbidden("Only an authorized board operator can review semantic mappings");
+      }
+      const parsed = dataSourceMappingReviewRequestSchema.safeParse(req.body || {});
+      if (!parsed.success) throw badRequest("Semantic mapping review input is invalid", parsed.error.flatten());
+      const result = await mappingReviewService.review({
+        companyId,
+        dataSourceId: req.params.id as string,
+        tableId: req.params.tableId as string,
+        reviewerId: req.actor.userId || "local-board",
+        request: parsed.data,
+      });
+      res.json({ success: true, data: result });
+    },
+  );
+
   // 4. Delete data source
   router.delete("/companies/:companyId/data-sources/:id", async (req: Request, res: Response) => {
     const companyId = req.params.companyId as string;
@@ -609,6 +672,21 @@ export function dataSourceRoutes(db: Db) {
       const tableId = req.params.tableId as string;
       await assertCompanyAccess(req, companyId, { readOnly: true });
 
+      // The table row is the source of truth for authorization. A stale client
+      // can accidentally put a table UUID in the datasource path segment; do
+      // not authorize against that caller-supplied value or let it mask a valid
+      // table grant. The table still has to belong to this company.
+      const [tableOwner] = await db
+        .select({ dataSourceId: dataSourceTables.dataSourceId })
+        .from(dataSourceTables)
+        .where(and(
+          eq(dataSourceTables.id, tableId),
+          eq(dataSourceTables.companyId, companyId),
+        ))
+        .limit(1);
+      if (!tableOwner) throw notFound("Data source table not found");
+      const dataSourceId = tableOwner.dataSourceId;
+
       const agentId = req.actor.type === "agent" ? req.actor.agentId : null;
       let authzFingerprint: string;
       if (agentId) {
@@ -617,8 +695,8 @@ export function dataSourceRoutes(db: Db) {
           throw forbidden("Akses ditolak: Agen ini tidak memiliki izin akses ke data source apa pun");
         }
         const allowedIds = access.effectiveDataSourceIds || access.dataSourceIds || [];
-        if (access.mode === "selected" && !allowedIds.includes(id)) {
-          throw forbidden(`Akses ditolak: Data source '${id}' tidak ditugaskan ke agen ini`);
+        if (access.mode === "selected" && !allowedIds.includes(dataSourceId)) {
+          throw forbidden("Akses ditolak: Data source pemilik tabel ini tidak ditugaskan ke agen ini");
         }
         authzFingerprint = makeDataSourceCacheKey([
           "structured-query-acl", "agent", agentId, access.mode,
@@ -629,10 +707,10 @@ export function dataSourceRoutes(db: Db) {
         const hasSourceAccess = await rbac.canUserAccessDataSource(
           companyId,
           req.actor.userId,
-          id,
+          dataSourceId,
           req.actor.isInstanceAdmin,
         );
-        if (!hasSourceAccess) throw forbidden(`Akses ditolak: Data source '${id}' tidak ditugaskan ke pengguna ini`);
+        if (!hasSourceAccess) throw forbidden("Akses ditolak: Data source pemilik tabel ini tidak ditugaskan ke pengguna ini");
         const allowedIds = isCompanyAdmin
           ? ["*"]
           : await rbac.getAllowedDataSourcesForUser(companyId, req.actor.userId);
@@ -642,6 +720,13 @@ export function dataSourceRoutes(db: Db) {
         ]);
       } else {
         authzFingerprint = makeDataSourceCacheKey(["structured-query-acl", req.actor.type, "company-operator"]);
+      }
+
+      // Preserve the URL contract while tolerating the historical
+      // tableId-as-datasourceId client bug. Authorization above still uses the
+      // table's actual owning datasource.
+      if (id !== dataSourceId && id !== tableId) {
+        throw badRequest("The table does not belong to the datasource in the URL; refresh the datasource catalog and retry with its dataSourceId and tableId.");
       }
 
       const filter = req.body?.filter;
@@ -672,13 +757,13 @@ export function dataSourceRoutes(db: Db) {
             ...[...currentAllowedIds].sort(), "collections", ...[...(currentAccess.collectionIds || [])].sort(),
           ]);
           if (currentAccess.mode === "none"
-            || (currentAccess.mode === "selected" && !currentAllowedIds.includes(id))
+            || (currentAccess.mode === "selected" && !currentAllowedIds.includes(dataSourceId))
             || currentFingerprint !== authzFingerprint) {
             throw forbidden("Akses data source berubah saat query berlangsung; ulangi query setelah akses diperbarui.");
           }
         } else if (req.actor.type === "board" && req.actor.userId) {
           const stillHasSourceAccess = await rbac.canUserAccessDataSource(
-            companyId, req.actor.userId, id, req.actor.isInstanceAdmin,
+            companyId, req.actor.userId, dataSourceId, req.actor.isInstanceAdmin,
           );
           if (!stillHasSourceAccess) {
             throw forbidden("Akses data source berubah saat query berlangsung; ulangi query setelah akses diperbarui.");
@@ -694,6 +779,17 @@ export function dataSourceRoutes(db: Db) {
           if (currentFingerprint !== authzFingerprint) {
             throw forbidden("Akses data source berubah saat query berlangsung; ulangi query setelah akses diperbarui.");
           }
+        }
+        const [tableOwnerAfterQuery] = await db
+          .select({ dataSourceId: dataSourceTables.dataSourceId })
+          .from(dataSourceTables)
+          .where(and(
+            eq(dataSourceTables.id, tableId),
+            eq(dataSourceTables.companyId, companyId),
+          ))
+          .limit(1);
+        if (!tableOwnerAfterQuery || tableOwnerAfterQuery.dataSourceId !== dataSourceId) {
+          throw forbidden("Kepemilikan tabel berubah saat query berlangsung; refresh catalog dan ulangi query.");
         }
         if (!clientRequest.signal.aborted && !res.destroyed) res.json(result);
       } catch (err) {
@@ -885,22 +981,7 @@ export function dataSourceRoutes(db: Db) {
               ),
             );
 
-          const aliasTargets = new Map<string, Set<string>>();
-          const addTableAlias = (alias: string, physicalName: string) => {
-            const normalizedAlias = alias.trim().toLowerCase();
-            if (!normalizedAlias) return;
-            const targets = aliasTargets.get(normalizedAlias) ?? new Set<string>();
-            targets.add(physicalName);
-            aliasTargets.set(normalizedAlias, targets);
-          };
-          for (const t of allowedTablesResult) {
-            const identity = (t.semanticModel as any)?.clickhouseTable || clickhouseSourceTableName(t.id, t.tableName);
-            const sanitizedName = t.tableName.toLowerCase().replace(/[^a-z0-9_]/g, "_");
-            addTableAlias(t.tableName, String(identity));
-            addTableAlias(sanitizedName, String(identity));
-            addTableAlias(`ds_${sanitizedName}`, String(identity));
-            addTableAlias(String(identity), String(identity));
-          }
+          const collectionViewAliases: Array<{ viewName: string; physicalName?: string }> = [];
 
           // Also allow collection unified ClickHouse views
           if (access.collectionIds && access.collectionIds.length > 0) {
@@ -917,17 +998,20 @@ export function dataSourceRoutes(db: Db) {
               const views = (col.semanticProfile as any)?.unifiedClickhouseViews || [];
               for (const v of views) {
                 if (v.viewName && v.deploymentStatus === "deployed") {
-                  addTableAlias(v.viewName, v.viewName);
+                  collectionViewAliases.push({ viewName: String(v.viewName), physicalName: String(v.viewName) });
                 }
               }
             }
           }
-          const tableNameAliases = new Map<string, string>();
-          for (const [alias, targets] of aliasTargets) {
-            // Identical logical labels can exist in separate sources. Only
-            // resolve an alias automatically when it identifies one table.
-            if (targets.size === 1) tableNameAliases.set(alias, [...targets][0]!);
-          }
+          const tableNameAliases = buildClickhouseTableAliasMap(allowedTablesResult.map((table) => {
+            const semanticModel = (table.semanticModel || {}) as Record<string, unknown>;
+            return {
+              id: table.id,
+              tableName: table.tableName,
+              sourceSchema: typeof semanticModel.sourceSchema === "string" ? semanticModel.sourceSchema : "public",
+              clickhouseTable: typeof semanticModel.clickhouseTable === "string" ? semanticModel.clickhouseTable : undefined,
+            };
+          }), collectionViewAliases);
           const allowedTableNames = new Set(tableNameAliases.keys());
 
           function stripSqlCommentsAndStrings(sql: string): string {
@@ -1024,8 +1108,10 @@ export function dataSourceRoutes(db: Db) {
           );
 
           for (const m of rawTableMatches) {
-            const dbPrefix = m[2] ? m[1].toLowerCase() : null;
-            const tbl = (m[2] || m[1]).toLowerCase();
+            const qualifiedAlias = m[2] ? `${m[1]}.${m[2]}`.toLowerCase() : null;
+            const isAllowedQualifiedAlias = Boolean(qualifiedAlias && allowedTableNames.has(qualifiedAlias));
+            const dbPrefix = m[2] && !isAllowedQualifiedAlias ? m[1].toLowerCase() : null;
+            const tbl = isAllowedQualifiedAlias ? qualifiedAlias! : (m[2] || m[1]).toLowerCase();
 
             if (reservedKeywords.has(tbl)) continue;
             // System and information_schema introspection is read-only and always permitted
@@ -1196,10 +1282,12 @@ export function dataSourceRoutes(db: Db) {
     const mode = req.body?.mode || "all";
     const dataSourceIds = Array.isArray(req.body?.dataSourceIds) ? req.body.dataSourceIds : [];
     const collectionIds = Array.isArray(req.body?.collectionIds) ? req.body.collectionIds : [];
+    const orchestrationMode = req.body?.orchestrationMode;
     const result = await dsService.updateAgentDataSources(companyId, agentId, {
       mode,
       dataSourceIds,
       collectionIds,
+      orchestrationMode,
     });
     res.json(result);
   });
@@ -1208,7 +1296,7 @@ export function dataSourceRoutes(db: Db) {
   router.get("/agents/:agentId/data-sources", async (req: Request, res: Response) => {
     const agentId = req.params.agentId as string;
     const [agent] = await db.select({ companyId: agents.companyId }).from(agents).where(eq(agents.id, agentId)).limit(1);
-    if (!agent) throw notFound("Agent not found");
+    if (!agent || !hasCompanyAccess(req, agent.companyId)) throw notFound("Agent not found");
     await assertCompanyAccess(req, agent.companyId);
     const result = await dsService.getAgentDataSources(agent.companyId, agentId);
     res.json(result);
@@ -1217,15 +1305,17 @@ export function dataSourceRoutes(db: Db) {
   router.put("/agents/:agentId/data-sources", async (req: Request, res: Response) => {
     const agentId = req.params.agentId as string;
     const [agent] = await db.select({ companyId: agents.companyId }).from(agents).where(eq(agents.id, agentId)).limit(1);
-    if (!agent) throw notFound("Agent not found");
+    if (!agent || !hasCompanyAccess(req, agent.companyId)) throw notFound("Agent not found");
     await assertCompanyAccess(req, agent.companyId);
     const mode = req.body?.mode || "all";
     const dataSourceIds = Array.isArray(req.body?.dataSourceIds) ? req.body.dataSourceIds : [];
     const collectionIds = Array.isArray(req.body?.collectionIds) ? req.body.collectionIds : [];
+    const orchestrationMode = req.body?.orchestrationMode;
     const result = await dsService.updateAgentDataSources(agent.companyId, agentId, {
       mode,
       dataSourceIds,
       collectionIds,
+      orchestrationMode,
     });
     res.json(result);
   });
@@ -1485,6 +1575,275 @@ export function dataSourceRoutes(db: Db) {
 
       const responseMessage = await orchestrator.chat(companyId, sessionId, query, { dataSourceIds, authzFingerprint });
       res.json(responseMessage);
+    },
+  );
+
+  // 11. Orchestrator: Resolve effective orchestration state for an agent
+  router.get(
+    "/companies/:companyId/agents/:agentId/orchestration-state",
+    async (req: Request, res: Response) => {
+      const companyId = req.params.companyId as string;
+      const agentId = req.params.agentId as string;
+      await assertCompanyAccess(req, companyId);
+      const state = await orchestrator.resolveEffectiveOrchestrationState(companyId, agentId);
+      res.json(state);
+    },
+  );
+
+  // 12. Orchestrator: Fast-path query context resolution
+  router.post(
+    "/companies/:companyId/orchestrator/query-context",
+    async (req: Request, res: Response) => {
+      const companyId = req.params.companyId as string;
+      await assertCompanyAccess(req, companyId);
+      const query = req.body?.query as string;
+      if (!query || typeof query !== "string") {
+        throw badRequest("query is required");
+      }
+      let agentId: string | undefined;
+      if (req.actor.type === "agent") {
+        if (req.body?.agentId && req.body.agentId !== req.actor.agentId) {
+          throw forbidden("Agents can only resolve query context under their own identity");
+        }
+        agentId = req.actor.agentId;
+      } else {
+        agentId = req.body?.agentId;
+      }
+      const result = await orchestrator.resolveQueryContext(companyId, {
+        ...req.body,
+        agentId,
+      });
+      res.json(result);
+    },
+  );
+
+  // 13. Orchestrator: Create & execute coordinated query
+  router.post(
+    "/companies/:companyId/orchestrator/query-executions",
+    async (req: Request, res: Response) => {
+      const companyId = req.params.companyId as string;
+      await assertCompanyAccess(req, companyId);
+      const query = req.body?.query as string;
+      if (!query || typeof query !== "string") {
+        throw badRequest("query is required");
+      }
+      let agentId: string | undefined;
+      let runId = req.body?.runId;
+      if (req.actor.type === "agent") {
+        if (req.body?.agentId && req.body.agentId !== req.actor.agentId) {
+          throw forbidden("Agents can only execute queries under their own identity");
+        }
+        agentId = req.actor.agentId;
+        if (!runId && req.actor.runId) {
+          runId = req.actor.runId;
+        }
+      } else {
+        agentId = req.body?.agentId;
+      }
+      const execution = await orchestrator.createQueryExecution(companyId, {
+        ...req.body,
+        agentId,
+        runId,
+      });
+      res.status(201).json(execution);
+    },
+  );
+
+  // List bounded query history. Agents only see their own executions whose
+  // entire recorded datasource scope is still assigned to them.
+  router.get(
+    "/companies/:companyId/orchestrator/query-executions",
+    async (req: Request, res: Response) => {
+      const companyId = req.params.companyId as string;
+      await assertCompanyAccess(req, companyId);
+      const requestedDataSourceId = typeof req.query.dataSourceId === "string" ? req.query.dataSourceId : undefined;
+      const requestedAgentId = typeof req.query.agentId === "string" ? req.query.agentId : undefined;
+      const rawLimit = Number(req.query.limit);
+      const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(100, Math.floor(rawLimit)) : 50;
+      let agentId = requestedAgentId;
+      let allowedDataSourceIds: string[] | undefined;
+
+      if (req.actor.type === "agent") {
+        if (!req.actor.agentId || (requestedAgentId && requestedAgentId !== req.actor.agentId)) {
+          throw forbidden("Agents can only list their own query executions");
+        }
+        agentId = req.actor.agentId;
+        const access = await dsService.getAgentDataSources(companyId, req.actor.agentId);
+        allowedDataSourceIds = access.mode === "none" ? [] : access.effectiveDataSourceIds || [];
+        if (requestedDataSourceId && !allowedDataSourceIds.includes(requestedDataSourceId)) {
+          throw forbidden("Requested datasource is not assigned to this agent");
+        }
+      } else {
+        allowedDataSourceIds = await allowedBoardExecutionSources(req, companyId);
+        if (requestedDataSourceId) {
+          const source = await dsService.getById(companyId, requestedDataSourceId);
+          if (!source) throw notFound("Data source not found");
+          if (allowedDataSourceIds && !allowedDataSourceIds.includes(requestedDataSourceId)) {
+            throw forbidden("You do not have access to this datasource");
+          }
+        }
+      }
+
+      const executions = await orchestrator.listQueryExecutions(companyId, {
+        agentId,
+        dataSourceId: requestedDataSourceId,
+        allowedDataSourceIds,
+        limit,
+      });
+      res.json({ executions });
+    },
+  );
+
+  // 14. Orchestrator: Get execution status & result
+  router.get(
+    "/companies/:companyId/orchestrator/query-executions/:id",
+    async (req: Request, res: Response) => {
+      const companyId = req.params.companyId as string;
+      await assertCompanyAccess(req, companyId);
+      const execution = await orchestrator.getQueryExecution(companyId, req.params.id as string);
+      if (!execution) {
+        throw notFound("Query execution not found");
+      }
+      await assertExecutionAccess(req, companyId, execution);
+      res.json(execution);
+    },
+  );
+
+  // 15. Orchestrator: Cancel execution
+  router.post(
+    "/companies/:companyId/orchestrator/query-executions/:id/cancel",
+    async (req: Request, res: Response) => {
+      const companyId = req.params.companyId as string;
+      await assertCompanyAccess(req, companyId);
+      const executionId = req.params.id as string;
+      const execution = await orchestrator.getQueryExecution(companyId, executionId);
+      if (!execution) {
+        throw notFound("Query execution not found");
+      }
+      await assertExecutionAccess(req, companyId, execution);
+      const success = await orchestrator.cancelQueryExecution(companyId, executionId);
+      res.json({ ok: success });
+    },
+  );
+
+  // 16. Orchestrator: Submit feedback
+  router.post(
+    "/companies/:companyId/orchestrator/query-executions/:id/feedback",
+    async (req: Request, res: Response) => {
+      const companyId = req.params.companyId as string;
+      await assertCompanyAccess(req, companyId);
+      const verdict = req.body?.verdict;
+      if (verdict !== "correct" && verdict !== "needs_correction") {
+        throw badRequest("Verdict must be 'correct' or 'needs_correction'");
+      }
+      const execution = await orchestrator.getQueryExecution(companyId, req.params.id as string);
+      if (!execution) throw notFound("Query execution not found");
+      await assertExecutionAccess(req, companyId, execution);
+      const feedbackDataSourceId = typeof req.body?.dataSourceId === "string" ? req.body.dataSourceId : undefined;
+      if (feedbackDataSourceId && !execution.dataSourceIds?.includes(feedbackDataSourceId)) {
+        throw forbidden("Feedback datasource is not part of this query execution");
+      }
+      if (feedbackDataSourceId && req.actor.type === "board") {
+        const allowedIds = await allowedBoardExecutionSources(req, companyId);
+        if (allowedIds && !allowedIds.includes(feedbackDataSourceId)) {
+          throw forbidden("You do not have access to this datasource");
+        }
+      }
+      const actor = getActorInfo(req);
+      await orchestrator.submitQueryFeedback(
+        companyId,
+        req.params.id as string,
+        req.body,
+        actor.actorId || actor.agentId || "unknown",
+        actor.actorType,
+      );
+      res.json({ ok: true });
+    },
+  );
+
+  // 17. Orchestrator: List query experiences
+  router.get(
+    "/companies/:companyId/orchestrator/query-experiences",
+    async (req: Request, res: Response) => {
+      const companyId = req.params.companyId as string;
+      await assertCompanyAccess(req, companyId);
+      const status = req.query.status as any;
+      const requestedDataSourceId = typeof req.query.dataSourceId === "string" ? req.query.dataSourceId : undefined;
+      let allowedDataSourceIds: string[] | undefined;
+      if (req.actor.type === "agent" && req.actor.agentId) {
+        const access = await dsService.getAgentDataSources(companyId, req.actor.agentId);
+        if (access.mode === "none") {
+          return res.json({ experiences: [] });
+        }
+        allowedDataSourceIds = access.mode === "all" ? undefined : access.effectiveDataSourceIds || [];
+        if (requestedDataSourceId && allowedDataSourceIds && !allowedDataSourceIds.includes(requestedDataSourceId)) {
+          throw forbidden("Requested datasource is not assigned to this agent");
+        }
+      } else {
+        allowedDataSourceIds = await allowedBoardExecutionSources(req, companyId);
+        if (requestedDataSourceId) {
+          const source = await dsService.getById(companyId, requestedDataSourceId);
+          if (!source) throw notFound("Data source not found");
+          if (allowedDataSourceIds && !allowedDataSourceIds.includes(requestedDataSourceId)) {
+            throw forbidden("You do not have access to this datasource");
+          }
+        }
+      }
+      const experiences = await orchestrator.listExperiences(companyId, {
+        status: status ? status : undefined,
+        allowedDataSourceIds,
+        dataSourceId: requestedDataSourceId,
+      });
+      res.json({ experiences });
+    },
+  );
+
+  // 18. Orchestrator: Promote experience (reference_verified or user_approved)
+  router.post(
+    "/companies/:companyId/orchestrator/query-experiences/:id/promote",
+    async (req: Request, res: Response) => {
+      const companyId = req.params.companyId as string;
+      await assertCompanyAccess(req, companyId);
+      if (req.actor.type === "agent") {
+        throw forbidden("Agents cannot promote query experiences; only board operators or human reviewers can approve");
+      }
+      const dataSourceId = typeof req.body?.dataSourceId === "string" ? req.body.dataSourceId : undefined;
+      if (!dataSourceId) throw badRequest("dataSourceId is required to scope experience approval");
+      const source = await dsService.getById(companyId, dataSourceId);
+      if (!source) throw notFound("Data source not found");
+      const allowedDataSourceIds = await allowedBoardExecutionSources(req, companyId);
+      if (allowedDataSourceIds && !allowedDataSourceIds.includes(dataSourceId)) {
+        throw forbidden("You do not have access to this datasource");
+      }
+      const targetStatus = req.body?.targetStatus;
+      if (targetStatus !== "reference_verified" && targetStatus !== "user_approved") {
+        throw badRequest("targetStatus must be 'reference_verified' or 'user_approved'");
+      }
+      const visibleExperiences = await orchestrator.listExperiences(companyId, {
+        allowedDataSourceIds,
+        dataSourceId,
+      });
+      if (!visibleExperiences.some((experience) => experience.id === req.params.id)) {
+        throw notFound("Query experience not found for this datasource");
+      }
+      const suppliedEvidence = req.body?.evidence;
+      const evidence = suppliedEvidence && typeof suppliedEvidence === "object" && !Array.isArray(suppliedEvidence)
+        ? { ...suppliedEvidence }
+        : undefined;
+      if (!evidence || typeof evidence !== "object" || Object.keys(evidence).length === 0) {
+        throw badRequest("Promotion requires non-empty review evidence or verification suite results");
+      }
+      if (targetStatus === "user_approved" && !evidence.reviewedBy) {
+        const actor = getActorInfo(req);
+        evidence.reviewedBy = actor.actorId || req.actor.userId || "board-reviewer";
+      }
+      const updated = await orchestrator.promoteExperience(
+        companyId,
+        req.params.id as string,
+        targetStatus,
+        evidence,
+      );
+      res.json({ experience: updated });
     },
   );
 

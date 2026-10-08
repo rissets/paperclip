@@ -40,6 +40,7 @@ import { useCompany } from "@/context/CompanyContext";
 import { useUserRbac } from "@/hooks/useUserRbac";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { dataSourcesApi } from "@/api/data-sources";
+import { TemporalOverlapReviewPanel } from "@/components/data-sources/TemporalOverlapReviewPanel";
 import type {
   DataSourceCollection,
   DataSource,
@@ -59,7 +60,7 @@ export function DataSourceCollectionDetail() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
 
-  const [activeTab, setActiveTab] = useState<"sources" | "relationships" | "semantics" | "views">("sources");
+  const [activeTab, setActiveTab] = useState<"sources" | "relationships" | "semantics" | "views" | "temporal-overlaps">("sources");
   const [copiedViewIndex, setCopiedViewIndex] = useState<number | null>(null);
 
   // Upload modal & stepped ingestion state
@@ -202,6 +203,8 @@ export function DataSourceCollectionDetail() {
   const crossDocCorrelations: CrossDocumentCorrelation[] = profile?.crossDocumentCorrelations || [];
   const crossModalCorrelations: CrossModalCorrelation[] = profile?.crossModalCorrelations || [];
   const unifiedViews: UnifiedClickhouseView[] = profile?.unifiedClickhouseViews || [];
+  const temporalOverlapAnalysis = profile?.temporalOverlapAnalysis;
+  const temporalOverlapCount = temporalOverlapAnalysis?.findings.length ?? 0;
   const deployedUnifiedViewCount = unifiedViews.filter((view) => view.deploymentStatus === "deployed").length;
   const suggestedQueries: SuggestedQueryTemplate[] = profile?.suggestedQueries || [];
   const processingSources: DataSource[] = dataSourcesList.filter(
@@ -413,7 +416,22 @@ export function DataSourceCollectionDetail() {
           <FileCode className="h-4 w-4" />
           Unified SQL & ClickHouse ({deployedUnifiedViewCount})
         </button>
+        <button
+          onClick={() => setActiveTab("temporal-overlaps")}
+          className={`flex items-center gap-2 border-b-2 px-4 py-2.5 text-sm font-medium transition-colors ${
+            activeTab === "temporal-overlaps"
+              ? "border-primary text-primary"
+              : "border-transparent text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          <AlertCircle className="h-4 w-4" />
+          Temporal Overlap ({temporalOverlapCount})
+        </button>
       </div>
+
+      {activeTab === "temporal-overlaps" && (
+        <TemporalOverlapReviewPanel analysis={temporalOverlapAnalysis} dataSources={dataSourcesList} />
+      )}
 
       {/* Tab 1: Member Sources */}
       {activeTab === "sources" && (

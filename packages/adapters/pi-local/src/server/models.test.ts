@@ -38,13 +38,37 @@ describe("pi models", () => {
       },
     }));
     const piCommand = path.join(hostModelsDir, "pi-list-models");
-    await fs.writeFile(piCommand, "#!/bin/sh\nexit 0\n");
+    const discoveryMarker = path.join(hostModelsDir, "discovery-was-run");
+    await fs.writeFile(piCommand, `#!/bin/sh\ntouch '${discoveryMarker}'\nexit 0\n`);
+    await fs.chmod(piCommand, 0o755);
+    process.env.PAPERCLIP_PI_COMMAND = piCommand;
+    await expect(
+      ensurePiModelConfiguredAndAvailable({
+        model: "",
+        env: { PI_CODING_AGENT_DIR: hostModelsDir },
+      }),
+    ).resolves.toContainEqual(expect.objectContaining({ id: "rissets/llm-hd/qwen3.8-27b" }));
+    await expect(fs.stat(discoveryMarker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("uses Pi CLI discovery when the configured model is absent from provider metadata", async () => {
+    hostModelsDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pi-models-"));
+    await fs.writeFile(path.join(hostModelsDir, "models.json"), JSON.stringify({
+      providers: {
+        rissets: {
+          models: [{ id: "llm-hd/qwen3.8-27b" }],
+        },
+      },
+    }));
+    const piCommand = path.join(hostModelsDir, "pi-list-models");
+    await fs.writeFile(piCommand, "#!/bin/sh\nprintf 'provider  model\\nopenai  gpt-4o\\n'\n");
     await fs.chmod(piCommand, 0o755);
     process.env.PI_CODING_AGENT_DIR = hostModelsDir;
     process.env.PAPERCLIP_PI_COMMAND = piCommand;
+
     await expect(
-      ensurePiModelConfiguredAndAvailable({ model: "" }),
-    ).resolves.toContainEqual(expect.objectContaining({ id: "rissets/llm-hd/qwen3.8-27b" }));
+      ensurePiModelConfiguredAndAvailable({ model: "openai/gpt-4o" }),
+    ).resolves.toContainEqual(expect.objectContaining({ id: "openai/gpt-4o" }));
   });
 
   it("rejects when discovery cannot run for configured model", async () => {

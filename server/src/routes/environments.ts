@@ -54,7 +54,7 @@ import {
   type ReadyPluginWorkerRecovery,
 } from "../services/plugin-environment-driver.js";
 import { getConfiguredSecretProvider } from "../secrets/configured-provider.js";
-import { assertBoardOrgAccess, getActorInfo } from "./authz.js";
+import { assertBoardOrgAccess, assertCompanyAccess, getActorInfo } from "./authz.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import { environmentService } from "../services/environments.js";
 import { environmentRuntimeService } from "../services/environment-runtime.js";
@@ -358,8 +358,17 @@ export function environmentRoutes(
     throw forbidden("Instance admin access required");
   }
 
-  function assertCanReadInstanceEnvironments(req: Request) {
-    assertCanAccessInstanceEnvironments(req);
+  function assertCanReadInstanceEnvironments(req: Request, companyId?: string) {
+    if (req.actor.type !== "board") {
+      throw forbidden("Board access required");
+    }
+    if (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin) return;
+    if (companyId) {
+      assertCompanyAccess(req, companyId, { readOnly: true });
+      return;
+    }
+    if ((req.actor.companyIds ?? []).length > 0) return;
+    throw forbidden("Instance admin access required");
   }
 
   function assertCustomImageCompanyAccess(req: Request, companyId: string) {
@@ -700,7 +709,7 @@ export function environmentRoutes(
   }
 
   router.get("/companies/:companyId/environments", async (req, res) => {
-    assertCanReadInstanceEnvironments(req);
+    assertCanReadInstanceEnvironments(req, req.params.companyId as string);
     const rows = await svc.list({
       status: req.query.status as string | undefined,
       driver: req.query.driver as string | undefined,
@@ -722,7 +731,7 @@ export function environmentRoutes(
   });
 
   router.get("/companies/:companyId/environments/capabilities", async (req, res) => {
-    assertCanReadInstanceEnvironments(req);
+    assertCanReadInstanceEnvironments(req, req.params.companyId as string);
     const pluginDrivers = await listReadyPluginEnvironmentDrivers({
       db,
       workerManager: options.pluginWorkerManager,

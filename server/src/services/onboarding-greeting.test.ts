@@ -14,9 +14,7 @@ describe("renderOnboardingGreeting", () => {
     // No goal quote and no "give me one moment" — the agent is not about to run.
     expect(greeting).not.toContain("aiming for");
     expect(greeting).not.toContain("one moment");
-    // The "what would you like to do" ask moved to the opening card; the
-    // greeting only points at it.
-    expect(greeting).toContain("Pick how you'd like to start");
+    expect(greeting).toContain("Silakan tentukan cara Anda ingin memulai:");
   });
 
   it("drops the name gracefully when no agent name is set", async () => {

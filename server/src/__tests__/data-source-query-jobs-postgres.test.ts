@@ -206,6 +206,74 @@ if (!support.supported) console.warn(`Datasource query-job PostgreSQL integratio
     expect(query).toHaveBeenCalledTimes(1);
   }, 30_000);
 
+  it("authorizes a table against its owning datasource when a client puts the table ID in the datasource path", async () => {
+    const { companyId, dataSourceId } = await seed();
+    const tableId = randomUUID();
+    await db.insert(dataSourceTables).values({
+      id: tableId, companyId, dataSourceId, tableName: "orders", rowCount: 1, columnCount: 1,
+      schemaDefinition: [{ name: "amount", dataType: "number" }], semanticModel: { clickhouseTable: "ds_orders" },
+    });
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      req.actor = { type: "agent", source: "api_key", companyId, agentId: "agent-1", runId: "run-1" } as any;
+      next();
+    });
+    app.use("/api", dataSourceRoutes(db));
+    app.use(errorHandler);
+    vi.spyOn(DataSourcesService.prototype, "getAgentDataSources")
+      .mockResolvedValueOnce({ mode: "selected", dataSourceIds: [dataSourceId], effectiveDataSourceIds: [dataSourceId], collectionIds: [] } as any)
+      .mockResolvedValueOnce({ mode: "selected", dataSourceIds: [dataSourceId], effectiveDataSourceIds: [dataSourceId], collectionIds: [] } as any);
+    const query = vi.spyOn(DataSourcesService.prototype, "queryTable").mockResolvedValue({
+      tableId, tableName: "orders", columns: ["sum_amount"], rows: [{ sum_amount: 18 }], totalRows: 1,
+    } as any);
+
+    await request(app)
+      .post(`/api/companies/${companyId}/data-sources/${tableId}/tables/${tableId}/query`)
+      .send({ aggregate: { column: "amount", fn: "sum" } })
+      .expect(200)
+      .expect(({ body }) => expect(body.tableId).toBe(tableId));
+
+    expect(query).toHaveBeenCalledTimes(1);
+  }, 30_000);
+
+  it("denies a table whose owning datasource is unassigned even when the URL names an assigned source", async () => {
+    const { companyId, dataSourceId } = await seed();
+    const unassignedSourceId = randomUUID();
+    await db.insert(dataSources).values({
+      id: unassignedSourceId,
+      companyId,
+      name: "Unassigned source",
+      sourceType: "postgres",
+      status: "ready",
+    });
+    const tableId = randomUUID();
+    await db.insert(dataSourceTables).values({
+      id: tableId, companyId, dataSourceId: unassignedSourceId, tableName: "private_orders", rowCount: 1, columnCount: 1,
+      schemaDefinition: [{ name: "amount", dataType: "number" }], semanticModel: { clickhouseTable: "ds_private_orders" },
+    });
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      req.actor = { type: "agent", source: "api_key", companyId, agentId: "agent-1", runId: "run-1" } as any;
+      next();
+    });
+    app.use("/api", dataSourceRoutes(db));
+    app.use(errorHandler);
+    vi.spyOn(DataSourcesService.prototype, "getAgentDataSources").mockResolvedValue({
+      mode: "selected", dataSourceIds: [dataSourceId], effectiveDataSourceIds: [dataSourceId], collectionIds: [],
+    } as any);
+    const query = vi.spyOn(DataSourcesService.prototype, "queryTable");
+
+    await request(app)
+      .post(`/api/companies/${companyId}/data-sources/${dataSourceId}/tables/${tableId}/query`)
+      .send({ aggregate: { column: "amount", fn: "sum" } })
+      .expect(403)
+      .expect(({ body }) => expect(body.error).toContain("pemilik tabel ini tidak ditugaskan"));
+
+    expect(query).not.toHaveBeenCalled();
+  }, 30_000);
+
   it("rechecks agent authorization after RAG lookup before returning cached candidates", async () => {
     const { companyId, dataSourceId } = await seed();
     const app = express();

@@ -342,6 +342,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     ? context.issueIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     : [];
   const issueWorkMode = readPaperclipIssueWorkModeFromContext(context);
+  const datasourceOrchestrationState = parseObject(
+    parseObject((context as any)?.datasourceOrchestration).effectiveState,
+  );
+  env.PAPERCLIP_DATASOURCE_ORCHESTRATION_MODE =
+    datasourceOrchestrationState.enabled === true ? "auto" : "off";
     
   if (wakeTaskId) env.PAPERCLIP_TASK_ID = wakeTaskId;
   if (issueWorkMode) env.PAPERCLIP_ISSUE_WORK_MODE = issueWorkMode;
@@ -350,6 +355,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (approvalId) env.PAPERCLIP_APPROVAL_ID = approvalId;
   if (approvalStatus) env.PAPERCLIP_APPROVAL_STATUS = approvalStatus;
   if (linkedIssueIds.length > 0) env.PAPERCLIP_LINKED_ISSUE_IDS = linkedIssueIds.join(",");
+  const submittedAt = (context as any)?.submittedAt || (context as any)?.datasourceOrchestration?.resolvedContext?.submittedAt;
+  if (submittedAt) env.PAPERCLIP_SUBMITTED_AT = String(submittedAt);
+  const deadlineMs = (context as any)?.deadlineMs || (context as any)?.datasourceOrchestration?.resolvedContext?.deadlineMs;
+  if (deadlineMs) env.PAPERCLIP_DEADLINE_MS = String(deadlineMs);
   refreshPaperclipWorkspaceEnvForExecution({
     env,
     envConfig,
@@ -672,6 +681,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       notes.push(
         `Appended instructions + path directive to system prompt (relative references from ${instructionsFileDir}).`,
       );
+      if (typeof (context as any)?.paperclipDatasourceOrchestrationGuidance === "string" && (context as any).paperclipDatasourceOrchestrationGuidance.trim()) {
+        notes.push("Injected Enterprise Datasource Orchestration operational guidance into agent prompt.");
+      }
       return notes;
     })();
 
@@ -727,8 +739,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         sessionHandoffNote,
         attemptRenderedHeartbeatPrompt,
       ]);
+      const datasourceGuidance = typeof (context as any)?.paperclipDatasourceOrchestrationGuidance === "string"
+        ? (context as any).paperclipDatasourceOrchestrationGuidance.trim()
+        : "";
       const userPrompt = joinPromptSections([
         selectInitialCommunicationGuidance(context, { resumedSession: attemptResumedSession }),
+        datasourceGuidance,
         attemptBaseUserPrompt,
       ]);
       const promptMetrics = {

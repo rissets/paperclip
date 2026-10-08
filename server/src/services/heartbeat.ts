@@ -58,6 +58,8 @@ import {
 import { executionFailureRetryCount, executionRetryAttemptCount, accountingForScheduledRetry } from "./execution-recovery-attempt.js";
 import { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
 export { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
+import { EnterpriseOrchestratorService } from "./enterprise-orchestrator.js";
+import { buildDatasourceOrchestrationGuidance } from "./datasource-orchestration-guidance.js";
 import { buildExecutionContinuation, StaleExecutionContinuationError } from "./execution-continuation.js";
 import { renderPaperclipWakePrompt } from "@paperclipai/adapter-utils/server-utils";
 import { PROJECT_REPOSITORIES_DIR, readGitWorkspaceSnapshot, disposeGitWorkspaceSnapshot } from "@paperclipai/adapter-utils/git-workspace-sync";
@@ -14068,21 +14070,46 @@ export function heartbeatService(
     runId: string,
     companyId: string,
   ) {
-    const rows = await db
-      .select({
-        seq: heartbeatRunEvents.seq,
-        payload: heartbeatRunEvents.payload,
-      })
-      .from(heartbeatRunEvents)
-      .where(
-        and(
-          eq(heartbeatRunEvents.companyId, companyId),
-          eq(heartbeatRunEvents.runId, runId),
-          eq(heartbeatRunEvents.eventType, "item.completed"),
+    const [rows, recoveryBoundary] = await Promise.all([
+      db
+        .select({
+          seq: heartbeatRunEvents.seq,
+          payload: heartbeatRunEvents.payload,
+        })
+        .from(heartbeatRunEvents)
+        .where(
+          and(
+            eq(heartbeatRunEvents.companyId, companyId),
+            eq(heartbeatRunEvents.runId, runId),
+            eq(heartbeatRunEvents.eventType, "item.completed"),
+          ),
+        )
+        .orderBy(desc(heartbeatRunEvents.seq))
+        .limit(200),
+      db
+        .select({
+          seq: heartbeatRunEvents.seq,
+          payload: heartbeatRunEvents.payload,
+        })
+        .from(heartbeatRunEvents)
+        .where(
+          and(
+            eq(heartbeatRunEvents.companyId, companyId),
+            eq(heartbeatRunEvents.runId, runId),
+            eq(heartbeatRunEvents.eventType, "lifecycle"),
+          ),
+        )
+        .orderBy(heartbeatRunEvents.seq)
+        .limit(200)
+        .then(
+          (lifecycleRows) =>
+            lifecycleRows.find(
+              (row) =>
+                parseObject(row.payload).retryReasonCode ===
+                "semantic_result_missing",
+            )?.seq ?? null,
         ),
-      )
-      .orderBy(desc(heartbeatRunEvents.seq))
-      .limit(200);
+    ]);
     const candidates: Array<{
       seq: number;
       text: string;
@@ -14097,29 +14124,6 @@ export function heartbeatService(
       });
       if (candidate) candidates.push(candidate);
     }
-    const recoveryBoundary = await db
-      .select({
-        seq: heartbeatRunEvents.seq,
-        payload: heartbeatRunEvents.payload,
-      })
-      .from(heartbeatRunEvents)
-      .where(
-        and(
-          eq(heartbeatRunEvents.companyId, companyId),
-          eq(heartbeatRunEvents.runId, runId),
-          eq(heartbeatRunEvents.eventType, "lifecycle"),
-        ),
-      )
-      .orderBy(heartbeatRunEvents.seq)
-      .limit(200)
-      .then(
-        (lifecycleRows) =>
-          lifecycleRows.find(
-            (row) =>
-              parseObject(row.payload).retryReasonCode ===
-              "semantic_result_missing",
-          )?.seq ?? null,
-      );
     return selectHeartbeatRunFinalAgentMessage({
       candidates,
       semanticResultRecoveryAfterSeq: recoveryBoundary,
@@ -24937,6 +24941,45 @@ export function heartbeatService(
             if (managedMcpConfig) {
               adapterContext.paperclipManagedMcp = managedMcpConfig;
             }
+            // Enterprise Datasource Orchestration Preflight
+            try {
+              const orchestrator = new EnterpriseOrchestratorService(db);
+              const effectiveState = await orchestrator.resolveEffectiveOrchestrationState(agent.companyId, agent.id);
+              if (effectiveState.enabled) {
+                const candidateQuery = readNonEmptyString(context.prompt)
+                  || readNonEmptyString(context.userMessage)
+                  || readNonEmptyString(issueRef?.title ? `${issueRef.title}: ${issueRef.description || ""}` : undefined)
+                  || "";
+                if (candidateQuery) {
+                  const resolvedContext = await orchestrator.resolveQueryContext(agent.companyId, {
+                    query: candidateQuery,
+                    agentId: agent.id,
+                    runId: run.id,
+                    sessionId: readNonEmptyString(context.sessionId) || undefined,
+                    submittedAt: (run as any)?.createdAt || Date.now(),
+                  }, { effectiveState });
+                  adapterContext.datasourceOrchestration = {
+                    effectiveState,
+                    resolvedContext,
+                  };
+                  adapterContext.submittedAt = (run as any)?.createdAt ? new Date((run as any).createdAt).getTime() : Date.now();
+                  let guidance = buildDatasourceOrchestrationGuidance(resolvedContext) || "";
+                  if (!guidance && resolvedContext.lane === "fast_path_presentation_reuse") {
+                    guidance = `[Enterprise Datasource Presentation Reuse]\nTrace: ${resolvedContext.traceId}\nPrior Result Reference: ${resolvedContext.previousResultReference}\nReuse prior verified query results. Do not re-query or re-scan data sources.`;
+                  } else if (!guidance && resolvedContext.lane === "fast_path_template") {
+                    guidance = `[Enterprise Datasource Template Match]\nTrace: ${resolvedContext.traceId}\nMatched Template ID: ${resolvedContext.candidateTemplateId}\nUse Enterprise Orchestrator to execute this verified template with the requested parameters.`;
+                  }
+                  if (guidance) {
+                    adapterContext.paperclipDatasourceOrchestrationGuidance = guidance;
+                    if (Array.isArray((runtimeConfig as any).notes)) {
+                      (runtimeConfig as any).notes.push(guidance);
+                    }
+                  }
+                }
+              }
+            } catch (err) {
+              logger.warn({ err, companyId: agent.companyId, agentId: agent.id }, "Enterprise datasource orchestration preflight failed");
+            }
             const guardedDispatch =
               await dispatchResolvedInteractionContinuationWithAtomicGate(
                 (markDispatchStarted) => {
@@ -25609,14 +25652,6 @@ export function heartbeatService(
             return;
           }
         }
-        if (persistedRun) {
-          persistedRun =
-            (await classifyAndPersistRunLiveness(
-              persistedRun,
-              persistedResultJson,
-            )) ?? persistedRun;
-        }
-
         await setWakeupStatus(
           run.wakeupRequestId,
           outcome === "succeeded" ? "completed" : status,
@@ -25639,60 +25674,43 @@ export function heartbeatService(
               ...(readRunCancellation(finalizedRun.resultJson) ? { cancellation: readRunCancellation(finalizedRun.resultJson) } : {}),
             },
           });
-          try {
-            await completeSkillTestRunForHeartbeatOutcome({
-              run: finalizedRun,
-              issueId,
-              issueWorkMode: issueRef?.workMode ?? null,
-              outcome,
-              error: runErrorMessage,
-            });
-          } catch (err) {
-            logger.warn(
-              { err, runId: finalizedRun.id, issueId },
-              "failed to complete skill test run after heartbeat finalization",
-            );
-            await onLog(
-              "stderr",
-              `[paperclip] Failed to complete skill test run: ${err instanceof Error ? err.message : String(err)}\n`,
-            );
-          }
-          const livenessRun = finalizedRun;
-          await refreshContinuationSummaryForRun(livenessRun, agent);
+          let livenessRun = finalizedRun;
           const skipRunIssueComment =
             parseObject(livenessRun.contextSnapshot).skipIssueComment === true;
           let resolvedPresentationDecision: RunPresentationDecision | null =
             null;
           try {
-            const existingRunComment = issueId
-              ? await findRunIssueComment(
-                  livenessRun.id,
-                  livenessRun.companyId,
-                  issueId,
-                  persistedResultJson,
-                )
-              : null;
-            const finalAgentMessage =
-              await findLatestCompletedFinalAgentMessage(
-                livenessRun.id,
-                livenessRun.companyId,
-              );
             const externalChatPresentationCandidate =
               isExternalChatPresentationContext(livenessRun.contextSnapshot) ||
               parseObject(livenessRun.contextSnapshot).source === "tool_action_review" ||
               String(parseObject(livenessRun.contextSnapshot).source ?? "").startsWith("issue.comment") ||
               parseObject(livenessRun.contextSnapshot).source === "issue.update";
-            const externalChatPresentationAuthorization =
-              issueId && externalChatPresentationCandidate
-                ? await resolveChatRunPresentationAuthorizationReason(db, {
-                    companyId: livenessRun.companyId,
-                    issueId,
-                    runId: livenessRun.id,
-                  })
-                : null;
+            const [existingRunComment, finalAgentMessage, presentationAuthorizationReason] =
+              await Promise.all([
+                issueId
+                  ? findRunIssueComment(
+                      livenessRun.id,
+                      livenessRun.companyId,
+                      issueId,
+                      persistedResultJson,
+                    )
+                  : Promise.resolve(null),
+                findLatestCompletedFinalAgentMessage(
+                  livenessRun.id,
+                  livenessRun.companyId,
+                ),
+                issueId && externalChatPresentationCandidate
+                  ? resolveChatRunPresentationAuthorizationReason(db, {
+                      companyId: livenessRun.companyId,
+                      issueId,
+                      runId: livenessRun.id,
+                    })
+                  : Promise.resolve(null),
+              ]);
             const externalChatPresentationContext = isExternalChatPresentationContext(
               livenessRun.contextSnapshot,
-              externalChatPresentationAuthorization === CHAT_RUN_PRESENTATION_AUTHORIZATION_REASON,
+              externalChatPresentationCandidate &&
+                presentationAuthorizationReason === CHAT_RUN_PRESENTATION_AUTHORIZATION_REASON,
             );
             const resolved = resolveHeartbeatRunResponse({
               resultJson: persistedResultJson,
@@ -25705,11 +25723,11 @@ export function heartbeatService(
               externalChatReviewResponseSummaryAuthorized:
                 persistedResultJson?.finalizationReasonCode ===
                   "governed_response_waiting" &&
-                externalChatPresentationAuthorization ===
+                presentationAuthorizationReason ===
                   CHAT_RUN_PRESENTATION_AUTHORIZATION_REASON,
               externalChatResponseWakeSummaryAuthorized:
                 Boolean(adapterResult.nativeFinalization) &&
-                externalChatPresentationAuthorization ===
+                presentationAuthorizationReason ===
                   CHAT_RUN_PRESENTATION_AUTHORIZATION_REASON,
             });
             let presentationDecision: RunPresentationDecision =
@@ -25726,12 +25744,6 @@ export function heartbeatService(
               // semantic results. For an exactly bound external-chat run,
               // authorize that narrow presentation as the provider reply;
               // ordinary internal runs retain the private default.
-              const presentationAuthorizationReason =
-                await resolveChatRunPresentationAuthorizationReason(db, {
-                  companyId: livenessRun.companyId,
-                  issueId,
-                  runId: livenessRun.id,
-                });
               const comment = await issuesSvc.addComment(
                 issueId,
                 resolved.text,
@@ -25803,6 +25815,33 @@ export function heartbeatService(
               `[paperclip] Failed to resolve run presentation: ${err instanceof Error ? err.message : String(err)}\n`,
             );
           }
+          // Publish the user-visible reply before independent bookkeeping. The
+          // liveness classifier and continuation summary perform additional DB
+          // reads/writes and used to sit in front of comment materialization,
+          // making a completed response look idle in the issue chat.
+          livenessRun = (await classifyAndPersistRunLiveness(
+            livenessRun,
+            persistedResultJson,
+          )) ?? livenessRun;
+          try {
+            await completeSkillTestRunForHeartbeatOutcome({
+              run: livenessRun,
+              issueId,
+              issueWorkMode: issueRef?.workMode ?? null,
+              outcome,
+              error: runErrorMessage,
+            });
+          } catch (err) {
+            logger.warn(
+              { err, runId: livenessRun.id, issueId },
+              "failed to complete skill test run after heartbeat finalization",
+            );
+            await onLog(
+              "stderr",
+              `[paperclip] Failed to complete skill test run: ${err instanceof Error ? err.message : String(err)}\n`,
+            );
+          }
+          await refreshContinuationSummaryForRun(livenessRun, agent);
           if (outcome === "failed" && isMaxTurnExhaustionRun(livenessRun)) {
             const policy = parseMaxTurnContinuationPolicy(agent);
             if (policy.enabled && policy.maxAttempts > 0) {

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import postgres from "postgres";
 import mysql from "mysql2/promise";
 import { init as initializeSqlParser, parse as parseSql } from "@guanmingchiu/sqlparser-ts";
@@ -18,7 +19,9 @@ import type {
   NestedSemanticDimension,
   ClickhouseSchemaDefinition,
   SuggestedQueryTemplate,
+  TableIndexDefinition,
 } from "@paperclipai/shared";
+import { isSensitiveDatabaseSchemaColumn } from "./ai-reasoning.js";
 
 export interface InspectedTableResult {
   tableName: string;
@@ -129,7 +132,7 @@ export class DatabaseIntegrationService {
     const start = Date.now();
     try {
       if (config.type === "postgres") {
-        const sql = this.getPostgresSql(config, 1, 5);
+        const sql = this.createSinglePostgresConnection(config, 5);
 
         const rows = await sql`SELECT 1 as connected, current_database() as db, version() as version`;
         const latencyMs = Date.now() - start;
@@ -217,13 +220,16 @@ export class DatabaseIntegrationService {
           tc.table_name as source_table,
           kcu.column_name as source_column,
           ccu.table_name AS target_table,
-          ccu.column_name AS target_column
+          ccu.column_name AS target_column,
+          tc.table_schema AS source_schema,
+          ccu.table_schema AS target_schema
         FROM information_schema.table_constraints AS tc
         JOIN information_schema.key_column_usage AS kcu
           ON tc.constraint_name = kcu.constraint_name
           AND tc.table_schema = kcu.table_schema
         JOIN information_schema.constraint_column_usage AS ccu
           ON ccu.constraint_name = tc.constraint_name
+          AND ccu.constraint_schema = tc.table_schema
         WHERE tc.constraint_type = 'FOREIGN KEY'
           AND tc.table_schema NOT IN ('information_schema', 'pg_catalog')
       `;
@@ -233,6 +239,8 @@ export class DatabaseIntegrationService {
         sourceColumn: r.source_column,
         targetTable: r.target_table,
         targetColumn: r.target_column,
+        sourceSchema: r.source_schema,
+        targetSchema: r.target_schema,
         relationType: "many_to_one",
       }));
 
@@ -242,11 +250,12 @@ export class DatabaseIntegrationService {
         const schema = t.table_schema;
         const tableName = t.table_name;
 
-        // Get column details
+        // Get column details with native type
         const colsQuery = await sql`
           SELECT
             c.column_name,
             c.data_type,
+            c.udt_name,
             c.is_nullable,
             c.column_default,
             (
@@ -264,32 +273,98 @@ export class DatabaseIntegrationService {
           ORDER BY c.ordinal_position
         `;
 
+        // Extract table indexes with columns, order, expressions, index type, and capability failure
+        let tableIndexes: TableIndexDefinition[] = [];
+        try {
+          const idxQuery = await sql`
+            SELECT
+              i.relname as index_name,
+              ix.indisunique as is_unique,
+              ix.indisprimary as is_primary,
+              pg_get_expr(ix.indpred, ix.indrelid) as predicate,
+              pg_get_indexdef(ix.indexrelid) as index_def,
+              am.amname as index_type,
+              ARRAY(
+                SELECT pg_get_indexdef(ix.indexrelid, k.n, true)
+                FROM generate_subscripts(ix.indkey, 1) as k(n)
+              ) as index_columns
+            FROM pg_index ix
+            JOIN pg_class t ON t.oid = ix.indrelid
+            JOIN pg_class i ON i.oid = ix.indexrelid
+            JOIN pg_am am ON am.oid = i.relam
+            JOIN pg_namespace n ON n.oid = t.relnamespace
+            WHERE n.nspname = ${schema} AND t.relname = ${tableName}
+          `;
+          tableIndexes = idxQuery.map((row: any) => {
+            const rawCols = Array.isArray(row.index_columns) ? row.index_columns.map(String) : [];
+            const cleanCols = rawCols.map((c: string) => c.replace(/^"|"$/g, ""));
+            const hasExpression = rawCols.some((c: string) => c.includes("(") || c.includes(" ") || c.includes("::"));
+            return {
+              name: String(row.index_name),
+              columns: cleanCols,
+              isUnique: Boolean(row.is_unique),
+              isPrimary: Boolean(row.is_primary),
+              predicate: row.predicate ? String(row.predicate) : null,
+              expression: hasExpression ? rawCols.join(", ") : null,
+              indexType: String(row.index_type || "btree"),
+              capabilityFailure: null,
+            };
+          });
+        } catch (idxErr: any) {
+          // Record capability failure gracefully
+          tableIndexes = [
+            {
+              name: `${tableName}_idx_fallback`,
+              columns: [],
+              isUnique: false,
+              capabilityFailure: idxErr?.message || "Index inspection capability restricted",
+            },
+          ];
+        }
+
         // Estimate row count & samples with error resilience
         let totalRows = 0;
+        let rowCountEstimated = false;
         let sampleRows: any[] = [];
         try {
-          const countRes = await sql`
-            SELECT count(1)::int as total FROM ${sql(`${schema}.${tableName}`)}
+          const approxRes = await sql`
+            SELECT c.reltuples::bigint as approx_total
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = ${schema} AND c.relname = ${tableName}
           `;
-          totalRows = Number(countRes[0]?.total ?? 0);
+          const approx = Number(approxRes[0]?.approx_total ?? -1);
+          if (approx >= 0) {
+            totalRows = approx;
+            rowCountEstimated = true;
+          } else {
+            const countRes = await sql`
+              SELECT count(1)::int as total FROM ${sql(`${schema}.${tableName}`)}
+            `;
+            totalRows = Number(countRes[0]?.total ?? 0);
+          }
 
           sampleRows = await sql`
             SELECT * FROM ${sql(`${schema}.${tableName}`)} LIMIT 10
           `;
+          if (rowCountEstimated && totalRows === 0 && sampleRows.length > 0) {
+            totalRows = sampleRows.length;
+          }
         } catch (err: any) {
           console.warn(`[database-integration] Could not query rows for table ${tableName}:`, databaseConnectionErrorMessage(err, config));
         }
 
         // Match table foreign keys
         const tableRelations = allRelations.filter(
-          (r) => r.sourceTable === tableName || r.targetTable === tableName,
+          (r) => (r.sourceTable === tableName && r.sourceSchema === schema)
+            || (r.targetTable === tableName && r.targetSchema === schema),
         );
 
         const columnProfiles: ColumnDefinition[] = colsQuery.map((col: any) => {
           const colName = col.column_name;
           const isPk = Boolean(col.is_pk);
           const colFk = allRelations.find(
-            (r) => r.sourceTable === tableName && r.sourceColumn === colName,
+            (r) => r.sourceTable === tableName && r.sourceSchema === schema && r.sourceColumn === colName,
           );
 
           const samples = sampleRows.map((r: any) => r[colName] ?? null);
@@ -316,6 +391,7 @@ export class DatabaseIntegrationService {
           return {
             name: colName,
             dataType: inspection.dataType,
+            nativeType: col.udt_name || col.data_type,
             nullCount,
             nullRatio,
             distinctCount,
@@ -329,7 +405,7 @@ export class DatabaseIntegrationService {
             isPrimaryKey: isPk,
             isForeignKey: Boolean(colFk),
             foreignKeyTarget: colFk
-              ? { table: colFk.targetTable, column: colFk.targetColumn }
+              ? { schema: colFk.targetSchema, table: colFk.targetTable, column: colFk.targetColumn }
               : undefined,
             isJson: inspection.isJson,
             jsonStructure: inspection.jsonStructure,
@@ -340,6 +416,9 @@ export class DatabaseIntegrationService {
         // Generate semantic model
         const primaryKey = columnProfiles.find((c) => c.isPrimaryKey)?.name;
         const semanticModel = this.buildSemanticModel(tableName, columnProfiles, tableRelations, primaryKey);
+        semanticModel.indexes = tableIndexes;
+        semanticModel.rowCountEstimated = rowCountEstimated;
+        semanticModel.sourceSchema = schema;
 
         results.push({
           tableName,
@@ -350,6 +429,8 @@ export class DatabaseIntegrationService {
           semanticModel,
         });
       }
+
+      synthesizeDatabaseRelationsAndComponents(results, allRelations);
 
       await sql.end({ timeout: 2 });
       return results;
@@ -401,6 +482,8 @@ export class DatabaseIntegrationService {
         sourceColumn: (r.source_column || r.SOURCE_COLUMN || "").toString(),
         targetTable: (r.target_table || r.TARGET_TABLE || "").toString(),
         targetColumn: (r.target_column || r.TARGET_COLUMN || "").toString(),
+        sourceSchema: config.database,
+        targetSchema: config.database,
         relationType: "many_to_one",
       }));
 
@@ -410,11 +493,12 @@ export class DatabaseIntegrationService {
         const tableName = (t.table_name || t.TABLE_NAME || "").toString();
         if (!tableName) continue;
 
-        // Get Columns
+        // Get Columns with native type
         const [colRows] = await conn.query(`
           SELECT
             column_name,
             data_type,
+            column_type,
             is_nullable,
             column_key,
             column_default
@@ -423,8 +507,39 @@ export class DatabaseIntegrationService {
           ORDER BY ordinal_position
         `, [config.database, tableName]);
 
+        // Extract table indexes
+        let tableIndexes: TableIndexDefinition[] = [];
+        try {
+          const [indexRows] = await conn.query(`
+            SHOW INDEX FROM \`${config.database}\`.\`${tableName}\`
+          `);
+          const indexMap = new Map<string, { columns: string[]; isUnique: boolean; isPrimary: boolean }>();
+          for (const row of (indexRows as any[])) {
+            const keyName = (row.Key_name || row.KEY_NAME || "").toString();
+            const colName = (row.Column_name || row.COLUMN_NAME || "").toString();
+            const nonUnique = Number(row.Non_unique ?? row.NON_UNIQUE ?? 1);
+            if (!indexMap.has(keyName)) {
+              indexMap.set(keyName, {
+                columns: [],
+                isUnique: nonUnique === 0,
+                isPrimary: keyName === "PRIMARY",
+              });
+            }
+            indexMap.get(keyName)!.columns.push(colName);
+          }
+          tableIndexes = Array.from(indexMap.entries()).map(([name, data]) => ({
+            name,
+            columns: data.columns,
+            isUnique: data.isUnique,
+            isPrimary: data.isPrimary,
+          }));
+        } catch {
+          // Permissive fallback
+        }
+
         // Row count from information_schema metadata & samples with error resilience
         let totalRows = Number(t.table_rows ?? t.TABLE_ROWS ?? 0);
+        const rowCountEstimated = true;
         let sampleRows: any[] = [];
         try {
           const samplePromise = conn.query(
@@ -443,16 +558,18 @@ export class DatabaseIntegrationService {
         }
 
         const tableRelations = allRelations.filter(
-          (r) => r.sourceTable === tableName || r.targetTable === tableName,
+          (r) => (r.sourceTable === tableName && r.sourceSchema === config.database)
+            || (r.targetTable === tableName && r.targetSchema === config.database),
         );
 
         const columnProfiles: ColumnDefinition[] = (colRows as any[]).map((col: any) => {
           const colName = (col.column_name || col.COLUMN_NAME || "").toString();
           const colKey = (col.column_key || col.COLUMN_KEY || "").toString();
           const rawDataType = (col.data_type || col.DATA_TYPE || "").toString();
+          const nativeType = (col.column_type || col.COLUMN_TYPE || rawDataType).toString();
           const isPk = colKey === "PRI";
           const colFk = allRelations.find(
-            (r) => r.sourceTable === tableName && r.sourceColumn === colName,
+            (r) => r.sourceTable === tableName && r.sourceSchema === config.database && r.sourceColumn === colName,
           );
 
           const samples = sampleRows.map((r: any) => r[colName] ?? null);
@@ -479,6 +596,7 @@ export class DatabaseIntegrationService {
           return {
             name: colName,
             dataType: inspection.dataType,
+            nativeType,
             nullCount,
             nullRatio,
             distinctCount,
@@ -492,7 +610,7 @@ export class DatabaseIntegrationService {
             isPrimaryKey: isPk,
             isForeignKey: Boolean(colFk),
             foreignKeyTarget: colFk
-              ? { table: colFk.targetTable, column: colFk.targetColumn }
+              ? { schema: colFk.targetSchema, table: colFk.targetTable, column: colFk.targetColumn }
               : undefined,
             isJson: inspection.isJson,
             jsonStructure: inspection.jsonStructure,
@@ -502,6 +620,9 @@ export class DatabaseIntegrationService {
 
         const primaryKey = columnProfiles.find((c) => c.isPrimaryKey)?.name;
         const semanticModel = this.buildSemanticModel(tableName, columnProfiles, tableRelations, primaryKey);
+        semanticModel.indexes = tableIndexes;
+        semanticModel.rowCountEstimated = rowCountEstimated;
+        semanticModel.sourceSchema = config.database;
 
         results.push({
           tableName,
@@ -512,6 +633,8 @@ export class DatabaseIntegrationService {
           semanticModel,
         });
       }
+
+      synthesizeDatabaseRelationsAndComponents(results, allRelations);
 
       await conn.end();
       return results;
@@ -554,7 +677,7 @@ export class DatabaseIntegrationService {
     throwIfExternalQueryAborted(signal);
 
     if (config.type === "postgres") {
-      const sql = this.getPostgresSql(config, 1, 5);
+      const sql = this.getPostgresSql(config, 5, 5);
       let activeQuery: { cancel(): void } | undefined;
       const cancelActiveQuery = () => activeQuery?.cancel();
       signal?.addEventListener("abort", cancelActiveQuery, { once: true });
@@ -594,16 +717,23 @@ export class DatabaseIntegrationService {
       } finally {
         signal?.removeEventListener("abort", cancelActiveQuery);
         activeQuery = undefined;
-        await sql.end({ timeout: 1 }).catch(() => {});
       }
     } else {
-      const conn = await this.createMysqlConnection(config, 8000);
-      const cancelQuery = () => conn.destroy();
+      const pool = this.getMysqlPool(config, 5, 8000);
+      const conn = await pool.getConnection();
+      let isDestroyed = false;
+      const cancelQuery = () => {
+        isDestroyed = true;
+        conn.destroy();
+      };
       signal?.addEventListener("abort", cancelQuery, { once: true });
 
       try {
         throwIfExternalQueryAborted(signal);
         // Fail closed if the selected engine cannot enforce its execution deadline.
+        await conn.query("SET SESSION TRANSACTION READ ONLY").catch(() => {
+          return conn.query("SET TRANSACTION READ ONLY").catch(() => {});
+        });
         if (config.type === "mariadb") {
           await conn.query("SET SESSION max_statement_time = ?", [requestedTimeoutMs / 1000]);
         } else {
@@ -612,7 +742,6 @@ export class DatabaseIntegrationService {
         const [rows, fields] = await conn.query(finalSql, params as any[]);
         throwIfExternalQueryAborted(signal);
         const executionTimeMs = Date.now() - start;
-        await conn.end();
 
         const resultRows = Array.isArray(rows) ? (rows as any[]) : [];
         const columns = Array.isArray(fields) ? fields.map((f: any) => f.name) : (resultRows.length > 0 ? Object.keys(resultRows[0]) : []);
@@ -626,12 +755,77 @@ export class DatabaseIntegrationService {
         };
       } catch (err: any) {
         if (signal?.aborted) throw createExternalQueryAbortError();
-        await conn.end().catch(() => {});
-        throw new Error(`MariaDB/MySQL execution error: ${databaseConnectionErrorMessage(err, config)}`);
+        const errMsg = databaseConnectionErrorMessage(err, config);
+        if (/max_statement_time|max_execution_time|interrupted/i.test(errMsg)) {
+          isDestroyed = true;
+          try { conn.destroy(); } catch {}
+        }
+        throw new Error(`MariaDB/MySQL execution error: ${errMsg}`);
       } finally {
         signal?.removeEventListener("abort", cancelQuery);
+        if (!isDestroyed) {
+          conn.release();
+        }
       }
     }
+  }
+
+  /**
+   * Run a small, read-only observation requested by the onboarding mapper.
+   * Identifiers must come from the already-inspected catalog; the model never
+   * supplies SQL, and PII-like columns are not fetched for semantic samples.
+   */
+  async observeExternalTableColumns(
+    config: DatabaseConnectionConfig,
+    input: {
+      schemaName: string;
+      tableName: string;
+      columns: string[];
+      signal?: AbortSignal;
+    },
+  ): Promise<{ valuesByColumn: Record<string, unknown[]>; rowCount: number; executionTimeMs: number }> {
+    if (!["postgres", "mysql", "mariadb"].includes(config.type)) {
+      throw new Error("Bounded schema observations support PostgreSQL, MySQL, and MariaDB only");
+    }
+    if (!input.schemaName.trim() || !input.tableName.trim()) {
+      throw new Error("A schema-qualified table is required for onboarding observations");
+    }
+    if (!Array.isArray(input.columns) || input.columns.length < 1 || input.columns.length > 4) {
+      throw new Error("An onboarding observation must request between one and four columns");
+    }
+    if (new Set(input.columns).size !== input.columns.length
+      || input.columns.some((column) => !column.trim() || column.length > 255)) {
+      throw new Error("Onboarding observation column identities are invalid");
+    }
+    if (config.allowedTables?.length
+      && !config.allowedTables.some((name) => name.toLowerCase() === input.tableName.toLowerCase())) {
+      throw new Error("Onboarding observation table is outside the configured table allowlist");
+    }
+    if (config.allowedSchemas?.length
+      && !config.allowedSchemas.some((name) => name.toLowerCase() === input.schemaName.toLowerCase())) {
+      throw new Error("Onboarding observation schema is outside the configured schema allowlist");
+    }
+    if (input.columns.some(isSensitiveDatabaseSchemaColumn)) {
+      throw new Error("Sensitive columns cannot be queried for onboarding semantic observations");
+    }
+
+    const quote = config.type === "postgres" ? '"' : "`";
+    const quoteIdentifier = (name: string) => `${quote}${name.replaceAll(quote, `${quote}${quote}`)}${quote}`;
+    const table = `${quoteIdentifier(input.schemaName)}.${quoteIdentifier(input.tableName)}`;
+    const projection = input.columns.map(quoteIdentifier).join(", ");
+    const result = await this.queryDatabase(
+      config,
+      `SELECT ${projection} FROM ${table} LIMIT 8`,
+      8,
+      [],
+      input.signal,
+      { statementTimeoutMs: 5_000 },
+    );
+    const valuesByColumn = Object.fromEntries(input.columns.map((column) => [
+      column,
+      result.rows.map((row) => (row as Record<string, unknown>)[column] ?? null),
+    ]));
+    return { valuesByColumn, rowCount: result.rowCount, executionTimeMs: result.executionTimeMs };
   }
 
   /** Read one bounded keyset page for a configured source-table snapshot. */
@@ -1430,12 +1624,26 @@ export class DatabaseIntegrationService {
     };
   }
 
-  private async createMysqlConnection(config: DatabaseConnectionConfig, timeout = 8000): Promise<mysql.Connection> {
-    try { return await mysql.createConnection(this.getMysqlConfig(config, timeout)); }
-    catch (error) { throw new Error(databaseConnectionErrorMessage(error, config)); }
+  private postgresPools = new Map<string, { sql: ReturnType<typeof postgres>; credentialHash: string; lastUsedAt: number; max: number }>();
+  private mysqlPools = new Map<string, { pool: mysql.Pool; credentialHash: string; lastUsedAt: number }>();
+
+  getPoolKey(config: DatabaseConnectionConfig): string {
+    const parts = [
+      config.type,
+      config.host,
+      String(config.port),
+      config.database,
+      config.username,
+      String(Boolean(config.ssl)),
+    ];
+    return parts.join(":");
   }
 
-  private getPostgresSql(config: DatabaseConnectionConfig, max = 1, timeout = 5) {
+  getCredentialHash(config: DatabaseConnectionConfig): string {
+    return createHash("sha256").update(config.password || "").digest("hex");
+  }
+
+  private createSinglePostgresConnection(config: DatabaseConnectionConfig, timeout = 5) {
     const opts: any = {
       host: config.host,
       port: config.port,
@@ -1443,12 +1651,105 @@ export class DatabaseIntegrationService {
       username: config.username,
       ssl: config.ssl ? "require" : false,
       connect_timeout: timeout,
-      max,
+      max: 1,
     };
     if (config.password && config.password.length > 0) {
       opts.password = config.password;
     }
     return postgres(opts);
+  }
+
+  getPostgresSql(config: DatabaseConnectionConfig, max = 5, timeout = 5) {
+    const key = this.getPoolKey(config);
+    const currentHash = this.getCredentialHash(config);
+    const cached = this.postgresPools.get(key);
+    if (cached) {
+      if (cached.credentialHash !== currentHash) {
+        // Credential rotated - invalidate old pool
+        cached.sql.end({ timeout: 1 }).catch(() => {});
+        this.postgresPools.delete(key);
+      } else {
+        cached.lastUsedAt = Date.now();
+        return cached.sql;
+      }
+    }
+
+    const boundedMax = Math.min(Math.max(1, max), 10);
+    const opts: any = {
+      host: config.host,
+      port: config.port,
+      database: config.database,
+      username: config.username,
+      ssl: config.ssl ? "require" : false,
+      connect_timeout: timeout,
+      max: boundedMax,
+    };
+    if (config.password && config.password.length > 0) {
+      opts.password = config.password;
+    }
+    const sql = postgres(opts);
+    this.postgresPools.set(key, { sql, credentialHash: currentHash, lastUsedAt: Date.now(), max: boundedMax });
+    return sql;
+  }
+
+  getMysqlPool(config: DatabaseConnectionConfig, max = 5, timeout = 5000): mysql.Pool {
+    const key = this.getPoolKey(config);
+    const currentHash = this.getCredentialHash(config);
+    const cached = this.mysqlPools.get(key);
+    if (cached) {
+      if (cached.credentialHash !== currentHash) {
+        // Credential rotated - invalidate old pool
+        cached.pool.end().catch(() => {});
+        this.mysqlPools.delete(key);
+      } else {
+        cached.lastUsedAt = Date.now();
+        return cached.pool;
+      }
+    }
+
+    const boundedMax = Math.min(Math.max(1, max), 10);
+    const opts = {
+      ...this.getMysqlConfig(config, timeout),
+      connectionLimit: boundedMax,
+    };
+    const pool = mysql.createPool(opts);
+    this.mysqlPools.set(key, { pool, credentialHash: currentHash, lastUsedAt: Date.now() });
+    return pool;
+  }
+
+  invalidatePool(config: DatabaseConnectionConfig): void {
+    const key = this.getPoolKey(config);
+    const pg = this.postgresPools.get(key);
+    if (pg) {
+      pg.sql.end({ timeout: 1 }).catch(() => {});
+      this.postgresPools.delete(key);
+    }
+    const my = this.mysqlPools.get(key);
+    if (my) {
+      my.pool.end().catch(() => {});
+      this.mysqlPools.delete(key);
+    }
+  }
+
+  evictIdlePools(maxIdleMs = 300_000): void {
+    const now = Date.now();
+    for (const [key, entry] of this.postgresPools.entries()) {
+      if (now - entry.lastUsedAt > maxIdleMs) {
+        entry.sql.end({ timeout: 1 }).catch(() => {});
+        this.postgresPools.delete(key);
+      }
+    }
+    for (const [key, entry] of this.mysqlPools.entries()) {
+      if (now - entry.lastUsedAt > maxIdleMs) {
+        entry.pool.end().catch(() => {});
+        this.mysqlPools.delete(key);
+      }
+    }
+  }
+
+  private async createMysqlConnection(config: DatabaseConnectionConfig, timeout = 8000): Promise<mysql.Connection> {
+    try { return await mysql.createConnection(this.getMysqlConfig(config, timeout)); }
+    catch (error) { throw new Error(databaseConnectionErrorMessage(error, config)); }
   }
 
   private getMysqlConfig(config: DatabaseConnectionConfig, timeout = 5000) {
@@ -1468,4 +1769,168 @@ export class DatabaseIntegrationService {
     }
     return opts;
   }
+}
+
+export function synthesizeDatabaseRelationsAndComponents(
+  tables: InspectedTableResult[],
+  rawRelations: TableRelation[],
+): {
+  enrichedRelations: TableRelation[];
+  connectedComponents: Array<{ id: string; tableNames: string[] }>;
+} {
+  const identityOf = (table: InspectedTableResult) => `${table.schemaName || "public"}.${table.tableName}`;
+  const tablesByName = new Map<string, InspectedTableResult[]>();
+  const tablesByIdentity = new Map<string, InspectedTableResult>();
+  for (const t of tables) {
+    const identity = identityOf(t);
+    tablesByIdentity.set(identity, t);
+    const name = t.tableName.toLowerCase();
+    const matches = tablesByName.get(name) || [];
+    matches.push(t);
+    tablesByName.set(name, matches);
+  }
+
+  const resolveEndpoint = (tableName: string, schemaName?: string) => {
+    if (schemaName) return tablesByIdentity.get(`${schemaName}.${tableName}`);
+    const matches = tablesByName.get(tableName.toLowerCase()) || [];
+    return matches.length === 1 ? matches[0] : undefined;
+  };
+
+  // 1. Mark explicit foreign keys
+  const enrichedRelations: TableRelation[] = rawRelations.map((r) => {
+    const source = resolveEndpoint(r.sourceTable, r.sourceSchema);
+    const target = resolveEndpoint(r.targetTable, r.targetSchema);
+    return {
+      ...r,
+      sourceSchema: r.sourceSchema || source?.schemaName,
+      targetSchema: r.targetSchema || target?.schemaName,
+      provenance: "foreign_key" as const,
+      confidence: 1.0,
+    };
+  });
+
+  const existingRelKeys = new Set(
+    enrichedRelations.map(
+      (r) => `${(r.sourceSchema || "").toLowerCase()}.${r.sourceTable.toLowerCase()}.${r.sourceColumn.toLowerCase()}->${(r.targetSchema || "").toLowerCase()}.${r.targetTable.toLowerCase()}.${r.targetColumn.toLowerCase()}`,
+    ),
+  );
+
+  // 2. Discover inferred candidate relations
+  for (const sourceTable of tables) {
+    for (const col of sourceTable.schemaDefinition) {
+      if (col.isPrimaryKey || col.isForeignKey) continue;
+      const colNameLower = col.name.toLowerCase();
+
+      let targetCandidateName = "";
+      if (colNameLower.endsWith("_id") && colNameLower.length > 3) {
+        targetCandidateName = colNameLower.slice(0, -3);
+      } else if (colNameLower.startsWith("id_") && colNameLower.length > 3) {
+        targetCandidateName = colNameLower.slice(3);
+      }
+
+      if (!targetCandidateName) continue;
+
+      const candidateNames = [targetCandidateName, `${targetCandidateName}s`, `${targetCandidateName}es`];
+      const candidates = Array.from(new Map(candidateNames
+        .flatMap((name) => tablesByName.get(name) || [])
+        .filter((candidate) => identityOf(candidate) !== identityOf(sourceTable))
+        .map((candidate) => [identityOf(candidate), candidate])).values());
+      const sameSchemaCandidates = candidates.filter(
+        (candidate) => (candidate.schemaName || "public") === (sourceTable.schemaName || "public"),
+      );
+      const targetTable = sameSchemaCandidates.length === 1
+        ? sameSchemaCandidates[0]
+        : sameSchemaCandidates.length === 0 && candidates.length === 1 ? candidates[0] : undefined;
+
+      if (targetTable) {
+        const targetPk =
+          targetTable.schemaDefinition.find((c) => c.isPrimaryKey) ||
+          targetTable.schemaDefinition.find((c) => c.name.toLowerCase() === "id");
+
+        if (targetPk) {
+          const relKey = `${(sourceTable.schemaName || "public").toLowerCase()}.${sourceTable.tableName.toLowerCase()}.${col.name.toLowerCase()}->${(targetTable.schemaName || "public").toLowerCase()}.${targetTable.tableName.toLowerCase()}.${targetPk.name.toLowerCase()}`;
+          if (!existingRelKeys.has(relKey)) {
+            existingRelKeys.add(relKey);
+            const typeMatch = col.dataType === targetPk.dataType;
+            const confidence = typeMatch ? 0.85 : 0.6;
+            const provenance = typeMatch ? ("inferred" as const) : ("candidate" as const);
+
+            enrichedRelations.push({
+              sourceTable: sourceTable.tableName,
+              sourceColumn: col.name,
+              sourceSchema: sourceTable.schemaName,
+              targetTable: targetTable.tableName,
+              targetColumn: targetPk.name,
+              targetSchema: targetTable.schemaName,
+              relationType: "many_to_one",
+              provenance,
+              confidence,
+              cardinalityEvidence: {
+                sourceDistinctCount: col.distinctCount,
+                targetDistinctCount: targetPk.distinctCount,
+                sampleMatchRatio: typeMatch ? 0.85 : 0.5,
+              },
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // 3. Partition into connected components using Disjoint-Set / Union-Find
+  const parent = new Map<string, string>();
+  const findRoot = (x: string): string => {
+    if (!parent.has(x)) parent.set(x, x);
+    if (parent.get(x) !== x) parent.set(x, findRoot(parent.get(x)!));
+    return parent.get(x)!;
+  };
+  const unionNodes = (x: string, y: string) => {
+    const rx = findRoot(x);
+    const ry = findRoot(y);
+    if (rx !== ry) parent.set(rx, ry);
+  };
+
+  for (const t of tables) {
+    findRoot(identityOf(t));
+  }
+  for (const rel of enrichedRelations) {
+    const source = resolveEndpoint(rel.sourceTable, rel.sourceSchema);
+    const target = resolveEndpoint(rel.targetTable, rel.targetSchema);
+    if (source && target) unionNodes(identityOf(source), identityOf(target));
+  }
+
+  const componentGroups = new Map<string, string[]>();
+  for (const t of tables) {
+    const identity = identityOf(t);
+    const root = findRoot(identity);
+    if (!componentGroups.has(root)) componentGroups.set(root, []);
+    componentGroups.get(root)!.push(identity);
+  }
+
+  const connectedComponents: Array<{ id: string; tableNames: string[] }> = [];
+  let compIdx = 1;
+  const tableToCompId = new Map<string, string>();
+  for (const [, memberTableNames] of componentGroups.entries()) {
+    const compId = `cc_${compIdx++}`;
+    connectedComponents.push({ id: compId, tableNames: memberTableNames });
+    for (const tbl of memberTableNames) {
+      tableToCompId.set(tbl, compId);
+    }
+  }
+
+  // 4. Update semantic models of each table with connectedComponentId and enriched relationships
+  for (const t of tables) {
+    const identity = identityOf(t);
+    const compId = tableToCompId.get(identity);
+    if (compId) {
+      t.semanticModel.connectedComponentId = compId;
+    }
+    const tableRels = enrichedRelations.filter(
+      (r) => (r.sourceTable === t.tableName && (!r.sourceSchema || r.sourceSchema === t.schemaName || r.sourceSchema === "public" && !t.schemaName))
+        || (r.targetTable === t.tableName && (!r.targetSchema || r.targetSchema === t.schemaName || r.targetSchema === "public" && !t.schemaName)),
+    );
+    t.semanticModel.relationships = tableRels;
+  }
+
+  return { enrichedRelations, connectedComponents };
 }

@@ -12,7 +12,8 @@ This skill equips agents assigned relational databases to inspect schemas, navig
 
 ## 0. Access and Assignment Rules
 
-- `--list-dbs` reports the databases visible to the current agent. Treat that result as the allowlist and rediscover it for each task.
+- For greetings, “what can you do?” capability questions, and other conversational turns that do not request database facts, answer from the agent's configured name, role, and instructions. Do not call the database CLI, enumerate tables, or invoke the coordinator for those turns.
+- Runtime orchestration supplies the ACL-filtered source/table candidates in Auto. Treat those as the allowlist; `--list-dbs`, `--inspect-tables`, and `--describe-table` are also allowed for authorized metadata only. Prefer the supplied catalog to avoid redundant discovery.
 - This is a read-only analysis skill. Do not create, edit, delete, connect, or assign a data source, and do not change agent access metadata through an API, SQL, or script. An owner assigns sources from the agent's **Data Sources** menu. If the needed source is missing, ask the owner to assign it there, then rediscover the list.
 - Never use a remembered datasource, table, or column name from another tenant or task. Describe the selected table before constructing SQL.
 
@@ -22,7 +23,21 @@ This skill equips agents assigned relational databases to inspect schemas, navig
 
 Agents should run the pre-built Python CLI tool directly from bash:
 
-### A. List Connected External Databases
+### Orchestration mode (`Auto`)
+
+When the run context contains `[Enterprise Datasource Orchestration Active]` and the user asks for database facts, send the user's complete question through the shared coordinator:
+
+```bash
+python3 ~/.pi/agent/skills/database-integration/scripts/query_database.py \
+  --orchestrate "<the user's complete question>" \
+  --format json
+```
+
+The coordinator selects among the assigned external source and available snapshot lane, applies the caller's access scope, validates the query plan, and returns execution evidence. Prefer its injected catalog and schema; use metadata commands only to fill missing authorized schema details. Direct `--query-sql` is blocked in Auto unless the coordinator provides a specific fallback reason. Do not start a second query while an orchestrated execution is running.
+
+In Auto, the CLI allows ACL-filtered database/schema metadata reads but blocks direct data queries. Pass a concrete coordinator-provided reason to `--direct-fallback-reason "<specific reason from coordinator>"` before using direct `--query-sql`. JSON mode returns one compact JSON document per line; parse the complete line, not the default Markdown table output.
+
+### A. List Connected External Databases (Orchestration Off or Explicit Coordinator Fallback)
 ```bash
 python3 ~/.pi/agent/skills/database-integration/scripts/query_database.py --list-dbs
 ```

@@ -1,10 +1,9 @@
 ---
 name: diagram-chart-rendering
 description: >
-  Render diagrams and charts inline in chat/issue comments using fenced Mermaid code blocks
-  (pie, bar/line xychart, flowchart, sequence, ER, gantt, state). Use whenever the user asks for a
-  chart, grafik, diagram, visualisasi, tren, distribusi, perbandingan, flow, arsitektur, or when query
-  results are clearer as a visual than a table.
+  Render diagrams and charts inline in comments using fenced Mermaid blocks (pie, bar/line xychart,
+  flowchart, sequence, ER, gantt, state). Use when user asks for a chart, diagram, visualisasi,
+  tren, distribusi, perbandingan, flow, or when query results are clearer as a visual than a table.
 ---
 
 # Diagram & Chart Inline Rendering

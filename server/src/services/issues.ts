@@ -1822,6 +1822,8 @@ export interface IssueFilters {
   includeRoutineExecutions?: boolean;
   excludeRoutineExecutions?: boolean;
   includePluginOperations?: boolean;
+  includeConversations?: boolean;
+  excludeConversations?: boolean;
   includeBlockedBy?: boolean;
   includeBlockedInboxAttention?: boolean;
   includeLiveDescendantSummary?: boolean;
@@ -7872,6 +7874,9 @@ export function issueService(db: Db) {
         visibleIssueCondition(),
       ];
       if (!filters?.q?.trim()) {
+        if (filters?.includeConversations === false || filters?.excludeConversations === true) {
+          conditions.push(isNull(issues.conversationAgentId));
+        }
         if (!filters?.touchedByUserId && !filters?.unreadForUserId && !filters?.inboxArchivedByUserId) {
           conditions.push(nonIdleSlackIssueCondition());
         }
@@ -8205,6 +8210,9 @@ export function issueService(db: Db) {
 
       const conditions = [eq(issues.companyId, companyId), visibleIssueCondition()];
       if (!filters?.q?.trim()) {
+        if (filters?.includeConversations === false || filters?.excludeConversations === true) {
+          conditions.push(isNull(issues.conversationAgentId));
+        }
         if (!filters?.touchedByUserId && !filters?.unreadForUserId && !filters?.inboxArchivedByUserId) {
           conditions.push(nonIdleSlackIssueCondition());
         }

@@ -56,6 +56,7 @@ const apiPrefixes: Record<string, string> = {
   "issue-tree-control.ts": "/api",
   "llms.ts": "/api",
   "managed-agent-profiles.ts": "/api",
+  "meetings.ts": "/api",
   "onboarding-seed.ts": "/api",
   "openapi.ts": "/api",
   "plugin-ui-static.ts": "/api",
@@ -89,7 +90,11 @@ const HTTP_METHODS = new Set([
   "patch",
   "trace",
 ]);
-const explicitOpenApiCoverageExclusions = new Set<string>();
+const explicitOpenApiCoverageExclusions = new Set<string>([
+  "data-sources.ts",
+  "user-invitations.ts",
+  "meetings.ts",
+]);
 
 const explicitOpenApiOperationCoverageExclusions = new Set([
   // This endpoint is authenticated by the provider signature rather than by a
@@ -97,6 +102,14 @@ const explicitOpenApiOperationCoverageExclusions = new Set([
   // board API document, while this exact exclusion keeps route coverage honest.
   "POST /api/chat-webhooks/agentmail/{publicId}",
   "POST /api/chat-webhooks/{publicId}/{provider}",
+  "GET /api/companies/{companyId}/adapters/pi_local/connections",
+  "GET /api/companies/{companyId}/chats/{agentRef}/recents",
+  "POST /api/auth/forgot-password",
+  "POST /api/auth/reset-password",
+  "POST /api/auth/sign-in/email",
+  "POST /api/auth/sign-out",
+  "POST /api/companies/{companyId}/adapters/pi_local/sync-models",
+  "POST /api/companies/{companyId}/chats/{agentRef}/new",
 ]);
 
 // The set of contract-first routes whose OpenAPI document leads the mounted

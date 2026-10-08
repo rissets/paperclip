@@ -29,7 +29,20 @@ import urllib.error
 def get_env_or_default(key, default=None):
     return os.environ.get(key, default)
 
-def make_request(url, method="GET", payload=None, api_key=None, agent_id=None, session_token=None, timeout_seconds=20):
+def print_json(value, stream=None):
+    target = stream or sys.stdout
+    target.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+def print_cli_error(message, output_format="table", *, code="query_error", status=None):
+    if output_format == "json":
+        error = {"code": code, "message": str(message)}
+        if status is not None:
+            error["status"] = status
+        print_json({"error": error}, sys.stderr)
+    else:
+        print(f"Error: {message}", file=sys.stderr)
+
+def make_request(url, method="GET", payload=None, api_key=None, agent_id=None, session_token=None, timeout_seconds=20, output_format="table"):
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json",
@@ -57,10 +70,10 @@ def make_request(url, method="GET", payload=None, api_key=None, agent_id=None, s
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         err = e.read().decode("utf-8", errors="ignore")
-        print(f"Error ({e.code}): {err}", file=sys.stderr)
+        print_cli_error(err or f"HTTP {e.code}", output_format, code="http_error", status=e.code)
         sys.exit(1)
     except Exception as e:
-        print(f"Connection error to {url}: {e}", file=sys.stderr)
+        print_cli_error(f"Connection error to {url}: {e}", output_format, code="connection_error")
         sys.exit(1)
 
 def print_markdown_table(headers, rows):
@@ -104,6 +117,7 @@ def main():
     group.add_argument("--describe-table", type=str, metavar="TABLE", help="Describe table schema, columns, and metrics")
     group.add_argument("--aggregate", choices=["sum", "avg", "count", "min", "max"], help="Run aggregation function on a table")
     group.add_argument("--sql", type=str, help="Execute direct read-only ClickHouse/SQL query")
+    group.add_argument("--orchestrate", type=str, metavar="QUERY", help="Execute query through Enterprise Orchestrator facade")
 
     # Options for aggregate
     parser.add_argument("--collection", "-c", type=str, help="Filter tables by collection ID or slug")
@@ -114,12 +128,20 @@ def main():
     parser.add_argument("--filter", type=str, help="Filter in format 'column=value'")
     parser.add_argument("--limit", type=int, default=50, help="Result limit")
     parser.add_argument("--format", choices=["table", "json"], default="table", help="Output format")
+    parser.add_argument(
+        "--direct-fallback-reason",
+        type=str,
+        help="Coordinator-provided reason required for a direct data-query fallback in orchestration Auto",
+    )
 
     parser.add_argument("--company-id", type=str, default=get_env_or_default("PAPERCLIP_COMPANY_ID"))
     parser.add_argument("--agent-id", type=str, default=get_env_or_default("PAPERCLIP_AGENT_ID"))
     parser.add_argument("--api-url", type=str, default=get_env_or_default("PAPERCLIP_API_URL", "http://localhost:3100"))
     parser.add_argument("--api-key", type=str, default=get_env_or_default("PAPERCLIP_API_KEY"))
     parser.add_argument("--session-token", type=str, default=get_env_or_default("PAPERCLIP_SESSION_TOKEN"))
+    parser.add_argument("--run-id", type=str, default=get_env_or_default("PAPERCLIP_RUN_ID"))
+    parser.add_argument("--submitted-at", type=str, default=get_env_or_default("PAPERCLIP_SUBMITTED_AT"))
+    parser.add_argument("--deadline-ms", type=int, default=int(get_env_or_default("PAPERCLIP_DEADLINE_MS", "55000")))
 
     args = parser.parse_args()
     base_url = args.api_url.rstrip("/")
@@ -127,20 +149,33 @@ def main():
     company_id = args.company_id
     agent_id = args.agent_id
     access_mode = get_env_or_default("PAPERCLIP_DATA_SOURCES_MODE", "all")
+    orchestration_mode = get_env_or_default("PAPERCLIP_DATASOURCE_ORCHESTRATION_MODE", "off").strip().lower()
     assigned_raw = get_env_or_default("PAPERCLIP_ASSIGNED_DATA_SOURCES", "")
     assigned_ids = set([x.strip() for x in assigned_raw.split(",") if x.strip()])
     assigned_col_raw = get_env_or_default("PAPERCLIP_ASSIGNED_COLLECTIONS", "")
     assigned_col_ids = set([x.strip() for x in assigned_col_raw.split(",") if x.strip()])
 
     if not company_id:
-        print("Error: Company ID is required (set $PAPERCLIP_COMPANY_ID or pass --company-id)", file=sys.stderr)
+        print_cli_error("Company ID is required (set $PAPERCLIP_COMPANY_ID or pass --company-id)", args.format, code="company_id_required")
         sys.exit(1)
+
+    metadata_only_operation = args.list_tables or bool(args.describe_table)
+    if orchestration_mode == "auto" and not args.orchestrate and not metadata_only_operation and not (args.direct_fallback_reason or "").strip():
+        print_cli_error(
+            "Datasource orchestration is active. Submit the complete question with --orchestrate; direct data queries require a specific fallback reason returned by the coordinator.",
+            args.format,
+            code="orchestration_required",
+        )
+        sys.exit(2)
 
     if access_mode == "none":
         if args.list_tables:
-            print("*(Agen tidak memiliki izin akses ke data source apa pun. Mode: Terisolasi)*")
+            if args.format == "json":
+                print_json([])
+            else:
+                print("*(Agen tidak memiliki izin akses ke data source apa pun. Mode: Terisolasi)*")
             return
-        print("Error: Akses ditolak. Agen ini tidak memiliki izin akses ke data source apa pun.", file=sys.stderr)
+        print_cli_error("Akses ditolak. Agen ini tidak memiliki izin akses ke data source apa pun.", args.format, code="source_access_denied")
         sys.exit(1)
 
     # 1. List Tables
@@ -154,7 +189,13 @@ def main():
         if params:
             url += "?" + "&".join(params)
 
-        sources = make_request(url, api_key=args.api_key, agent_id=agent_id, session_token=args.session_token)
+        sources = make_request(
+            url,
+            api_key=args.api_key,
+            agent_id=agent_id,
+            session_token=args.session_token,
+            output_format=args.format,
+        )
         
         tables_list = []
         for ds in sources:
@@ -192,7 +233,7 @@ def main():
                 })
 
         if args.format == "json":
-            print(json.dumps(tables_list, indent=2))
+            print_json(tables_list)
         else:
             scope_label = f" in Collection '{args.collection}'" if args.collection else ""
             print(f"### Structured Tables{scope_label} ({len(tables_list)} found):\n")
@@ -203,16 +244,71 @@ def main():
                 print("No structured tables accessible to this agent.")
         return
 
+    # 1b. Orchestrate Query Facade
+    if args.orchestrate:
+        url = f"{api_prefix}/companies/{company_id}/orchestrator/query-executions"
+        payload = {
+            "query": args.orchestrate,
+            "agentId": agent_id,
+        }
+        if args.run_id:
+            payload["runId"] = args.run_id
+        if args.submitted_at:
+            payload["submittedAt"] = int(args.submitted_at) if str(args.submitted_at).isdigit() else args.submitted_at
+        if args.deadline_ms:
+            payload["deadlineMs"] = args.deadline_ms
+        res = make_request(
+            url,
+            method="POST",
+            payload=payload,
+            api_key=args.api_key,
+            agent_id=agent_id,
+            session_token=args.session_token,
+            timeout_seconds=70,
+            output_format=args.format,
+        )
+        if args.format == "json":
+            print_json(res)
+            return
+
+        print(f"### Hasil Orchestrator Query (Status: {res.get('status', 'unknown')})\n")
+        if res.get("resultsSummary"):
+            print(f"{res['resultsSummary']}\n")
+
+        timings = res.get("stageTimings") or {}
+        if timings:
+            print(f"- **Trace ID**: `{res.get('traceId')}`")
+            print(f"- **Stage Timings**: Preflight {timings.get('preflightMs', 0)}ms | Planning {timings.get('planningMs', 0)}ms | Exec {timings.get('databaseExecutionMs', 0)}ms | Total {timings.get('totalMs', 0)}ms\n")
+
+        data = res.get("data")
+        if isinstance(data, list) and data:
+            columns = list(data[0].keys()) if isinstance(data[0], dict) else []
+            if columns:
+                print_markdown_table(columns, data)
+        return
+
     # 2. Describe Table
     if args.describe_table:
         if args.data_source_id:
             url = f"{api_prefix}/companies/{company_id}/data-sources/{args.data_source_id}"
-            sources = [make_request(url, api_key=args.api_key, agent_id=agent_id, session_token=args.session_token)]
+            sources = [make_request(
+                url,
+                api_key=args.api_key,
+                agent_id=agent_id,
+                session_token=args.session_token,
+                output_format=args.format,
+            )]
         else:
             url = f"{api_prefix}/companies/{company_id}/data-sources"
             if agent_id:
                 url += f"?agentId={agent_id}"
-            sources = make_request(url, api_key=args.api_key, agent_id=agent_id, session_token=args.session_token)
+            sources = make_request(
+                url,
+                api_key=args.api_key,
+                agent_id=agent_id,
+                session_token=args.session_token,
+                output_format=args.format,
+            )
         target = args.describe_table.lower()
         found_table = None
         found_ds = None
@@ -227,13 +323,17 @@ def main():
                 break
 
         if not found_table:
-            print(f"Table '{args.describe_table}' not found in company data sources.", file=sys.stderr)
+            print_cli_error(
+                f"Table '{args.describe_table}' not found in company data sources.",
+                args.format,
+                code="table_not_found",
+            )
             sys.exit(1)
 
         if args.format == "json":
             result = dict(found_table)
             result["clickhouseTable"] = clickhouse_table_name(found_table)
-            print(json.dumps(result, indent=2))
+            print_json(result)
             return
 
         print(f"### Schema for Table: `{found_table.get('tableName')}`")
@@ -277,10 +377,11 @@ def main():
             agent_id=agent_id,
             session_token=args.session_token,
             timeout_seconds=70,
+            output_format=args.format,
         )
         
         if args.format == "json":
-            print(json.dumps(res, indent=2))
+            print_json(res)
             return
 
         rows = res.get("rows", [])
@@ -295,28 +396,44 @@ def main():
     # 4. Aggregations on Table
     if args.aggregate:
         if not args.table:
-            print("Error: --table is required when running --aggregate", file=sys.stderr)
+            print_cli_error(
+                "--table is required when running --aggregate",
+                args.format,
+                code="table_required",
+            )
             sys.exit(1)
 
-        # Resolve data source and table ID
-        ds_id = args.data_source_id
-        table_id = args.table
+        # Resolve the table against the ACL-filtered catalog every time. Keeping
+        # the canonical source/table pair prevents a table UUID or logical label
+        # from accidentally being sent as the datasource URL segment.
+        catalog_url = f"{api_prefix}/companies/{company_id}/data-sources"
+        if agent_id:
+            catalog_url += f"?agentId={agent_id}"
+        sources = make_request(
+            catalog_url,
+            api_key=args.api_key,
+            agent_id=agent_id,
+            session_token=args.session_token,
+            output_format=args.format,
+        )
+        matches = []
+        for source in sources:
+            source_id = source.get("id")
+            if args.data_source_id and source_id != args.data_source_id:
+                continue
+            for table in source.get("tables", []):
+                if table.get("id") == args.table or str(table.get("tableName") or "").lower() == args.table.lower():
+                    matches.append((source_id, table.get("id")))
 
-        if not ds_id:
-            url = f"{api_prefix}/companies/{company_id}/data-sources"
-            sources = make_request(url, api_key=args.api_key, agent_id=agent_id, session_token=args.session_token)
-            for ds in sources:
-                for tbl in ds.get("tables", []):
-                    if tbl.get("id") == args.table or tbl.get("tableName", "").lower() == args.table.lower():
-                        ds_id = ds.get("id")
-                        table_id = tbl.get("id")
-                        break
-                if ds_id:
-                    break
-
-        if not ds_id or not table_id:
-            print(f"Error: Could not resolve table '{args.table}' to a valid data source.", file=sys.stderr)
+        if len(matches) != 1 or not matches[0][0] or not matches[0][1]:
+            message = (
+                f"Could not resolve exactly one accessible table '{args.table}'"
+                + (f" in data source '{args.data_source_id}'" if args.data_source_id else "")
+                + ". Use --list-tables --format json and pass the matching dataSourceId/tableId pair."
+            )
+            print_cli_error(message, args.format, code="table_resolution_failed")
             sys.exit(1)
+        ds_id, table_id = matches[0]
 
         query_payload = {
             "aggregate": {
@@ -340,10 +457,11 @@ def main():
             agent_id=agent_id,
             session_token=args.session_token,
             timeout_seconds=70,
+            output_format=args.format,
         )
 
         if args.format == "json":
-            print(json.dumps(res, indent=2))
+            print_json(res)
             return
 
         rows = res.get("rows", [])

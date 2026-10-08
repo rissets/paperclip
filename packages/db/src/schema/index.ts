@@ -221,8 +221,12 @@ export {
   orchestratorMessages,
 } from "./data_sources.js";
 export { dataSourceJobs } from "./data_source_jobs.js";
+export { dataSourceJobCheckpoints } from "./data_source_job_checkpoints.js";
 export { dataSourceUploadSessions } from "./data_source_upload_sessions.js";
 export { dataSourceQueryJobs } from "./data_source_query_jobs.js";
+export { dataSourceQueryExperiences } from "./data_source_query_experiences.js";
+export { dataSourceQueryFeedback } from "./data_source_query_feedback.js";
+export { dataSourceQueryExecutions } from "./data_source_query_executions.js";
 export { dataSourceChunkEmbeddings } from "./data_source_chunk_embeddings.js";
 export { dataSourceGatewayChunkEmbeddings } from "./data_source_gateway_chunk_embeddings.js";
 

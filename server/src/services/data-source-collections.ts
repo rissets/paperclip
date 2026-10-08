@@ -27,6 +27,7 @@ import type {
 } from "@paperclipai/shared";
 import { badRequest, payloadTooLarge } from "../errors.js";
 import { ClickhouseService } from "./clickhouse.js";
+import { analyzeTemporalOverlaps } from "./data-source-temporal-overlap.js";
 
 const require = createRequire(import.meta.url);
 type ZipEntryStream = NodeJS.ReadableStream & AsyncIterable<Buffer> & {
@@ -593,6 +594,14 @@ export class DataSourceCollectionsService {
         crossTableRelationships: [],
         crossDocumentCorrelations: [],
         crossModalCorrelations: [],
+        temporalOverlapAnalysis: {
+          status: "complete",
+          tablesAnalyzed: 0,
+          tablesWithTemporalBounds: 0,
+          comparedPairs: 0,
+          findingsTruncated: false,
+          findings: [],
+        },
         unifiedClickhouseViews: [],
         suggestedQueries: [],
         summary: "Empty collection without data sources.",
@@ -958,6 +967,20 @@ export class DataSourceCollectionsService {
     let deployedViewCount = 0;
     const sourceById = new Map(memberSources.map((source) => [source.id, source]));
     const tableById = new Map(tables.map((table) => [table.id, table]));
+    const temporalOverlapAnalysis = analyzeTemporalOverlaps(
+      tables.map((table) => {
+        const source = sourceById.get(table.dataSourceId);
+        return {
+          tableId: table.id,
+          sourceId: table.dataSourceId,
+          sourceType: source?.sourceType ?? "unknown",
+          sourceStatus: source?.status ?? "unknown",
+          tableName: table.tableName,
+          semanticModel: table.semanticModel,
+        };
+      }),
+      { tablesTruncated },
+    );
     const priorProfile = col.semanticProfile as unknown as CollectionSemanticProfile | null;
     const priorGeneratedViews = (priorProfile?.unifiedClickhouseViews || [])
       .map((view) => view.viewName)
@@ -1121,7 +1144,7 @@ export class DataSourceCollectionsService {
     const analysisLimitNote = boundedAnalysisReachedLimit
       ? ` Hasil korelasi dibatasi oleh safety caps: maksimum ${MAX_COLLECTION_ANALYSIS_TABLES} tabel/dokumen, ${MAX_RELATION_CANDIDATES} pasangan relasi kandidat, ${MAX_DISCOVERED_RELATIONSHIPS} relasi, 1.000 korelasi dokumen, 5.000 korelasi lintas-modal, dan ${MAX_COLLECTION_VIEWS} view per proses.`
       : "";
-    const summary = `Collection "${col.name}" terdiri dari ${memberSources.length} sumber data (${totalTableCount} tabel tabular, ${allDocumentSources.length} dokumen RAG). Terdeteksi ${discoveredRelationships.length} kandidat relasi foreign key, ${deployedViewCount} ClickHouse view terpasang, ${crossDocumentCorrelations.length} korelasi dokumen, dan ${crossModalCorrelations.length} tautan dokumen-tabel.${analysisLimitNote}`;
+    const summary = `Collection "${col.name}" terdiri dari ${memberSources.length} sumber data (${totalTableCount} tabel tabular, ${allDocumentSources.length} dokumen RAG). Terdeteksi ${discoveredRelationships.length} kandidat relasi foreign key, ${deployedViewCount} ClickHouse view terpasang, ${crossDocumentCorrelations.length} korelasi dokumen, ${crossModalCorrelations.length} tautan dokumen-tabel, dan ${temporalOverlapAnalysis.findings.length} periode data yang overlap untuk ditinjau.${analysisLimitNote}`;
 
     const finalProfile: CollectionSemanticProfile = {
       domain: inferredDomain,
@@ -1130,6 +1153,7 @@ export class DataSourceCollectionsService {
       crossTableRelationships: discoveredRelationships,
       crossDocumentCorrelations,
       crossModalCorrelations,
+      temporalOverlapAnalysis,
       unifiedClickhouseViews,
       suggestedQueries,
       summary,

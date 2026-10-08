@@ -5,7 +5,7 @@ import { activityLog, companies, createDb, dataSourceChunks, dataSourceJobs, dat
 import type { DataSourceJobLease } from "../services/data-source-job-lease.js";
 import { assertDataSourceJobLease } from "../services/data-source-job-lease.js";
 import type { EmbeddingSpace } from "../services/rag-models.js";
-import { DataSourcesService } from "../services/data-sources.js";
+import { DataSourcesService, semanticMappingEmbeddingGeneration } from "../services/data-sources.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -190,6 +190,85 @@ if (!support.supported) console.warn(`Datasource embedding reindex PostgreSQL in
       "data_source.embedding_reindex.queued",
       "data_source.embedding_reindex.published",
     ]);
+  }, 30_000);
+
+  it("publishes the active embedding pointer for structured file sources", async () => {
+    await db.update(dataSources).set({ sourceType: "csv", metadata: {} }).where(eq(dataSources.id, sourceId));
+    const model = {
+      embed: vi.fn(async (texts: string[], space?: EmbeddingSpace) => ({
+        vectors: texts.map(() => Array(space === "bge-m3" ? 1_024 : 1_536).fill(0.3)),
+        space: space || "bge-m3",
+        generation: "bge-m3@test-revision",
+        backend: "local-bge-m3",
+      })),
+    };
+    const { service, vectors, vectorKey } = makeDependencies(model);
+    const job = await service.enqueueEmbeddingReindex(companyId, sourceId, "bge-m3", actor);
+    const attempt = await claim(job.id, 1, "structured-reindex-worker");
+
+    await service.runEmbeddingReindex(companyId, sourceId, attempt.job.progress, attempt.lease);
+
+    const [published] = await db.select().from(dataSources).where(eq(dataSources.id, sourceId));
+    expect(published?.metadata).toMatchObject({
+      embeddingSpace: "bge-m3",
+      embeddingGeneration: "bge-m3@test-revision",
+      embeddingStatus: "ready",
+    });
+    expect(vectors.get(vectorKey("bge-m3", "bge-m3@test-revision"))?.size).toBe(40);
+  }, 30_000);
+
+  it("recovers ready structured sources missing schema vectors into a durable reindex job", async () => {
+    vi.stubEnv("RAG_EMBEDDING_PROVIDER", "auto");
+    await db.update(dataSources).set({ sourceType: "csv", metadata: {} }).where(eq(dataSources.id, sourceId));
+    const model = { embed: vi.fn(), embeddingGeneration: () => "bge-m3@test-revision" };
+    const { service } = makeDependencies(model);
+
+    await expect(service.reconcilePendingStructuredEmbeddingJobs(8)).resolves.toBe(1);
+
+    const [job] = await db.select().from(dataSourceJobs).where(eq(dataSourceJobs.dataSourceId, sourceId));
+    const [source] = await db.select().from(dataSources).where(eq(dataSources.id, sourceId));
+    expect(job).toMatchObject({ jobType: "embedding_reindex", status: "queued" });
+    expect(job?.progress).toMatchObject({ targetSpace: "bge-m3", totalChunks: 40 });
+    expect(source?.metadata).toMatchObject({ embeddingStatus: "pending", embeddingTargetSpace: "bge-m3" });
+  });
+
+  it("restarts an automatic BGE reindex in the gateway generation when local inference is unavailable", async () => {
+    vi.stubEnv("RAG_EMBEDDING_PROVIDER", "auto");
+    await db.update(dataSources).set({
+      sourceType: "csv",
+      metadata: { semanticMappingRevision: 4, embeddingStatus: "pending", embeddingReindexStatus: "pending" },
+    }).where(eq(dataSources.id, sourceId));
+    const gatewayGeneration = "openrouter-text-embedding-3-small@openai/text-embedding-3-small";
+    const model = {
+      embed: vi.fn(async (texts: string[]) => ({
+        vectors: texts.map(() => Array(1_536).fill(0.4)),
+        space: "openrouter-text-embedding-3-small" as const,
+        generation: gatewayGeneration,
+        backend: "openrouter",
+      })),
+    };
+    const { service, vectors, vectorKey } = makeDependencies(model);
+    await expect(service.reconcilePendingStructuredEmbeddingJobs(8)).resolves.toBe(1);
+    const [job] = await db.select().from(dataSourceJobs).where(eq(dataSourceJobs.dataSourceId, sourceId));
+    expect(job?.progress).toMatchObject({
+      targetSpace: "bge-m3",
+      targetGeneration: semanticMappingEmbeddingGeneration("bge-m3@test-revision", 4),
+      targetModelGeneration: "bge-m3@test-revision",
+    });
+    expect(job).toBeDefined();
+    const attempt = await claim(job!.id, 1, "gateway-fallback-worker");
+
+    await service.runEmbeddingReindex(companyId, sourceId, attempt.job.progress, attempt.lease);
+
+    const [published] = await db.select().from(dataSources).where(eq(dataSources.id, sourceId));
+    const gatewaySemanticGeneration = semanticMappingEmbeddingGeneration(gatewayGeneration, 4);
+    expect(published?.metadata).toMatchObject({
+      embeddingSpace: "openrouter-text-embedding-3-small",
+      embeddingGeneration: gatewaySemanticGeneration,
+      embeddingBackend: "openrouter",
+      embeddingStatus: "ready",
+    });
+    expect(vectors.get(vectorKey("openrouter-text-embedding-3-small", gatewaySemanticGeneration))?.size).toBe(40);
   }, 30_000);
 
   it("rolls back to a retained complete vector space without calling an embedding model", async () => {

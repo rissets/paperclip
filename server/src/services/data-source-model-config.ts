@@ -68,7 +68,9 @@ export function parseDataSourceModelConfig(env: NodeJS.ProcessEnv = process.env)
     "RAG_BGE_EMBEDDING_REVISION",
     configuredValue(env, "RAG_BGE_EMBEDDING_REVISION", DEFAULT_BGE_REVISION),
   );
-  const apiKey = env.OPENROUTER_API_KEY?.trim();
+  const rawApiKey = env.OPENROUTER_API_KEY?.trim();
+  const isPlaceholderKey = !rawApiKey || rawApiKey.startsWith("replace-with-") || rawApiKey === "your-api-key";
+  const apiKey = isPlaceholderKey ? undefined : rawApiKey;
 
   return {
     embeddingProvider: providerValue,
@@ -76,7 +78,7 @@ export function parseDataSourceModelConfig(env: NodeJS.ProcessEnv = process.env)
     bgeRerankUrl,
     bgeEmbeddingRevision: bgeRevision,
     openRouterBaseUrl: gateway,
-    openRouterApiKey: apiKey || undefined,
+    openRouterApiKey: apiKey,
     openRouterEmbeddingModel: embeddingModel,
     openRouterRerankModel: rerankModel,
   };

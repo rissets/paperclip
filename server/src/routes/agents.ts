@@ -25,7 +25,7 @@ import path from "node:path";
 import type { Db } from "@paperclipai/db";
 import type { ChatChannelService } from "../services/chat-channels.js";
 import { userRbacService } from "../services/user-rbac-service.js";
-import { activityLog, agents as agentsTable, chatConversations, companies, heartbeatRuns, issues as issuesTable, projects as projectsTable } from "@paperclipai/db";
+import { activityLog, agents as agentsTable, authUsers, chatConversations, companies, heartbeatRuns, issues as issuesTable, projects as projectsTable } from "@paperclipai/db";
 import { and, desc, eq, inArray, not, sql } from "drizzle-orm";
 import { sha256Digest } from "../services/feedback-redaction.js";
 import {
@@ -1754,7 +1754,7 @@ export function agentRoutes(
 
   async function assertCanCreateAgentsForCompany(req: Request, companyId: string) {
     assertCompanyAccess(req, companyId);
-    if (req.actor.type === "board") {
+    if (req.actor.type === "board" && req.actor.source !== "local_implicit" && !req.actor.isInstanceAdmin) {
       const canCreate = await rbac.canUserAddAgent(
         companyId,
         req.actor.userId || "local-board",
@@ -2143,7 +2143,7 @@ export function agentRoutes(
       throw notFound("Agent not found");
     }
     assertCompanyAccess(req, targetAgent.companyId);
-    if (req.actor.type === "board") {
+    if (req.actor.type === "board" && req.actor.source !== "local_implicit" && !req.actor.isInstanceAdmin) {
       const canEdit = await rbac.canUserEditAgent(
         targetAgent.companyId,
         req.actor.userId || "local-board",
@@ -4719,15 +4719,21 @@ export function agentRoutes(
           },
         },
       );
-      if (req.actor.type === "board" && req.actor.userId) {
-        const currentAssigned = await rbac.getAssignedAgentsForUser(companyId, req.actor.userId);
-        if (!currentAssigned.includes(createdAgent.id)) {
-          await rbac.assignAgentsToUser(
-            companyId,
-            req.actor.userId,
-            [...currentAssigned, createdAgent.id],
-            req.actor.userId,
-          );
+      if (req.actor.type === "board" && req.actor.userId && req.actor.source !== "local_implicit" && !req.actor.isInstanceAdmin) {
+        const isOwnerOrAdmin = await rbac.isOwnerOrAdmin(companyId, req.actor.userId);
+        if (!isOwnerOrAdmin) {
+          const userExists = await db.select({ id: authUsers.id }).from(authUsers).where(eq(authUsers.id, req.actor.userId)).then((r) => r.length > 0);
+          if (userExists) {
+            const currentAssigned = await rbac.getAssignedAgentsForUser(companyId, req.actor.userId);
+            if (!currentAssigned.includes(createdAgent.id)) {
+              await rbac.assignAgentsToUser(
+                companyId,
+                req.actor.userId,
+                [...currentAssigned, createdAgent.id],
+                req.actor.userId,
+              );
+            }
+          }
         }
       }
       const onboardingFirstAgentBundle = await resolveOnboardingFirstAgentBundle({
@@ -4973,15 +4979,21 @@ export function agentRoutes(
         },
       },
     );
-    if (req.actor.type === "board" && req.actor.userId) {
-      const currentAssigned = await rbac.getAssignedAgentsForUser(companyId, req.actor.userId);
-      if (!currentAssigned.includes(createdAgent.id)) {
-        await rbac.assignAgentsToUser(
-          companyId,
-          req.actor.userId,
-          [...currentAssigned, createdAgent.id],
-          req.actor.userId,
-        );
+    if (req.actor.type === "board" && req.actor.userId && req.actor.source !== "local_implicit" && !req.actor.isInstanceAdmin) {
+      const isOwnerOrAdmin = await rbac.isOwnerOrAdmin(companyId, req.actor.userId);
+      if (!isOwnerOrAdmin) {
+        const userExists = await db.select({ id: authUsers.id }).from(authUsers).where(eq(authUsers.id, req.actor.userId)).then((r) => r.length > 0);
+        if (userExists) {
+          const currentAssigned = await rbac.getAssignedAgentsForUser(companyId, req.actor.userId);
+          if (!currentAssigned.includes(createdAgent.id)) {
+            await rbac.assignAgentsToUser(
+              companyId,
+              req.actor.userId,
+              [...currentAssigned, createdAgent.id],
+              req.actor.userId,
+            );
+          }
+        }
       }
     }
     const onboardingFirstAgentBundle = await resolveOnboardingFirstAgentBundle({
@@ -5500,7 +5512,7 @@ export function agentRoutes(
     const existing = await getAccessibleResource(req, res, svc.getById(id), "Agent not found");
     if (!existing) return;
 
-    if (req.actor.type === "board") {
+    if (req.actor.type === "board" && req.actor.source !== "local_implicit" && !req.actor.isInstanceAdmin) {
       const canEdit = await rbac.canUserEditAgent(
         existing.companyId,
         req.actor.userId || "local-board",

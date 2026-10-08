@@ -46,9 +46,9 @@ async function assertConstraints(sql: postgres.Sql, row: Awaited<ReturnType<type
     await expect(sql`UPDATE issues SET ${sql(update)} WHERE id = ${row.issueId}`)
       .rejects.toMatchObject({ code: "23514", constraint_name: "issues_conversation_identity_check" });
   }
-  await expect(sql`INSERT INTO issues (company_id, title, assignee_agent_id, status, conversation_agent_id, conversation_user_id, conversation_state)
-    VALUES (${row.companyId}, 'Duplicate conversation', ${row.agentId}, 'in_review', ${row.agentId}, ${row.userId}, 'waiting')`)
-    .rejects.toMatchObject({ code: "23505", constraint_name: "issues_conversation_identity_idx" });
+  // Multiple chat sessions per user and agent are allowed since migration 0296
+  await sql`INSERT INTO issues (company_id, title, assignee_agent_id, status, conversation_agent_id, conversation_user_id, conversation_state)
+    VALUES (${row.companyId}, 'Duplicate conversation', ${row.agentId}, 'in_review', ${row.agentId}, ${row.userId}, 'waiting')`;
   await expect(sql`INSERT INTO issue_comments (company_id, issue_id, author_user_id, body, client_request_id)
     VALUES (${row.companyId}, ${row.issueId}, ${row.userId}, 'Duplicate message', 'first-message')`)
     .rejects.toMatchObject({ code: "23505", constraint_name: "issue_comments_client_request_uq" });

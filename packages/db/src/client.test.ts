@@ -735,6 +735,107 @@ describeEmbeddedPostgres("applyPendingMigrations", () => {
   );
 
   it(
+    "upgrades a legacy UUID-keyed datasource execution ledger without losing rows",
+    async () => {
+      const connectionString = await createTempDatabase();
+      await applyPendingMigrations(connectionString);
+
+      const sql = postgres(connectionString, { max: 1, onnotice: () => {} });
+      const legacyCompanyId = "00000000-0000-4000-8000-000000000001";
+      const validCompanyId = "00000000-0000-4000-8000-000000000002";
+      try {
+        await sql.unsafe(`DROP TABLE "data_source_query_executions"`);
+        await sql.unsafe(`
+          CREATE TABLE "data_source_query_executions" (
+            "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+            "company_id" uuid NOT NULL,
+            "agent_id" uuid,
+            "run_id" uuid,
+            "session_id" text,
+            "query" text NOT NULL,
+            "plan_hash" text NOT NULL,
+            "engine" text DEFAULT 'clickhouse',
+            "status" text DEFAULT 'running' NOT NULL,
+            "stage_timings" jsonb,
+            "results_summary" text,
+            "data_preview" jsonb,
+            "error_message" text,
+            "trace_id" text,
+            "created_at" timestamp with time zone DEFAULT now() NOT NULL,
+            "updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+            "completed_at" timestamp with time zone
+          )
+        `);
+        await sql.unsafe(
+          `INSERT INTO "data_source_query_executions" ("id", "company_id", "run_id", "query", "plan_hash")
+           VALUES ('00000000-0000-4000-8000-000000000011', '${legacyCompanyId}', '00000000-0000-4000-8000-000000000012', 'legacy query', 'legacy-plan')`,
+        );
+        const migration = await migrationHash("0310_old_maverick.sql");
+        const datasourceScopeMigration = await migrationHash("0312_unique_captain_universe.sql");
+        await sql.unsafe(`DELETE FROM "drizzle"."__drizzle_migrations" WHERE hash IN ('${migration}', '${datasourceScopeMigration}')`);
+      } finally {
+        await sql.end();
+      }
+
+      await applyPendingMigrations(connectionString);
+
+      const verifySql = postgres(connectionString, { max: 1, onnotice: () => {} });
+      try {
+        const legacyRows = await verifySql.unsafe<{
+          id: string;
+          company_id: string;
+          run_id: string;
+          query: string;
+          data_source_ids: string[] | null;
+        }[]>(`
+          SELECT "id", "company_id", "run_id", "query", "data_source_ids"
+          FROM "data_source_query_executions"
+          WHERE "query" = 'legacy query'
+        `);
+        expect(legacyRows).toEqual([{
+          id: "00000000-0000-4000-8000-000000000011",
+          company_id: legacyCompanyId,
+          run_id: "00000000-0000-4000-8000-000000000012",
+          query: "legacy query",
+          data_source_ids: null,
+        }]);
+
+        await verifySql.unsafe(
+          `INSERT INTO "companies" ("id", "name", "issue_prefix") VALUES ('${validCompanyId}', 'Datasource migration test', 'DSMIG')`,
+        );
+        await verifySql.unsafe(`
+          INSERT INTO "data_source_query_executions"
+            ("id", "company_id", "run_id", "query", "plan_hash")
+          VALUES ('exec-first', '${validCompanyId}', 'run-first', 'query', 'same-plan')
+        `);
+        await expect(verifySql.unsafe(`
+          INSERT INTO "data_source_query_executions"
+            ("id", "company_id", "run_id", "query", "plan_hash")
+          VALUES ('exec-second', '${validCompanyId}', 'run-first', 'query', 'same-plan')
+        `)).rejects.toThrow();
+
+        await verifySql.unsafe(`
+          INSERT INTO "data_source_query_executions"
+            ("id", "company_id", "run_id", "query", "plan_hash", "data_source_ids")
+          VALUES ('exec-scoped', '${validCompanyId}', 'run-scoped', 'scoped query', 'scoped-plan', '["datasource-1"]'::jsonb)
+        `);
+        const scopedRows = await verifySql.unsafe<{ data_source_ids: string[] }[]>(`
+          SELECT "data_source_ids" FROM "data_source_query_executions" WHERE "id" = 'exec-scoped'
+        `);
+        expect(scopedRows[0]?.data_source_ids).toEqual(["datasource-1"]);
+        const indexes = await verifySql.unsafe<{ indexname: string }[]>(`
+          SELECT indexname FROM pg_indexes
+          WHERE schemaname = 'public' AND tablename = 'data_source_query_executions'
+        `);
+        expect(indexes.map((row) => row.indexname)).toContain("data_source_query_executions_data_source_ids_gin_idx");
+      } finally {
+        await verifySql.end();
+      }
+    },
+    30_000,
+  );
+
+  it(
     "replays the built-in managed resources migration after the legacy 0136 journal entry",
     async () => {
       const connectionString = await createTempDatabase();

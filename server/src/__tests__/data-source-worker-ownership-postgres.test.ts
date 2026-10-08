@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { companies, createDb, dataSourceJobs, dataSources } from "@paperclipai/db";
+import { companies, createDb, dataSourceJobCheckpoints, dataSourceJobs, dataSources } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 const pipeline = vi.hoisted(() => vi.fn());
 vi.mock("../services/data-sources.js", () => ({ DataSourcesService: class {
   reprocess(...args: unknown[]) { return pipeline(...args); }
+  runExternalDatabaseOnboarding(...args: unknown[]) { return pipeline(...args); }
   runEmbeddingReindex(...args: unknown[]) { return pipeline(...args); }
+  reconcilePendingStructuredEmbeddingJobs() { return Promise.resolve({ reconciled: 0 }); }
 } }));
 import { DataSourceIngestionWorker } from "../services/data-source-ingestion-worker.js";
 
@@ -76,6 +78,12 @@ if (!support.supported) console.warn(`Datasource worker PostgreSQL integration u
         insertedRows: 50_000,
         totalRows: 100_000,
         tableName: `${"table".repeat(40)}\nlong-name`,
+        currentTable: "analytics.orders",
+        currentBatchIndex: 2,
+        batchCount: 4,
+        completedBatchesCount: 3,
+        checkpointStage: "batch_checkpointed",
+        schemaFingerprint: "a".repeat(64),
       });
     });
 
@@ -84,8 +92,34 @@ if (!support.supported) console.warn(`Datasource worker PostgreSQL integration u
     const [job] = await db.select().from(dataSourceJobs).where(eq(dataSourceJobs.id, jobId));
     expect(job).toMatchObject({ status: "succeeded", stage: "completed" });
     expect(job.progress).toMatchObject({ stage: "completed", insertedRows: 50_000, totalRows: 100_000 });
+    expect(job.progress).toMatchObject({
+      currentTable: "analytics.orders",
+      currentBatchIndex: 2,
+      batchCount: 4,
+      completedBatchesCount: 3,
+      checkpointStage: "batch_checkpointed",
+      schemaFingerprint: "a".repeat(64),
+    });
     expect(String(job.progress.tableName)).toHaveLength(128);
     expect(String(job.progress.tableName)).not.toContain("\n");
+  }, 30_000);
+
+  it("removes external schema mapping checkpoints atomically after owned success", async () => {
+    const { companyId, sourceId, jobId } = await seed(1, "external_db_onboarding", "postgres");
+    await db.insert(dataSourceJobCheckpoints).values({
+      jobId,
+      checkpointType: "external_schema_mapping",
+      checkpointKey: "batch-1",
+      inputFingerprint: "f".repeat(64),
+      payload: { result: { domain: "sales" } },
+    });
+    pipeline.mockResolvedValue(undefined);
+
+    await new DataSourceIngestionWorker(db, "external_db_onboarding").tick();
+
+    const [job] = await db.select().from(dataSourceJobs).where(eq(dataSourceJobs.id, jobId));
+    expect(job).toMatchObject({ companyId, dataSourceId: sourceId, status: "succeeded" });
+    expect(await db.select().from(dataSourceJobCheckpoints).where(eq(dataSourceJobCheckpoints.jobId, jobId))).toHaveLength(0);
   }, 30_000);
 
   it("dispatches embedding reindex jobs through the resumable worker lane", async () => {

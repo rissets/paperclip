@@ -120,6 +120,7 @@ export interface AgentDataSourceAccessConfig {
   mode: AgentDataSourceAccessMode;
   dataSourceIds: string[];
   collectionIds?: string[];
+  orchestrationMode?: "auto" | "off";
 }
 
 export interface AgentDataSourcesResponse {
@@ -129,6 +130,7 @@ export interface AgentDataSourcesResponse {
   mode: AgentDataSourceAccessMode;
   dataSourceIds: string[];
   collectionIds?: string[];
+  orchestrationMode?: "auto" | "off";
   effectiveDataSourceIds?: string[];
   assignedDataSources: any[];
   availableDataSources: any[];

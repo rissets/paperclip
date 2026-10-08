@@ -90,6 +90,14 @@ export function shouldSilenceHttpSuccessLog(
   url: string | undefined,
   statusCode: number,
 ): boolean {
+  // An issue plan is an optional document. The UI requests it to determine
+  // whether a plan exists and handles 404 as a normal empty state.
+  if (
+    statusCode === 404
+    && method?.toUpperCase() === "GET"
+    && url
+    && /^\/(?:api\/)?issues\/[^/]+\/documents\/plan$/i.test(normalizePath(url))
+  ) return true;
   if (statusCode >= 400) return false;
   if (statusCode === 304) return true;
   if (!method || !url) return false;

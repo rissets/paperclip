@@ -23,6 +23,7 @@ import {
   LayoutGrid,
   Users,
   Database,
+  Mic,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -207,6 +208,7 @@ export function Sidebar({ children }: { children?: ReactNode }) {
           <SidebarNavItem to="/routines" label="Routines" icon={Repeat} />
           <SidebarNavItem to="/artifacts" label="Artifacts" icon={Package} />
           <SidebarNavItem to="/data-sources" label="Data Sources" icon={Database} />
+          <SidebarNavItem to="/meetings" label="Meeting Notes" icon={Mic} />
           {showCases ? (
             <SidebarNavItem to="/cases" label="Cases" icon={Layers} textBadge="beta" />
           ) : null}

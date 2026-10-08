@@ -12,6 +12,8 @@ import type {
   OrchestratorSession,
   SqlQueryResult,
   StructuredQueryResult,
+  QueryExecutionListItem,
+  DataSourceMappingReviewRequest,
 } from "@paperclipai/shared";
 import { ApiError, api } from "./client";
 
@@ -207,6 +209,20 @@ export const dataSourcesApi = {
     api.post<{ success: boolean; data: DataSourceIngestionJob }>(
       `/companies/${encodeURIComponent(companyId)}/data-sources/${encodeURIComponent(id)}/embedding-reindex`,
       options,
+    ),
+
+  reviewSemanticMapping: (
+    companyId: string,
+    dataSourceId: string,
+    tableId: string,
+    request: DataSourceMappingReviewRequest,
+  ) =>
+    api.post<{
+      success: boolean;
+      data: { tableId: string; tableName: string; semanticModel: Record<string, unknown> };
+    }>(
+      `/companies/${encodeURIComponent(companyId)}/data-sources/${encodeURIComponent(dataSourceId)}/tables/${encodeURIComponent(tableId)}/mapping-review`,
+      request,
     ),
 
   pruneEmbeddingGenerations: (
@@ -458,4 +474,47 @@ export const dataSourcesApi = {
     return uploadMany(companyId, fileList, { description, collectionId },
       `/companies/${encodeURIComponent(companyId)}/data-source-collections/${encodeURIComponent(collectionId)}/upload`);
   },
+
+  // Query Experience & Evidence API (P6 & P7)
+  getQueryExperiences: (companyId: string, dataSourceId: string, status?: string) =>
+    api.get<{ experiences: any[] }>(
+      `/companies/${encodeURIComponent(companyId)}/orchestrator/query-experiences?dataSourceId=${encodeURIComponent(dataSourceId)}${status ? `&status=${encodeURIComponent(status)}` : ""}`,
+    ),
+
+  getQueryExecutions: (companyId: string, dataSourceId: string, limit = 50) =>
+    api.get<{ executions: QueryExecutionListItem[] }>(
+      `/companies/${encodeURIComponent(companyId)}/orchestrator/query-executions?dataSourceId=${encodeURIComponent(dataSourceId)}&limit=${Math.min(100, Math.max(1, Math.floor(limit)))}`,
+    ),
+
+  promoteQueryExperience: (
+    companyId: string,
+    dataSourceId: string,
+    experienceId: string,
+    data: { status: "reference_verified" | "user_approved"; verificationEvidence?: string },
+  ) =>
+    api.post<{ experience: any }>(
+      `/companies/${encodeURIComponent(companyId)}/orchestrator/query-experiences/${encodeURIComponent(experienceId)}/promote`,
+      {
+        dataSourceId,
+        targetStatus: data.status,
+        evidence: data.verificationEvidence ? { reviewNote: data.verificationEvidence } : { reviewNote: "Approved by a board operator" },
+      },
+    ),
+
+  submitQueryFeedback: (
+    companyId: string,
+    dataSourceId: string,
+    executionId: string,
+    data: {
+      verdict: "correct" | "needs_correction";
+      sentiment?: "positive" | "negative";
+      comment?: string;
+      correctionNote?: string;
+      businessFieldsToFix?: string[];
+    },
+  ) =>
+    api.post<{ ok: boolean }>(
+      `/companies/${encodeURIComponent(companyId)}/orchestrator/query-executions/${encodeURIComponent(executionId)}/feedback`,
+      { ...data, dataSourceId },
+    ),
 };

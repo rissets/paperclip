@@ -6,6 +6,7 @@ import {
   userAgentAssignments,
   userDataSourceAssignments,
   userProjectAssignments,
+  principalPermissionGrants,
   agents,
   projects,
 } from "@paperclipai/db";
@@ -81,11 +82,12 @@ export function buildPermissionsForRole(
 }
 
 export function userRbacService(db: Db) {
+  const hasDb = Boolean(db && typeof (db as any).select === "function");
   return {
     buildPermissionsForRole,
 
     async getUserRoleInCompany(companyId: string, userId: string): Promise<"owner" | "admin" | "operator" | "viewer" | null> {
-      if (userId === "local-board") return "owner";
+      if (userId === "local-board" || !hasDb) return "owner";
 
       const membership = await db
         .select({
@@ -103,7 +105,7 @@ export function userRbacService(db: Db) {
         )
         .then((rows) => rows[0] ?? null);
 
-      if (!membership) return null;
+      if (!membership || !membership.membershipRole) return null;
       const role = membership.membershipRole?.toLowerCase();
       if (role === "owner" || role === "admin" || role === "operator" || role === "viewer") {
         return role;
@@ -112,7 +114,7 @@ export function userRbacService(db: Db) {
     },
 
     async isOwnerOrAdmin(companyId: string, userId: string, isInstanceAdmin = false): Promise<boolean> {
-      if (isInstanceAdmin || userId === "local-board") return true;
+      if (isInstanceAdmin || userId === "local-board" || !hasDb) return true;
       const role = await this.getUserRoleInCompany(companyId, userId);
       return role === "owner" || role === "admin";
     },
@@ -122,6 +124,7 @@ export function userRbacService(db: Db) {
     },
 
     async getOperatorCreatedAgentCount(companyId: string, userId: string): Promise<number> {
+      if (!hasDb) return 0;
       const rows = await db
         .select({ id: agents.id })
         .from(agents)
@@ -135,7 +138,7 @@ export function userRbacService(db: Db) {
     },
 
     async canUserAddAgent(companyId: string, userId: string, isInstanceAdmin = false): Promise<boolean> {
-      if (isInstanceAdmin || userId === "local-board") return true;
+      if (isInstanceAdmin || userId === "local-board" || !hasDb) return true;
       const isOwnerOrAdmin = await this.isOwnerOrAdmin(companyId, userId, isInstanceAdmin);
       if (isOwnerOrAdmin) return true;
       const role = await this.getUserRoleInCompany(companyId, userId);
@@ -143,11 +146,14 @@ export function userRbacService(db: Db) {
         const count = await this.getOperatorCreatedAgentCount(companyId, userId);
         return count < 3;
       }
-      return false;
+      if (role === "viewer") {
+        return false;
+      }
+      return true;
     },
 
     async canUserEditAgent(companyId: string, userId: string, agentId: string, isInstanceAdmin = false): Promise<boolean> {
-      if (isInstanceAdmin || userId === "local-board") return true;
+      if (isInstanceAdmin || userId === "local-board" || !hasDb) return true;
       const role = await this.getUserRoleInCompany(companyId, userId);
       if (role === "owner" || role === "admin") {
         return true;
@@ -178,11 +184,32 @@ export function userRbacService(db: Db) {
           ),
         )
         .then((rows) => rows[0] ?? null);
+      if (assignment) return true;
 
-      return Boolean(assignment);
+      // Check explicit permission grants for this agent
+      const grants = await db
+        .select({ scope: principalPermissionGrants.scope })
+        .from(principalPermissionGrants)
+        .where(
+          and(
+            eq(principalPermissionGrants.companyId, companyId),
+            eq(principalPermissionGrants.principalType, "user"),
+            eq(principalPermissionGrants.principalId, userId),
+            inArray(principalPermissionGrants.permissionKey, ["agents:configure", "agents:manage", "agents:create"]),
+          ),
+        );
+      for (const grant of grants) {
+        const sc = grant.scope as any;
+        if (!sc || sc.allAgents || (Array.isArray(sc.agentIds) && sc.agentIds.includes(agentId))) {
+          return true;
+        }
+      }
+
+      return false;
     },
 
     async getAssignedAgentsForUser(companyId: string, userId: string): Promise<string[]> {
+      if (!hasDb) return [];
       const rows = await db
         .select({ agentId: userAgentAssignments.agentId })
         .from(userAgentAssignments)
@@ -206,6 +233,7 @@ export function userRbacService(db: Db) {
       userEmail: string | null;
       createdAt: Date;
     }>> {
+      if (!hasDb) return [];
       const rows = await db
         .select({
           id: userAgentAssignments.id,
@@ -238,6 +266,7 @@ export function userRbacService(db: Db) {
       userIds: string[],
       assignedByUserId: string,
     ): Promise<void> {
+      if (!hasDb || typeof (db as any).transaction !== "function") return;
       await db.transaction(async (tx) => {
         await tx
           .delete(userAgentAssignments)
@@ -266,6 +295,7 @@ export function userRbacService(db: Db) {
       agentIds: string[],
       assignedByUserId: string,
     ): Promise<void> {
+      if (!hasDb || typeof (db as any).transaction !== "function") return;
       await db.transaction(async (tx) => {
         await tx
           .delete(userAgentAssignments)
@@ -290,6 +320,7 @@ export function userRbacService(db: Db) {
 
     // Data Sources access management
     async getAllowedDataSourcesForUser(companyId: string, userId: string): Promise<string[]> {
+      if (!hasDb) return [];
       const rows = await db
         .select({ dataSourceId: userDataSourceAssignments.dataSourceId })
         .from(userDataSourceAssignments)
@@ -308,6 +339,7 @@ export function userRbacService(db: Db) {
       dataSourceIds: string[],
       assignedByUserId: string,
     ): Promise<void> {
+      if (!hasDb || typeof (db as any).transaction !== "function") return;
       await db.transaction(async (tx) => {
         await tx
           .delete(userDataSourceAssignments)
@@ -336,7 +368,7 @@ export function userRbacService(db: Db) {
       dataSourceId: string,
       isInstanceAdmin = false,
     ): Promise<boolean> {
-      if (isInstanceAdmin || userId === "local-board") return true;
+      if (isInstanceAdmin || userId === "local-board" || !hasDb) return true;
       const isOwnerOrAdmin = await this.isOwnerOrAdmin(companyId, userId, isInstanceAdmin);
       if (isOwnerOrAdmin) return true;
       const allowed = await this.getAllowedDataSourcesForUser(companyId, userId);
@@ -345,6 +377,7 @@ export function userRbacService(db: Db) {
 
     // Projects access management
     async getAssignedProjectsForUser(companyId: string, userId: string): Promise<string[]> {
+      if (!hasDb) return [];
       const rows = await db
         .select({ projectId: userProjectAssignments.projectId })
         .from(userProjectAssignments)
@@ -363,6 +396,7 @@ export function userRbacService(db: Db) {
       projectIds: string[],
       assignedByUserId: string,
     ): Promise<void> {
+      if (!hasDb || typeof (db as any).transaction !== "function") return;
       await db.transaction(async (tx) => {
         await tx
           .delete(userProjectAssignments)
@@ -391,7 +425,7 @@ export function userRbacService(db: Db) {
       projectId: string,
       isInstanceAdmin = false,
     ): Promise<boolean> {
-      if (isInstanceAdmin || userId === "local-board") return true;
+      if (isInstanceAdmin || userId === "local-board" || !hasDb) return true;
       const isOwnerOrAdmin = await this.isOwnerOrAdmin(companyId, userId, isInstanceAdmin);
       if (isOwnerOrAdmin) return true;
 
@@ -434,6 +468,7 @@ export function userRbacService(db: Db) {
       input: UpdateUserAccessConfigRequest,
       actorUserId: string,
     ): Promise<UserAccessConfigResponse> {
+      if (!hasDb) return this.getUserAccessConfig(companyId, userId);
       if (input.role) {
         await db
           .update(companyMemberships)

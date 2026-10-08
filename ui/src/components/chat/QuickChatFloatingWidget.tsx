@@ -31,6 +31,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn, agentRouteRef } from "@/lib/utils";
 import { useNavigate, useLocation } from "@/lib/router";
+import { useMeetingRecorder } from "@/context/MeetingRecorderContext";
 import type { Agent, Issue, IssueComment } from "@paperclipai/shared";
 
 interface QuickChatFloatingWidgetProps {
@@ -39,11 +40,14 @@ interface QuickChatFloatingWidgetProps {
 
 export function QuickChatFloatingWidget({ className }: QuickChatFloatingWidgetProps) {
   const { selectedCompanyId, selectedCompany } = useCompany();
+  const meetingRecorder = useMeetingRecorder();
+  const isDrawerActive = meetingRecorder.isOpen && !meetingRecorder.isMinimized;
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const location = useLocation();
 
   const isChatDetailPage = Boolean(location.pathname.match(/\/chats(\/|$)/));
+  const isMeetingSection = Boolean(location.pathname.match(/\/meetings(\/|$)/));
 
   const [isOpen, setIsOpen] = useState(false);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
@@ -56,21 +60,66 @@ export function QuickChatFloatingWidget({ className }: QuickChatFloatingWidgetPr
   const { data: agents = [] } = useQuery({
     queryKey: queryKeys.agents.list(selectedCompanyId ?? ""),
     queryFn: () => agentsApi.list(selectedCompanyId!),
-    enabled: !!selectedCompanyId && isOpen,
+    enabled: !!selectedCompanyId,
   });
 
-  // Pick default agent: prefer knowledge-agent, otherwise first agent
+  // Pick default agent: prefer meeting-agent on meeting pages, otherwise knowledge-agent, otherwise first agent
   const activeAgent: Agent | null = useMemo(() => {
     if (!agents.length) return null;
     if (selectedAgentId) {
       const found = agents.find((a) => a.id === selectedAgentId);
       if (found) return found;
     }
+    if (isMeetingSection) {
+      const meetingAgent = agents.find(
+        (a) =>
+          a.name.toLowerCase().includes("meeting") ||
+          a.name.toLowerCase().includes("copilot") ||
+          a.urlKey?.includes("meeting") ||
+          (a.metadata as Record<string, any>)?.paperclipBuiltInAgent?.key === "meeting-agent",
+      );
+      if (meetingAgent) return meetingAgent;
+    }
     const knowledge = agents.find(
       (a) => a.name.toLowerCase().includes("knowledge") || a.role === "researcher",
     );
     return knowledge ?? agents[0] ?? null;
-  }, [agents, selectedAgentId]);
+  }, [agents, selectedAgentId, isMeetingSection]);
+
+  // Auto-switch to meeting copilot agent when in meeting section
+  useEffect(() => {
+    if (isMeetingSection && agents.length > 0) {
+      const meetingAgent = agents.find(
+        (a) =>
+          a.name.toLowerCase().includes("meeting") ||
+          a.name.toLowerCase().includes("copilot") ||
+          a.urlKey?.includes("meeting") ||
+          (a.metadata as Record<string, any>)?.paperclipBuiltInAgent?.key === "meeting-agent",
+      );
+      if (meetingAgent && selectedAgentId !== meetingAgent.id) {
+        setSelectedAgentId(meetingAgent.id);
+      }
+    }
+  }, [isMeetingSection, agents]);
+
+  // Listen to open-meeting-chat event
+  useEffect(() => {
+    const handleOpenMeetingChat = () => {
+      const meetingAgent = agents.find(
+        (a) =>
+          a.name.toLowerCase().includes("meeting") ||
+          a.name.toLowerCase().includes("copilot") ||
+          a.urlKey?.includes("meeting") ||
+          (a.metadata as Record<string, any>)?.paperclipBuiltInAgent?.key === "meeting-agent",
+      );
+      if (meetingAgent) {
+        setSelectedAgentId(meetingAgent.id);
+      }
+      setIsOpen(true);
+    };
+    window.addEventListener("open-meeting-chat", handleOpenMeetingChat);
+    return () => window.removeEventListener("open-meeting-chat", handleOpenMeetingChat);
+  }, [agents]);
 
   // 2. Fetch or ensure active conversation for this agent
   const conversationQueryKey = useMemo(
@@ -322,6 +371,13 @@ export function QuickChatFloatingWidget({ className }: QuickChatFloatingWidgetPr
   const starterPrompts = useMemo(() => {
     if (!activeAgent) return [];
     const nameLower = activeAgent.name.toLowerCase();
+    if (isMeetingSection || nameLower.includes("meeting") || nameLower.includes("copilot")) {
+      return [
+        "Apa intisari dan kesimpulan dari rapat ini?",
+        "Ekstrak semua action items dan tindak lanjut",
+        "Cek korelasi topik rapat dengan SOP & Data Source",
+      ];
+    }
     if (nameLower.includes("knowledge") || activeAgent.role === "researcher") {
       return [
         "Apa saja komponen pendidikan yang didukung dashboard FK MILMED?",
@@ -341,13 +397,16 @@ export function QuickChatFloatingWidget({ className }: QuickChatFloatingWidgetPr
       "Riset dan ringkas informasi terkini",
       "Bantu bereskan tugas dan rencanakan langkah",
     ];
-  }, [activeAgent]);
+  }, [activeAgent, isMeetingSection]);
 
   // Don't render widget if no company selected or if viewing chat detail page
   if (isChatDetailPage || !selectedCompanyId) return null;
 
   return (
-    <div className={cn("fixed bottom-6 right-6 z-50 flex flex-col items-end", className)}>
+    <div
+      className={cn("fixed bottom-6 right-6 z-50 flex flex-col items-end transition-all duration-200", className)}
+      style={isDrawerActive ? { right: "26rem" } : undefined}
+    >
       {/* Floating Chat Window (Dialog) */}
       {isOpen && (
         <div

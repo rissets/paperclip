@@ -8075,6 +8075,12 @@ export function issueRoutes(
       includePluginOperations:
         req.query.includePluginOperations === "true" ||
         req.query.includePluginOperations === "1",
+      includeConversations:
+        req.query.includeConversations === undefined
+          ? undefined
+          : req.query.includeConversations === "true" || req.query.includeConversations === "1",
+      excludeConversations:
+        req.query.excludeConversations === "true" || req.query.excludeConversations === "1",
       includeBlockedBy:
         req.query.includeBlockedBy === "true" ||
         req.query.includeBlockedBy === "1",
@@ -8300,6 +8306,12 @@ export function issueRoutes(
       includePluginOperations:
         req.query.includePluginOperations === "true" ||
         req.query.includePluginOperations === "1",
+      includeConversations:
+        req.query.includeConversations === undefined
+          ? undefined
+          : req.query.includeConversations === "true" || req.query.includeConversations === "1",
+      excludeConversations:
+        req.query.excludeConversations === "true" || req.query.excludeConversations === "1",
       includeBlockedBy: true,
       includeBlockedInboxAttention: true,
       hasPlanDocument,

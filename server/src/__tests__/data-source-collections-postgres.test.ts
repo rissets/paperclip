@@ -129,4 +129,78 @@ if (!support.supported) console.warn(`Datasource collection PostgreSQL integrati
       tableId: customerTableId,
     }));
   }, 30_000);
+
+  it("publishes temporal overlap candidates in the collection profile without copying row values", async () => {
+    const companyId = randomUUID();
+    const collectionId = randomUUID();
+    const firstSourceId = randomUUID();
+    const secondSourceId = randomUUID();
+    const firstTableId = randomUUID();
+    const secondTableId = randomUUID();
+
+    await db.insert(companies).values({ id: companyId, name: "Temporal overlap test", issuePrefix: `T${companyId.slice(0, 8)}` });
+    await db.insert(dataSourceCollections).values({ id: collectionId, companyId, name: "Operations", slug: "operations" });
+    await db.insert(dataSources).values([
+      { id: firstSourceId, companyId, collectionId, name: "First upload", sourceType: "csv", status: "ready" },
+      { id: secondSourceId, companyId, collectionId, name: "Second upload", sourceType: "excel", status: "ready" },
+    ]);
+    await db.insert(dataSourceTables).values([
+      {
+        id: firstTableId,
+        companyId,
+        dataSourceId: firstSourceId,
+        tableName: "hourly_kpi",
+        rowCount: 2,
+        schemaDefinition: [{ name: "event_date", dataType: "date" }],
+        semanticModel: {
+          metrics: [{ name: "traffic volume" }],
+          entities: ["network events"],
+          qualityCounters: {
+            temporalBoundsByColumn: {
+              event_date: { minDate: "2026-01-01T00:00:00.000Z", maxDate: "2026-01-31T00:00:00.000Z" },
+            },
+          },
+        },
+      },
+      {
+        id: secondTableId,
+        companyId,
+        dataSourceId: secondSourceId,
+        tableName: "hourly_kpi",
+        rowCount: 2,
+        schemaDefinition: [{ name: "event_date", dataType: "date" }],
+        semanticModel: {
+          metrics: [{ name: "traffic volume" }],
+          entities: ["network events"],
+          qualityCounters: {
+            temporalBoundsByColumn: {
+              event_date: { minDate: "2026-01-15T00:00:00.000Z", maxDate: "2026-02-15T00:00:00.000Z" },
+            },
+          },
+          privateSample: ["sensitive row value must not leave its source"],
+        },
+      },
+    ]);
+
+    const service = new DataSourceCollectionsService(db, {
+      getCompanyDatabase: () => `paperclip_${companyId.replaceAll("-", "_")}`,
+    } as any);
+    const profile = await service.correlateCollection(companyId, collectionId);
+
+    expect(profile.temporalOverlapAnalysis).toMatchObject({
+      status: "complete",
+      tablesAnalyzed: 2,
+      tablesWithTemporalBounds: 2,
+      comparedPairs: 1,
+      findings: [expect.objectContaining({
+        overlapStart: "2026-01-15T00:00:00.000Z",
+        overlapEnd: "2026-01-31T00:00:00.000Z",
+        reviewRequired: true,
+      })],
+    });
+    const overlapFinding = profile.temporalOverlapAnalysis?.findings[0];
+    expect(new Set([overlapFinding?.sourceTableId, overlapFinding?.targetTableId]))
+      .toEqual(new Set([firstTableId, secondTableId]));
+    expect(JSON.stringify(profile.temporalOverlapAnalysis)).not.toContain("sensitive row value");
+  }, 30_000);
 });

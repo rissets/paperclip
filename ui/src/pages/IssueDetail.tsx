@@ -7029,7 +7029,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     />
   );
 
-  const issueHeaderBlock = issue.conversationAgentId ? null : (
+  const issueHeaderBlock = (issue.conversationAgentId && Boolean(conversation)) ? null : (
     <div
       data-testid="issue-detail-header"
       className={cn(

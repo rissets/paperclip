@@ -45,6 +45,7 @@ export function AgentDataSourcesTab({ agent, companyId }: Props) {
   const [mode, setMode] = useState<AccessMode>("none");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [selectedCollectionIds, setSelectedCollectionIds] = useState<string[]>([]);
+  const [orchestrationMode, setOrchestrationMode] = useState<"auto" | "off">("auto");
   const [search, setSearch] = useState("");
   const [filterType, setFilterType] = useState<"all" | "rag_document" | "structured" | "database">("all");
   const [isDirty, setIsDirty] = useState(false);
@@ -55,12 +56,18 @@ export function AgentDataSourcesTab({ agent, companyId }: Props) {
       setMode(data.mode);
       setSelectedIds(data.dataSourceIds || []);
       setSelectedCollectionIds(data.collectionIds || []);
+      setOrchestrationMode(data.orchestrationMode || "auto");
       setIsDirty(false);
     }
   }, [data]);
 
   const mutation = useMutation({
-    mutationFn: (newConfig: { mode: AccessMode; dataSourceIds: string[]; collectionIds: string[] }) =>
+    mutationFn: (newConfig: {
+      mode: AccessMode;
+      dataSourceIds: string[];
+      collectionIds: string[];
+      orchestrationMode: "auto" | "off";
+    }) =>
       agentsApi.updateDataSources(agent.id, newConfig, companyId),
     onSuccess: (updated) => {
       queryClient.setQueryData(queryKeys.agents.dataSources(agent.id), updated);
@@ -133,6 +140,7 @@ export function AgentDataSourcesTab({ agent, companyId }: Props) {
       mode,
       dataSourceIds: mode === "selected" ? selectedIds : [],
       collectionIds: mode === "selected" ? selectedCollectionIds : [],
+      orchestrationMode,
     });
   };
 
@@ -562,6 +570,135 @@ export function AgentDataSourcesTab({ agent, companyId }: Props) {
           </div>
         </div>
       )}
+
+      {/* Enterprise Orchestrator Card */}
+      <div className="rounded-lg border border-border bg-card p-5 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-border/60 pb-3">
+          <div className="space-y-1">
+            <h4 className="text-sm font-semibold text-foreground flex items-center gap-2">
+              <Sparkles className="h-4 w-4 text-primary" />
+              Enterprise Orchestrator
+            </h4>
+            <p className="text-xs text-muted-foreground">
+              Kontrol koordinasi terpusat untuk perencanaan query analitis, fast-path routing, dan eksekusi terverifikasi.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Badge
+              variant={orchestrationMode === "auto" && mode !== "none" && effectiveCount > 0 ? "default" : "secondary"}
+              className="text-xs"
+            >
+              {orchestrationMode === "auto" && mode !== "none" && effectiveCount > 0
+                ? "Status: Aktif"
+                : "Status: Nonaktif"}
+            </Badge>
+            <Badge variant="outline" className="text-xs font-mono">
+              Adapter: Supported
+            </Badge>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-center">
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-foreground">
+              Mode Orchestration
+            </label>
+            <p className="text-xs text-muted-foreground">
+              {orchestrationMode === "auto"
+                ? "Auto: Coordinator hanya diaktifkan ketika pertanyaan membutuhkan data analitis/terstruktur."
+                : "Off: Eksekusi normal agen tanpa koordinasi pipeline Enterprise Orchestrator."}
+            </p>
+            {mode === "none" && (
+              <p className="text-xs text-amber-500">
+                Catatan: Akses data source saat ini adalah Terisolasi (none). Berikan akses data source agar orkestrasi dapat berjalan.
+              </p>
+            )}
+          </div>
+
+          <div className="flex justify-start md:justify-end gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant={orchestrationMode === "auto" ? "default" : "outline"}
+              onClick={() => {
+                setOrchestrationMode("auto");
+                setIsDirty(true);
+              }}
+            >
+              Auto (Rekomendasi)
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant={orchestrationMode === "off" ? "default" : "outline"}
+              onClick={() => {
+                setOrchestrationMode("off");
+                setIsDirty(true);
+              }}
+            >
+              Off
+            </Button>
+          </div>
+        </div>
+
+        <div className="pt-2 border-t border-border/40 flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
+          <span>
+            Scope Penugasan: <strong className="text-foreground capitalize">{mode}</strong>
+          </span>
+          <span>&bull;</span>
+          <span>
+            Fast-Path Latency Target: <strong className="text-foreground">p95 &lt; 250ms</strong>
+          </span>
+          <span>&bull;</span>
+          <span>
+            Whole-Question Ceiling: <strong className="text-foreground">60s</strong>
+          </span>
+        </div>
+      </div>
+
+      {/* Verified Experience Learning & Mapping Review Card */}
+      <div className="rounded-lg border border-border bg-card p-5 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-border/60 pb-3">
+          <div className="space-y-1">
+            <h4 className="text-sm font-semibold text-foreground flex items-center gap-2">
+              <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+              Verified Experience &amp; Mapping Review
+            </h4>
+            <p className="text-xs text-muted-foreground">
+              Sistem query learning berbasis memori template terverifikasi dengan proteksi drift skema dan tinjauan umpan balik operator.
+            </p>
+          </div>
+          <Badge variant="outline" className="text-xs">
+            Audit Policy: Guarded
+          </Badge>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div className="p-3 rounded-md border border-border/60 bg-muted/20 space-y-1">
+            <div className="text-xs text-muted-foreground">Status Pembelajaran</div>
+            <div className="text-sm font-medium text-foreground">Candidate &rarr; Verified</div>
+            <p className="text-xs text-muted-foreground">
+              Keberhasilan SQL semata tidak otomatis mempromosikan template ke produksi.
+            </p>
+          </div>
+
+          <div className="p-3 rounded-md border border-border/60 bg-muted/20 space-y-1">
+            <div className="text-xs text-muted-foreground">Proteksi Skema Drift</div>
+            <div className="text-sm font-medium text-foreground">Fingerprint Active</div>
+            <p className="text-xs text-muted-foreground">
+              Template dideaktivasi otomatis jika skema atau definisi metrik upstream berubah.
+            </p>
+          </div>
+
+          <div className="p-3 rounded-md border border-border/60 bg-muted/20 space-y-1">
+            <div className="text-xs text-muted-foreground">Isolasi Akses &amp; ACL</div>
+            <div className="text-sm font-medium text-foreground">Reauthorized</div>
+            <p className="text-xs text-muted-foreground">
+              Penggunaan ulang template selalu memverifikasi izin sumber data terkini pemanggil.
+            </p>
+          </div>
+        </div>
+      </div>
 
       {/* Save Action Footer */}
       <div className="flex items-center justify-between pt-4 border-t border-border">

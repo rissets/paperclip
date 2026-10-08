@@ -88,6 +88,14 @@ function itEmbeddedPostgres(name: string, fn: () => Promise<void>): void {
 }
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
+const origMkdtempSync = fs.mkdtempSync.bind(fs);
+(fs as { mkdtempSync: typeof fs.mkdtempSync }).mkdtempSync = ((
+  prefix: string,
+  options?: Parameters<typeof origMkdtempSync>[1],
+) => {
+  return fs.realpathSync(origMkdtempSync(prefix, options as any));
+}) as typeof fs.mkdtempSync;
+
 function mockVerifiedSeedResult() {
   return {
     backupSummary: "snapshot.sql",

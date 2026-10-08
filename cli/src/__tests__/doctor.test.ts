@@ -87,15 +87,22 @@ function createTempConfig(serverPort: number): string {
 }
 
 describe("doctor", () => {
+  let nodeVersionDescriptor: PropertyDescriptor | undefined;
+
   beforeEach(() => {
     process.env = { ...ORIGINAL_ENV };
     delete process.env.PAPERCLIP_AGENT_JWT_SECRET;
     delete process.env.PAPERCLIP_SECRETS_MASTER_KEY;
     delete process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE;
+    nodeVersionDescriptor = Object.getOwnPropertyDescriptor(process.versions, "node");
+    Object.defineProperty(process.versions, "node", { ...nodeVersionDescriptor, value: "24.11.0" });
   });
 
   afterEach(() => {
     process.env = { ...ORIGINAL_ENV };
+    if (nodeVersionDescriptor) {
+      Object.defineProperty(process.versions, "node", nodeVersionDescriptor);
+    }
   });
 
   it("re-runs repairable checks so repaired failures do not remain blocking", async () => {

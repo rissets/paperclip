@@ -12,6 +12,7 @@ import { BreadcrumbProvider } from "./context/BreadcrumbContext";
 import { PanelProvider } from "./context/PanelContext";
 import { SidebarProvider } from "./context/SidebarContext";
 import { DialogProvider } from "./context/DialogContext";
+import { MeetingRecorderProvider } from "./context/MeetingRecorderContext";
 import { EditorAutocompleteProvider } from "./context/EditorAutocompleteContext";
 import { ToastProvider } from "./context/ToastContext";
 import { ThemeProvider } from "./context/ThemeContext";
@@ -77,7 +78,9 @@ getOrCreatePaperclipReactRoot(window, rootElement).render(
                           <PanelProvider>
                             <PluginLauncherProvider>
                               <DialogProvider>
-                                <App />
+                                <MeetingRecorderProvider>
+                                  <App />
+                                </MeetingRecorderProvider>
                               </DialogProvider>
                             </PluginLauncherProvider>
                           </PanelProvider>
