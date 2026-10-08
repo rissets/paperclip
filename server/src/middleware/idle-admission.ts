@@ -53,16 +53,25 @@ export const idleAdmissionMiddleware: RequestHandler = (req, res, next) => {
 // preserving router objects and error-handler arity. Waiting only for finish
 // loses async work after res.json(), including the disconnected-client case.
 // Keep this adapter isolated and exercise it against real Express in tests.
-type Layer = { handle: Function & { stack?: Layer[] }; route?: { stack: Layer[] } };
+type Layer = { handle: Function & { stack?: Layer[] }; route?: { stack?: Layer[] } | string };
 export function trackIdleRequestHandlers(app: Application): void {
-  const seen = new Set<Layer>();
-  const visit = (stack: Layer[], route = false) => {
+  const seen = new Set<unknown>();
+  const visit = (stack: unknown, route = false) => {
+    if (!Array.isArray(stack)) return;
     for (const layer of stack) {
+      if (!layer || typeof layer !== "object") continue;
       if (seen.has(layer)) continue;
       seen.add(layer);
-      if (layer.route) { visit(layer.route.stack, true); continue; }
-      if (layer.handle.stack) { visit(layer.handle.stack); continue; }
+      if (layer.route && typeof layer.route === "object" && Array.isArray(layer.route.stack)) {
+        visit(layer.route.stack, true);
+        continue;
+      }
+      if (layer.handle && typeof layer.handle === "function" && Array.isArray((layer.handle as any).stack)) {
+        visit((layer.handle as any).stack);
+        continue;
+      }
       const original = layer.handle;
+      if (typeof original !== "function") continue;
       if (original === idleAdmissionMiddleware) continue;
       const invoke = (req: Request, args: unknown[]) => {
         const work = requests.get(req);
@@ -94,6 +103,6 @@ export function trackIdleRequestHandlers(app: Application): void {
         : function (req: Request, res: unknown, next: unknown) { return invoke(req, [req, res, next]); };
     }
   };
-  visit(app.router.stack as Layer[]);
+  visit(app.router?.stack ?? (app as any)._router?.stack);
   markIdleIngressTracked();
 }

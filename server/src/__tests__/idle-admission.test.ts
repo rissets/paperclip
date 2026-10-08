@@ -100,4 +100,16 @@ describe("idle admission", () => {
     const done = beginIdleTrackedWork(); done(); done();
     expect(idleWorkSnapshot()).toEqual({ active: before.active, generation: before.generation + 2 });
   });
+
+  it("safely handles Connect-style and Vite middleware stacks with string routes", async () => {
+    const server = app();
+    const connectLike = Object.assign((_req: any, _res: any, next: any) => next(), {
+      stack: [
+        { route: "/assets", handle: (_req: any, _res: any, next: any) => next() },
+        { route: "/@vite/client", handle: (_req: any, _res: any, next: any) => next() },
+      ],
+    });
+    server.use(connectLike as any);
+    expect(() => trackIdleRequestHandlers(server)).not.toThrow();
+  });
 });
