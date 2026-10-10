@@ -224,7 +224,7 @@ function EnabledFileViewerProvider({ issueId, children }: Omit<FileViewerProvide
         { ...FILE_VIEWER_NAVIGATE_OPTIONS, ...opts, state: location.state },
       );
     },
-    [location.hash, location.pathname, location.state, navigate],
+    [location.hash, location.pathname, location.search, location.state, navigate],
   );
 
   const open = useCallback<FileViewerContextValue["open"]>(

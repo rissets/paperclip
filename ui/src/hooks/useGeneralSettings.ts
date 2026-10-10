@@ -1,4 +1,4 @@
-import { useContext } from "react";
+import { useContext, useMemo } from "react";
 import { useQuery, QueryClient, QueryClientContext } from "@tanstack/react-query";
 import { instanceSettingsApi } from "@/api/instanceSettings";
 import { queryKeys } from "@/lib/queryKeys";
@@ -16,10 +16,13 @@ export function useGeneralSettings() {
     contextClient ?? fallbackQueryClient,
   );
 
-  return {
-    ...query,
-    settings: query.data,
-    showWorkingActivityAndReasoning:
-      query.data?.showWorkingActivityAndReasoning ?? true,
-  };
+  return useMemo(
+    () => ({
+      ...query,
+      settings: query.data,
+      showWorkingActivityAndReasoning:
+        query.data?.showWorkingActivityAndReasoning ?? true,
+    }),
+    [query, query.data],
+  );
 }

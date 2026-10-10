@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useState, type ReactNode, type MouseEventHandler } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode, type MouseEventHandler } from "react";
 
 export interface Breadcrumb {
   label: string;
@@ -65,6 +65,15 @@ function breadcrumbsEqual(left: Breadcrumb[], right: Breadcrumb[]) {
   return true;
 }
 
+function panelControlEqual(
+  left: BreadcrumbPanelControl | null,
+  right: BreadcrumbPanelControl | null,
+): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return left.open === right.open && left.onToggle === right.onToggle;
+}
+
 export function buildDocumentTitle(breadcrumbs: Breadcrumb[], companyName?: string | null) {
   const pageParts = breadcrumbs.length === 0
     ? []
@@ -86,34 +95,46 @@ export function BreadcrumbProvider({ children, companyName }: BreadcrumbProvider
   }, []);
 
   const setMobileToolbar = useCallback((node: ReactNode | null) => {
-    setMobileToolbarState(node);
+    setMobileToolbarState((current) => (current === node ? current : !current && !node ? current : node));
   }, []);
 
   const setBreadcrumbToolbar = useCallback((node: ReactNode | null) => {
-    setBreadcrumbToolbarState(node);
+    setBreadcrumbToolbarState((current) => (current === node ? current : !current && !node ? current : node));
   }, []);
 
   const setBreadcrumbPanelControl = useCallback((control: BreadcrumbPanelControl | null) => {
-    setBreadcrumbPanelControlState(control);
+    setBreadcrumbPanelControlState((current) => (panelControlEqual(current, control) ? current : control));
   }, []);
 
   useEffect(() => {
     document.title = buildDocumentTitle(breadcrumbs, companyName);
   }, [breadcrumbs, companyName]);
 
+  const value = useMemo<BreadcrumbContextValue>(
+    () => ({
+      breadcrumbs,
+      setBreadcrumbs,
+      breadcrumbToolbar,
+      setBreadcrumbToolbar,
+      breadcrumbPanelControl,
+      setBreadcrumbPanelControl,
+      mobileToolbar,
+      setMobileToolbar,
+    }),
+    [
+      breadcrumbs,
+      setBreadcrumbs,
+      breadcrumbToolbar,
+      setBreadcrumbToolbar,
+      breadcrumbPanelControl,
+      setBreadcrumbPanelControl,
+      mobileToolbar,
+      setMobileToolbar,
+    ],
+  );
+
   return (
-    <BreadcrumbContext.Provider
-      value={{
-        breadcrumbs,
-        setBreadcrumbs,
-        breadcrumbToolbar,
-        setBreadcrumbToolbar,
-        breadcrumbPanelControl,
-        setBreadcrumbPanelControl,
-        mobileToolbar,
-        setMobileToolbar,
-      }}
-    >
+    <BreadcrumbContext.Provider value={value}>
       {children}
     </BreadcrumbContext.Provider>
   );

@@ -143,7 +143,8 @@ export function SidePanelTabs({
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
-  const tabIds = useMemo(() => tabs.map((tab) => tab.id), [tabs]);
+  const tabIdsKey = tabs.map((tab) => tab.id).join(",");
+  const tabIds = useMemo(() => tabs.map((tab) => tab.id), [tabIdsKey]);
 
   function findTabElement(tabId: string, selector: "wrapper" | "target") {
     const attribute = selector === "wrapper"
@@ -167,12 +168,13 @@ export function SidePanelTabs({
   useEffect(() => {
     const element = scrollRef.current;
     if (!element || appearance !== "streamlined-task") {
-      setShowEndFade(false);
+      setShowEndFade((prev) => (prev ? false : prev));
       return;
     }
     const updateEndFade = () => {
       const remainingScroll = element.scrollWidth - element.clientWidth - element.scrollLeft;
-      setShowEndFade(remainingScroll > 1);
+      const nextShow = remainingScroll > 1;
+      setShowEndFade((prev) => (prev !== nextShow ? nextShow : prev));
     };
     updateEndFade();
     element.addEventListener("scroll", updateEndFade, { passive: true });
@@ -183,7 +185,7 @@ export function SidePanelTabs({
       element.removeEventListener("scroll", updateEndFade);
       observer?.disconnect();
     };
-  }, [appearance, tabIds]);
+  }, [appearance, tabIdsKey]);
 
   function focusTab(tabId: string | null) {
     window.requestAnimationFrame(() => {

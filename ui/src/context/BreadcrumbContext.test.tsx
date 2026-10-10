@@ -119,4 +119,40 @@ describe("BreadcrumbContext", () => {
     expect(buildDocumentTitle([{ label: "Inbox" }], "  ")).toBe("Inbox • Primbon");
     expect(buildDocumentTitle([], null)).toBe("Primbon");
   });
+
+  it("does not rerender consumers when setBreadcrumbPanelControl receives equivalent controls", () => {
+    let renderCount = 0;
+    let updateControl: ((control: { open: boolean; onToggle: () => void } | null) => void) | null = null;
+    const toggle = () => {};
+
+    function TestConsumer() {
+      const { breadcrumbPanelControl, setBreadcrumbPanelControl } = useBreadcrumbs();
+      renderCount++;
+      updateControl = setBreadcrumbPanelControl;
+      return null;
+    }
+
+    act(() => {
+      root.render(
+        <BreadcrumbProvider>
+          <TestConsumer />
+        </BreadcrumbProvider>,
+      );
+    });
+
+    expect(renderCount).toBe(1);
+
+    act(() => {
+      updateControl?.({ open: true, onToggle: toggle });
+    });
+
+    expect(renderCount).toBe(2);
+
+    // Identical open state and handler identity must not rerender
+    act(() => {
+      updateControl?.({ open: true, onToggle: toggle });
+    });
+
+    expect(renderCount).toBe(2);
+  });
 });

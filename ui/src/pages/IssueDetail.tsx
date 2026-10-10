@@ -5566,6 +5566,18 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     breadcrumbStatusKey,
   ]);
 
+  const toggleTaskSidePanelRef = useRef(toggleTaskSidePanel);
+  toggleTaskSidePanelRef.current = toggleTaskSidePanel;
+  const stableToggleTaskSidePanel = useCallback(() => {
+    toggleTaskSidePanelRef.current();
+  }, []);
+
+  const openTaskSidePanelRef = useRef(openTaskSidePanel);
+  openTaskSidePanelRef.current = openTaskSidePanel;
+  const stableOpenTaskSidePanel = useCallback(() => {
+    openTaskSidePanelRef.current();
+  }, []);
+
   useEffect(() => {
     if (!streamlinedTaskDetailEnabled || !taskChatShellEnabled || !issue?.id) {
       setBreadcrumbPanelControl(null);
@@ -5574,7 +5586,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
 
     setBreadcrumbPanelControl({
       open: panelVisible && !suppressPanelUntilPlan,
-      onToggle: toggleTaskSidePanel,
+      onToggle: stableToggleTaskSidePanel,
     });
 
     return () => setBreadcrumbPanelControl(null);
@@ -5585,7 +5597,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     streamlinedTaskDetailEnabled,
     suppressPanelUntilPlan,
     taskChatShellEnabled,
-    toggleTaskSidePanel,
+    stableToggleTaskSidePanel,
   ]);
 
   useEffect(() => {
@@ -5601,7 +5613,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
         <TooltipProvider>
           <SidePanelToggleButton
             open={false}
-            onToggle={openTaskSidePanel}
+            onToggle={stableOpenTaskSidePanel}
             shortcut="]"
             className="shrink-0"
           />
@@ -5613,7 +5625,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
   }, [
     isMobile,
     issue?.id,
-    openTaskSidePanel,
+    stableOpenTaskSidePanel,
     panelVisible,
     setBreadcrumbToolbar,
     streamlinedTaskDetailEnabled,
@@ -8472,12 +8484,14 @@ function IssueFileViewer({
   useSidePanel?: boolean;
 }) {
   const viewer = useRequiredFileViewer();
+  const viewerOpenBrowseRef = useRef(viewer.openBrowse);
+  viewerOpenBrowseRef.current = viewer.openBrowse;
 
   useEffect(() => {
     if (!useSidePanel || !promptOpen) return;
-    viewer.openBrowse();
+    viewerOpenBrowseRef.current();
     onPromptOpenChange(false);
-  }, [onPromptOpenChange, promptOpen, useSidePanel, viewer]);
+  }, [onPromptOpenChange, promptOpen, useSidePanel]);
 
   const open = viewer.state !== null || viewer.browse || promptOpen;
   const showPromptWhenEmpty =

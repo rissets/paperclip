@@ -363,4 +363,30 @@ describe("SidePanelTabs", () => {
     act(() => close.click());
     expect(document.activeElement).toBe(container.querySelector('[data-side-panel-tab-target="document:plan"]'));
   });
+
+  it("does not cause infinite re-render loops when parent re-renders with new tabs array reference", () => {
+    const errorSpy = vi.spyOn(console, "error");
+    for (let i = 0; i < 60; i++) {
+      act(() => {
+        root.render(
+          <TooltipProvider>
+            <SidePanelTabs
+              tabs={[
+                { id: "properties", type: "view", label: "Properties", closable: true },
+                { id: "document:plan", type: "document", label: "Plan", closable: true },
+              ]}
+              activeTabId="properties"
+              onActiveTabChange={vi.fn()}
+              onCloseTab={vi.fn()}
+              appearance="streamlined-task"
+            />
+          </TooltipProvider>,
+        );
+      });
+    }
+    const maxDepthError = errorSpy.mock.calls.find((call) =>
+      call.some((arg) => typeof arg === "string" && arg.includes("Maximum update depth exceeded")),
+    );
+    expect(maxDepthError).toBeUndefined();
+  });
 });

@@ -206,7 +206,13 @@ async function authorizeUpgrade(
       companyId,
       actorType: "board",
       actorId: userId,
-      actor: { type: "board", userId, source: "session", companyIds: memberships.map(m => m.companyId) },
+      actor: {
+        type: "board",
+        userId,
+        source: "session",
+        companyIds: memberships.map((m) => m.companyId),
+        isInstanceAdmin: Boolean(roleRow),
+      },
     };
   }
 
