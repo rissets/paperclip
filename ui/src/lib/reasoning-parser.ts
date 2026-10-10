@@ -264,6 +264,196 @@ export function itemsToReasoningSteps(items: TaskChatTurnChildItem[]): Reasoning
   return steps;
 }
 
+export interface RawCoTPart {
+  type: string;
+  text?: string;
+  toolCallId?: string;
+  toolName?: string;
+  args?: unknown;
+  argsText?: string;
+  result?: unknown;
+}
+
+function isToolError(result: unknown): boolean {
+  if (!result) return false;
+  if (typeof result === "object" && (result as any).isError) return true;
+  if (typeof result === "string" && /exited with code [^0]/i.test(result)) return true;
+  return false;
+}
+
+/**
+ * Converts a stream of CoT message parts (reasoning + tool calls)
+ * into a structured, chronological list of ReasoningStep items.
+ */
+export function cotPartsToReasoningSteps(
+  cotParts: readonly RawCoTPart[],
+): ReasoningStep[] {
+  const steps: ReasoningStep[] = [];
+
+  for (const part of cotParts) {
+    if (part.type === "reasoning") {
+      const text = (part.text ?? "").trim();
+      if (!text) continue;
+
+      const paragraphs = text
+        .split(/\n\s*\n/)
+        .map((p) => p.trim())
+        .filter(Boolean);
+
+      for (const paragraph of paragraphs) {
+        const lines = paragraph.split("\n").map((l) => l.trim()).filter(Boolean);
+        if (
+          lines.length > 1 &&
+          lines.every(
+            (line) =>
+              line.length < 140 &&
+              /^[-\*•\d\.]|\b(Update|Run|Check|Compile|View|Create|Verify|Present)\b/i.test(line),
+          )
+        ) {
+          for (const line of lines) {
+            const cleanLine = line.replace(/^[-\*•\d\.\s]+/, "").trim();
+            if (!cleanLine) continue;
+            steps.push({
+              id: `cot-step-${steps.length + 1}`,
+              kind: classifyStepKind(cleanLine),
+              title: cleanLine,
+              status: "completed",
+            });
+          }
+        } else {
+          const kind = classifyStepKind(paragraph, "thought");
+          if (kind === "thought") {
+            steps.push({
+              id: `cot-think-${steps.length + 1}`,
+              kind: "thought",
+              title: paragraph,
+              body: paragraph,
+              status: "completed",
+            });
+          } else {
+            const firstLine = lines[0] ?? paragraph;
+            const remaining = lines.slice(1).join("\n");
+            steps.push({
+              id: `cot-step-${steps.length + 1}`,
+              kind,
+              title: firstLine,
+              detail: remaining || undefined,
+              status: "completed",
+            });
+          }
+        }
+      }
+    } else if (part.type === "tool-call") {
+      const toolName = part.toolName || "tool";
+      let parsedArgs: any = part.args;
+      if (!parsedArgs && typeof part.argsText === "string") {
+        try {
+          parsedArgs = JSON.parse(part.argsText);
+        } catch {}
+      }
+
+      const record =
+        parsedArgs && typeof parsedArgs === "object" ? parsedArgs : {};
+
+      const humanDescription =
+        typeof record.toolSummary === "string" && record.toolSummary.trim()
+          ? record.toolSummary.trim()
+          : typeof record.toolAction === "string" && record.toolAction.trim()
+            ? record.toolAction.trim()
+            : typeof record.description === "string" && record.description.trim()
+              ? record.description.trim()
+              : typeof record.summary === "string" && record.summary.trim()
+                ? record.summary.trim()
+                : typeof record.intent === "string" && record.intent.trim()
+                  ? record.intent.trim()
+                  : typeof record.task === "string" && record.task.trim()
+                    ? record.task.trim()
+                    : typeof record.title === "string" && record.title.trim()
+                      ? record.title.trim()
+                      : null;
+
+      let title = humanDescription;
+      let kind: ReasoningStep["kind"] = "tool";
+
+      const isCommand =
+        /^(run|exec|bash|sh|terminal|command|komputer)/i.test(toolName) ||
+        Boolean(record.CommandLine || record.command || record.cmd);
+
+      if (isCommand) {
+        kind = "command";
+        if (!title) {
+          const cmd = record.CommandLine || record.command || record.cmd;
+          if (typeof cmd === "string" && cmd.trim()) {
+            const clean = cmd
+              .replace(/^bash\s+-c\s+["']?/, "")
+              .replace(/["']?$/, "")
+              .trim();
+            title = clean.length > 80 ? `Run: ${clean.slice(0, 80)}…` : `Run: ${clean}`;
+          } else {
+            title = "Komputer";
+          }
+        }
+      } else if (
+        /search|grep|glob|find|query/i.test(toolName) ||
+        Boolean(record.query)
+      ) {
+        kind = "search";
+        if (!title) {
+          const q = record.query || record.pattern;
+          title = typeof q === "string" && q.trim() ? `Search: ${q.trim()}` : "Search";
+        }
+      } else if (
+        /drive|file|document|pdf|read|write|patch|folder/i.test(toolName) ||
+        Boolean(record.TargetFile || record.path || record.filePath)
+      ) {
+        kind = "file";
+        if (!title) {
+          const f = record.TargetFile || record.path || record.filePath || record.file;
+          if (typeof f === "string" && f.trim()) {
+            const base = f.split("/").pop() ?? f;
+            const prefix = /write/i.test(toolName)
+              ? "Write file"
+              : /edit/i.test(toolName)
+                ? "Edit file"
+                : "View file";
+            title = `${prefix}: ${base}`;
+          } else {
+            title = humanizeActionTitle(toolName);
+          }
+        }
+      } else if (/keep|note|scratchpad/i.test(toolName)) {
+        kind = "note";
+        if (!title) title = "Note";
+      } else {
+        if (!title) {
+          title = humanizeActionTitle(toolName);
+        }
+        kind = classifyStepKind(title, "tool");
+      }
+
+      if (title && kind === "tool") {
+        kind = classifyStepKind(title, "tool");
+      }
+
+      const status =
+        part.result === undefined
+          ? "running"
+          : isToolError(part.result)
+            ? "failed"
+            : "completed";
+
+      steps.push({
+        id: part.toolCallId || `tool-${steps.length + 1}`,
+        kind,
+        title: title || humanizeActionTitle(toolName),
+        status,
+      });
+    }
+  }
+
+  return steps;
+}
+
 function humanizeActionTitle(name: string): string {
   if (!name) return "Action";
   const formatted = name

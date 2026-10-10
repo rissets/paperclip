@@ -107,7 +107,7 @@ export function TaskChatReasoningTimeline({
 
   return (
     <div className={cn("w-full py-1", className)}>
-      {/* Header row matching Gemini/Paperclip reference ("Pemikiran ∨" or "Pemikiran · X steps") */}
+      {/* Header row matching Gambar 2, 3, 4 reference ("Pemikiran ⌄" or custom title) */}
       {hasSteps && (
         <button
           type="button"
@@ -116,6 +116,7 @@ export function TaskChatReasoningTimeline({
           className="flex items-center gap-1.5 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors group cursor-pointer text-left"
           data-testid={testId}
         >
+          <span className="font-medium text-foreground/90">{title}</span>
           <ChevronDown
             className={cn(
               "size-3.5 shrink-0 transition-transform group-hover:text-foreground",
@@ -123,12 +124,13 @@ export function TaskChatReasoningTimeline({
             )}
             aria-hidden="true"
           />
-          <span className="font-medium text-foreground/90">{title}</span>
-          {count > 0 && (
+          {isStreaming ? (
+            <span className="text-muted-foreground">· Working</span>
+          ) : count > 0 ? (
             <span className="text-muted-foreground">
               · {count} {count === 1 ? "step" : "steps"}
             </span>
-          )}
+          ) : null}
         </button>
       )}
 

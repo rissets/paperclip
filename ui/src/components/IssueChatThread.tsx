@@ -5,6 +5,8 @@ import { ComposerRunSettingsPicker } from "./task-chat/ComposerRunSettingsPicker
 import { ComposerAddMenu, ComposerModeChip } from "./task-chat/ComposerAddMenu";
 import { TaskChatPausedTakeover, type TaskComposerPause } from "./task-chat/TaskChatPausedTakeover";
 import { useEmailComment } from "./EmailMessageCard";
+import { TaskChatReasoningTimeline } from "./task-chat/TaskChatReasoningTimeline";
+import { cotPartsToReasoningSteps } from "@/lib/reasoning-parser";
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
 import type {
   ReasoningMessagePart,
@@ -1224,33 +1226,17 @@ type IssueChatCoTPart = ReasoningMessagePart | ToolCallMessagePart;
 function IssueChatChainOfThought({
   message,
   cotParts,
+  textParts = [],
 }: {
   message: ThreadMessage;
   cotParts: readonly IssueChatCoTPart[];
+  textParts?: readonly TextMessagePart[];
 }) {
   const { data: generalSettings } = useGeneralSettings();
   const showWorkingActivityAndReasoning =
     generalSettings?.showWorkingActivityAndReasoning ?? true;
 
-  const { agentMap } = useContext(IssueChatCtx);
   const custom = message.metadata.custom as Record<string, unknown>;
-  const runAgentId =
-    typeof custom.runAgentId === "string" ? custom.runAgentId : null;
-  const authorAgentId =
-    typeof custom.authorAgentId === "string" ? custom.authorAgentId : null;
-  const agentId = authorAgentId ?? runAgentId;
-  const agentIcon = agentId ? agentMap?.get(agentId)?.icon : undefined;
-  // Adapters whose backends overwhelm the one-line reasoning ticker declare
-  // a scrollable live reasoning view via their UI adapter module
-  // (transcriptPresentation.liveReasoningView); resolved through the registry
-  // so this component never branches on adapter identities. Every adapter
-  // without a declaration keeps the existing ticker rendering.
-  const adapterType =
-    typeof custom.adapterType === "string" ? custom.adapterType : null;
-  const isVerboseStreamingBackend =
-    (adapterType
-      ? findUIAdapter(adapterType)?.transcriptPresentation?.liveReasoningView
-      : undefined) === "scrollLog";
   const isMessageRunning =
     message.role === "assistant" && message.status?.type === "running";
 
@@ -1259,36 +1245,38 @@ function IssueChatChainOfThought({
     [message.content, cotParts],
   );
 
-  const allReasoningText = cotParts
-    .filter(
-      (p): p is { type: "reasoning"; text: string } =>
-        p.type === "reasoning" && !!p.text,
-    )
-    .map((p) => p.text)
-    .join("\n");
-  const toolParts = cotParts.filter(
-    (p): p is ToolCallMessagePart => p.type === "tool-call",
-  );
-
   const rawSegments = Array.isArray(custom.chainOfThoughtSegments)
     ? (custom.chainOfThoughtSegments as SegmentTiming[])
     : [];
-  const segmentTiming = myIndex >= 0 ? (rawSegments[myIndex] ?? null) : null;
   const isActive = isCoTSegmentActive({
     isMessageRunning,
     segmentIndex: myIndex,
     segmentCount: rawSegments.length,
   });
 
-  const [expanded, setExpanded] = useState(isActive);
-  const liveElapsed = useLiveElapsed(segmentTiming?.startMs, isActive);
+  const steps = useMemo(() => cotPartsToReasoningSteps(cotParts), [cotParts]);
 
-  useEffect(() => {
-    if (isActive) setExpanded(true);
-  }, [isActive]);
+  const isHistorical = useMemo(() => {
+    if (isMessageRunning || isActive) return false;
+    if (!message.createdAt) return false;
+    const ageMs = Date.now() - new Date(message.createdAt).getTime();
+    return ageMs > 30_000;
+  }, [isMessageRunning, isActive, message.createdAt]);
 
   if (!showWorkingActivityAndReasoning) {
-    if (!isActive) return null;
+    if (!isActive) {
+      return (
+        <>
+          {textParts.map((tp, idx) => (
+            <IssueChatTextPart
+              key={`${message.id}:text:${idx}`}
+              text={tp.text}
+              recessed={false}
+            />
+          ))}
+        </>
+      );
+    }
     const currentStatusMessage = readCustomString(custom, "currentStatusMessage");
     const currentToolName = readCustomString(custom, "currentToolName");
     const label = currentToolName
@@ -1307,119 +1295,30 @@ function IssueChatChainOfThought({
     );
   }
 
-  let headerVerb: string;
-  let headerSuffix: string | null = null;
-  if (isActive) {
-    headerVerb = "Working";
-    if (liveElapsed) headerSuffix = `for ${liveElapsed}`;
-  } else if (segmentTiming) {
-    const durationMs = segmentTiming.endMs - segmentTiming.startMs;
-    const durationText = formatDurationWords(durationMs);
-    headerVerb = "Worked";
-    if (durationText) headerSuffix = `for ${durationText}`;
-  } else {
-    headerVerb = "Worked";
-  }
-
-  const toolSummary = toolCountSummary(toolParts);
-  const hasContent = allReasoningText.trim().length > 0 || toolParts.length > 0;
-
   return (
-    <div>
-      <button
-        type="button"
-        className="group flex w-full items-start gap-2.5 rounded-lg px-1 py-2 text-left transition-colors hover:bg-accent/5"
-        onClick={() => hasContent && setExpanded((v) => !v)}
+    <div className="w-full">
+      <TaskChatReasoningTimeline
+        steps={steps}
+        title="Pemikiran"
+        defaultOpen={true}
+        delaySeconds={15}
+        isHistorical={isHistorical}
+        isStreaming={isActive || isMessageRunning}
       >
-        <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 items-center gap-2.5">
-            <span className="inline-flex items-center gap-2 text-sm font-medium text-foreground/80">
-              {agentId ? (
-                <AgentAvatar agent={agentId ? agentMap?.get(agentId) ?? { id: agentId } : undefined} size={16} />
-              ) : isActive ? (
-                <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />
-              ) : (
-                <span className="flex h-4 w-4 shrink-0 items-center justify-center">
-                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500/70" />
-                </span>
-              )}
-              {isActive ? (
-                <span className="shimmer-text">{headerVerb}</span>
-              ) : (
-                headerVerb
-              )}
-            </span>
-            {headerSuffix ? (
-              <span className="text-xs text-muted-foreground/60">
-                {headerSuffix}
-              </span>
-            ) : null}
-            {toolSummary ? (
-              <span className="text-xs text-muted-foreground/40">
-                · {toolSummary}
-              </span>
-            ) : null}
-          </div>
-          <IssueChatLiveRunStatusLine
-            custom={custom}
-            active={isActive}
-            className="pl-6"
+        {textParts.map((tp, idx) => (
+          <IssueChatTextPart
+            key={`${message.id}:text:${idx}`}
+            text={tp.text}
+            recessed={steps.length > 0}
           />
-        </div>
-        {hasContent ? (
-          <ChevronDown
-            className={cn(
-              "mt-0.5 h-4 w-4 shrink-0 text-muted-foreground/50 transition-transform",
-              expanded && "rotate-180",
-            )}
-          />
-        ) : null}
-      </button>
-      {expanded && hasContent ? (
-        <div className="space-y-1 py-1">
-          {isActive && isVerboseStreamingBackend ? (
-            <>
-              {allReasoningText ? (
-                <IssueChatVerboseLiveReasoningPart text={allReasoningText} />
-              ) : null}
-              {toolParts.map((tool) => (
-                <IssueChatToolPart
-                  key={tool.toolCallId}
-                  toolName={tool.toolName}
-                  args={tool.args}
-                  argsText={tool.argsText}
-                  result={tool.result}
-                  isError={false}
-                />
-              ))}
-            </>
-          ) : isActive ? (
-            <>
-              {allReasoningText ? (
-                <IssueChatReasoningPart text={allReasoningText} />
-              ) : null}
-              {toolParts.length > 0 ? (
-                <IssueChatRollingToolPart toolParts={toolParts} />
-              ) : null}
-            </>
-          ) : (
-            <>
-              {allReasoningText ? (
-                <IssueChatReasoningPart text={allReasoningText} />
-              ) : null}
-              {toolParts.map((tool) => (
-                <IssueChatToolPart
-                  key={tool.toolCallId}
-                  toolName={tool.toolName}
-                  args={tool.args}
-                  argsText={tool.argsText}
-                  result={tool.result}
-                  isError={false}
-                />
-              ))}
-            </>
-          )}
-        </div>
+        ))}
+      </TaskChatReasoningTimeline>
+      {isActive ? (
+        <IssueChatLiveRunStatusLine
+          custom={custom}
+          active={isActive}
+          className="pl-6 pt-1"
+        />
       ) : null}
     </div>
   );
@@ -1962,42 +1861,56 @@ const IssueChatTextParts = memo(function IssueChatTextParts({
   );
 });
 
+type AssistantGroup =
+  | { type: "text"; part: TextMessagePart; index: number }
+  | {
+      type: "cot";
+      parts: IssueChatCoTPart[];
+      textParts: TextMessagePart[];
+      startIndex: number;
+    };
+
 function groupAssistantParts(
   content: readonly ThreadMessage["content"][number][],
-): Array<
-  | { type: "text"; part: TextMessagePart; index: number }
-  | { type: "cot"; parts: IssueChatCoTPart[]; startIndex: number }
-> {
-  const groups: Array<
-    | { type: "text"; part: TextMessagePart; index: number }
-    | { type: "cot"; parts: IssueChatCoTPart[]; startIndex: number }
-  > = [];
+): AssistantGroup[] {
+  const groups: AssistantGroup[] = [];
   let pendingCoT: IssueChatCoTPart[] = [];
   let pendingStartIndex = -1;
 
-  const flushCoT = () => {
-    if (pendingCoT.length === 0) return;
-    groups.push({
-      type: "cot",
-      parts: pendingCoT,
-      startIndex: pendingStartIndex,
-    });
-    pendingCoT = [];
-    pendingStartIndex = -1;
-  };
-
-  content.forEach((part, index) => {
+  for (let index = 0; index < content.length; index++) {
+    const part = content[index]!;
     if (part.type === "reasoning" || part.type === "tool-call") {
       if (pendingCoT.length === 0) pendingStartIndex = index;
       pendingCoT.push(part);
-      return;
+    } else if (part.type === "text") {
+      if (pendingCoT.length > 0) {
+        const textParts: TextMessagePart[] = [part];
+        while (index + 1 < content.length && content[index + 1]!.type === "text") {
+          index++;
+          textParts.push(content[index]! as TextMessagePart);
+        }
+        groups.push({
+          type: "cot",
+          parts: pendingCoT,
+          textParts,
+          startIndex: pendingStartIndex,
+        });
+        pendingCoT = [];
+        pendingStartIndex = -1;
+      } else {
+        groups.push({ type: "text", part, index });
+      }
     }
-    flushCoT();
-    if (part.type === "text") {
-      groups.push({ type: "text", part, index });
-    }
-  });
-  flushCoT();
+  }
+
+  if (pendingCoT.length > 0) {
+    groups.push({
+      type: "cot",
+      parts: pendingCoT,
+      textParts: [],
+      startIndex: pendingStartIndex,
+    });
+  }
 
   return groups;
 }
@@ -2030,6 +1943,7 @@ const IssueChatAssistantParts = memo(function IssueChatAssistantParts({
             key={`${message.id}:cot:${group.startIndex}`}
             message={message}
             cotParts={group.parts}
+            textParts={group.textParts}
           />
         );
       })}

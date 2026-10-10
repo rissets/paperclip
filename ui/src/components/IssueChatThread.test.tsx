@@ -4936,6 +4936,98 @@ describe("IssueChatThread", () => {
       avatarUrl: "/avatars/alice.png",
     });
   });
+
+  it("renders assistant reasoning timeline with connected steps and final response", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <MemoryRouter>
+          <IssueChatThread
+            comments={[]}
+            linkedRuns={[]}
+            timelineEvents={[]}
+            liveRuns={[
+              {
+                id: "run-reasoning-1",
+                issueId: "issue-1",
+                status: "running",
+                invocationSource: "comment",
+                triggerDetail: null,
+                startedAt: "2026-04-06T12:00:00.000Z",
+                finishedAt: null,
+                createdAt: "2026-04-06T12:00:00.000Z",
+                agentId: "agent-1",
+                agentName: "Agent 1",
+                adapterType: "codex_local",
+              },
+            ]}
+            transcriptsByRunId={
+              new Map([
+                [
+                  "run-reasoning-1",
+                  [
+                    {
+                      kind: "thinking",
+                      ts: "2026-04-06T12:00:05.000Z",
+                      text: "Saya sekarang sedang memperinci fitur dan modul, dengan format Markdown.",
+                    },
+                    {
+                      kind: "tool_call",
+                      ts: "2026-04-06T12:00:10.000Z",
+                      name: "task_tracker",
+                      toolUseId: "tool-1",
+                      input: { description: "Update task tracker for markdown PRD" },
+                    },
+                    {
+                      kind: "tool_call",
+                      ts: "2026-04-06T12:00:15.000Z",
+                      name: "run_command",
+                      toolUseId: "tool-2",
+                      input: {
+                        description: "Run script to generate ultra-detailed PRD markdown",
+                        command: "python generate.py",
+                      },
+                    },
+                    {
+                      kind: "tool_result",
+                      ts: "2026-04-06T12:00:18.000Z",
+                      toolUseId: "tool-2",
+                      name: "run_command",
+                      content: '{"rows":[{"mn":1}]}',
+                      isError: false,
+                    },
+                    {
+                      kind: "assistant",
+                      ts: "2026-04-06T12:00:20.000Z",
+                      text: "Final settled answer text",
+                    },
+                  ],
+                ],
+              ])
+            }
+            onAdd={async () => {}}
+            enableLiveTranscriptPolling={false}
+          />
+        </MemoryRouter>,
+      );
+    });
+
+    // Check that header with "Pemikiran" is present
+    expect(container.textContent).toContain("Pemikiran");
+    // Check that timeline contains the formatted steps
+    expect(container.textContent).toContain("Saya sekarang sedang memperinci fitur dan modul");
+    expect(container.textContent).toContain("Update task tracker for markdown PRD");
+    expect(container.textContent).toContain("Run script to generate ultra-detailed PRD markdown");
+    // Ensure raw JSON output is NOT dumped into the main timeline
+    expect(container.textContent).not.toContain('{"rows":[{"mn":1}]}');
+    // Ensure final answer is visible
+    expect(container.textContent).toContain("Final settled answer text");
+
+    act(() => {
+      root.unmount();
+    });
+  });
 });
 
 describe("IssueAssigneePausedNotice", () => {
