@@ -782,15 +782,24 @@ export function TaskSidePanel({
         companyId={issue.companyId}
         onOpen={openWorkspaceFile}
         onBrowseStateChange={(next) => {
-          controller.updateTab(activeTab.id, {
-            payload: {
-              kind: "files-browser",
-              query: next.q,
-              folderPath: next.folderPath,
-              projectId: next.projectId,
-              workspaceId: next.workspaceId,
-            },
-          });
+          const currentTab = controller.tabs.find((t) => t.id === activeTab.id);
+          const currentPayload = currentTab?.payload;
+          const queryMatches = (currentPayload?.kind === "files-browser" ? currentPayload.query ?? null : null) === (next.q ?? null);
+          const folderMatches = (currentPayload?.kind === "files-browser" ? currentPayload.folderPath ?? null : null) === (next.folderPath ?? null);
+          const projectMatches = (currentPayload?.kind === "files-browser" ? currentPayload.projectId ?? null : null) === (next.projectId ?? null);
+          const workspaceMatches = (currentPayload?.kind === "files-browser" ? currentPayload.workspaceId ?? null : null) === (next.workspaceId ?? null);
+
+          if (!queryMatches || !folderMatches || !projectMatches || !workspaceMatches) {
+            controller.updateTab(activeTab.id, {
+              payload: {
+                kind: "files-browser",
+                query: next.q,
+                folderPath: next.folderPath,
+                projectId: next.projectId,
+                workspaceId: next.workspaceId,
+              },
+            });
+          }
           viewer.updateBrowseState(next);
         }}
         initialQuery={activeTab.payload.query}

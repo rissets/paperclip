@@ -617,14 +617,27 @@ export function WorkspaceFileBrowser({
     ? { projectId: targetProjectId, workspaceId: targetWorkspaceId }
     : {};
 
+  const onBrowseStateChangeRef = useRef(onBrowseStateChange);
   useEffect(() => {
-    onBrowseStateChange?.({
-      q: searchInput.trim() || null,
+    onBrowseStateChangeRef.current = onBrowseStateChange;
+  });
+
+  const lastBrowseStateRef = useRef<string | null>(null);
+  useEffect(() => {
+    const nextQ = searchInput.trim() || null;
+    const nextFolderPath = folderPath || null;
+    const nextProjectId = targetProjectId || null;
+    const nextWorkspaceId = targetWorkspaceId || null;
+    const key = `${nextQ}::${nextFolderPath}::${nextProjectId}::${nextWorkspaceId}`;
+    if (lastBrowseStateRef.current === key) return;
+    lastBrowseStateRef.current = key;
+    onBrowseStateChangeRef.current?.({
+      q: nextQ,
       folderPath,
       projectId: targetProjectId,
       workspaceId: targetWorkspaceId,
     });
-  }, [folderPath, onBrowseStateChange, searchInput, targetProjectId, targetWorkspaceId]);
+  }, [folderPath, searchInput, targetProjectId, targetWorkspaceId]);
 
   const listQueryKey = useMemo(() => queryKeys.issues.fileResources(issueId, {
       workspace: effectiveWorkspace,

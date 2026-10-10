@@ -219,4 +219,45 @@ describe("setupLiveEventsWebSocketServer", () => {
     expect(resolveSessionFromHeaders).toHaveBeenCalledTimes(1);
     expect(socket.endedChunks[0]).toContain("403 Forbidden");
   });
+
+  it("authorizes a user via session cookie fallback when header session resolution returns null", async () => {
+    const server = new EventEmitter();
+    const selectMock = vi.fn((fields: any) => ({
+      from: vi.fn((table: any) => ({
+        where: vi.fn(() => ({
+          limit: vi.fn(() => Promise.resolve([{ id: "sess-1", userId: "user-1" }])),
+          then: vi.fn((cb: any) => Promise.resolve(cb([{ id: "role-1" }]))),
+        })),
+      })),
+    }));
+    const dbMock = { select: selectMock };
+    setupLiveEventsWebSocketServer(server as never, dbMock as never, {
+      deploymentMode: "authenticated",
+      resolveSessionFromHeaders: async () => null,
+    });
+    const socket = new FakeUpgradeSocket();
+    const req = createUpgradeRequest({
+      method: "GET",
+      headers: {
+        upgrade: "websocket",
+        connection: "upgrade",
+        "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+        "sec-websocket-version": "13",
+        cookie: "paperclip-default.session_token=test-token-123",
+      },
+    });
+
+    server.emit("upgrade", req, socket as unknown as Duplex, Buffer.alloc(0));
+    await flushPromises();
+    await flushPromises();
+
+    expect(socket.endedChunks).toEqual([]);
+    expect((req as any).paperclipUpgradeContext).toEqual(
+      expect.objectContaining({
+        companyId: "company-1",
+        actorType: "board",
+        actorId: "user-1",
+      }),
+    );
+  });
 });

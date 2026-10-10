@@ -2,11 +2,12 @@ import { createHash } from "node:crypto";
 import type { IncomingMessage, Server as HttpServer } from "node:http";
 import { createRequire } from "node:module";
 import type { Duplex } from "node:stream";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, gt, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agentApiKeys, companyMemberships, instanceUserRoles, heartbeatRuns, issues, projects } from "@paperclipai/db";
+import { agentApiKeys, authSessions, companyMemberships, instanceUserRoles, heartbeatRuns, issues, projects } from "@paperclipai/db";
 import type { DeploymentMode, LiveEvent } from "@paperclipai/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
+import { extractSessionTokenFromCookieHeader } from "../middleware/auth.js";
 import { logger } from "../middleware/logger.js";
 import { subscribeCompanyLiveEvents } from "../services/live-events.js";
 import { trackIdleWork } from "../services/task-admission.js";
@@ -173,12 +174,46 @@ async function authorizeUpgrade(
       }
     }
 
-    if (opts.deploymentMode !== "authenticated" || !opts.resolveSessionFromHeaders) {
+    if (opts.deploymentMode !== "authenticated") {
       return null;
     }
 
-    const session = await opts.resolveSessionFromHeaders(headersFromIncomingMessage(req));
-    const userId = session?.user?.id;
+    let userId: string | null = null;
+    if (opts.resolveSessionFromHeaders) {
+      try {
+        const session = await opts.resolveSessionFromHeaders(headersFromIncomingMessage(req));
+        if (session?.user?.id) {
+          userId = session.user.id;
+        }
+      } catch (sessionErr) {
+        logger.warn({ err: sessionErr }, "Failed to resolve session from headers for live websocket");
+      }
+    }
+
+    if (!userId) {
+      const cookieHeader = Array.isArray(req.headers.cookie) ? req.headers.cookie.join("; ") : req.headers.cookie;
+      const sessionToken = extractSessionTokenFromCookieHeader(cookieHeader);
+      if (sessionToken) {
+        try {
+          const now = new Date();
+          const sessionRow = await db
+            .select({
+              id: authSessions.id,
+              userId: authSessions.userId,
+            })
+            .from(authSessions)
+            .where(and(eq(authSessions.token, sessionToken), gt(authSessions.expiresAt, now)))
+            .limit(1)
+            .then((rows) => rows[0] ?? null);
+          if (sessionRow?.userId) {
+            userId = sessionRow.userId;
+          }
+        } catch (dbErr) {
+          logger.warn({ err: dbErr }, "Failed to resolve websocket session token from database");
+        }
+      }
+    }
+
     if (!userId) return null;
 
     const [roleRow, memberships] = await Promise.all([

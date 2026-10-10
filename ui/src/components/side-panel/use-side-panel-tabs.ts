@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer } from "react";
+import { useCallback, useEffect, useReducer, useRef } from "react";
 import type { SidePanelTabRecord, SidePanelTabsState } from "./types";
 
 export type SidePanelTabsAction<TPayload> =
@@ -75,6 +75,35 @@ export function sidePanelTabsReducer<TPayload>(
       let changed = false;
       const tabs = state.tabs.map((tab) => {
         if (tab.id !== action.tabId) return tab;
+        let tabChanged = false;
+        for (const [key, val] of Object.entries(action.patch)) {
+          if (key === "payload") {
+            const currentPayload = tab.payload as Record<string, unknown> | undefined;
+            const nextPayload = val as Record<string, unknown> | undefined;
+            if (currentPayload === nextPayload) continue;
+            if (!currentPayload || !nextPayload) {
+              tabChanged = true;
+              break;
+            }
+            const currentKeys = Object.keys(currentPayload);
+            const nextKeys = Object.keys(nextPayload);
+            if (currentKeys.length !== nextKeys.length) {
+              tabChanged = true;
+              break;
+            }
+            for (const k of nextKeys) {
+              if (currentPayload[k] !== nextPayload[k]) {
+                tabChanged = true;
+                break;
+              }
+            }
+            if (tabChanged) break;
+          } else if ((tab as unknown as Record<string, unknown>)[key] !== val) {
+            tabChanged = true;
+            break;
+          }
+        }
+        if (!tabChanged) return tab;
         changed = true;
         return { ...tab, ...action.patch, id: tab.id };
       });
@@ -100,9 +129,14 @@ export function useSidePanelTabs<TPayload>({
     normalizeSidePanelTabsState,
   );
 
+  const onStateChangeRef = useRef(onStateChange);
   useEffect(() => {
-    onStateChange?.(state);
-  }, [onStateChange, state]);
+    onStateChangeRef.current = onStateChange;
+  });
+
+  useEffect(() => {
+    onStateChangeRef.current?.(state);
+  }, [state]);
 
   const openTab = useCallback((tab: SidePanelTabRecord<TPayload>, activate = true) => {
     dispatch({ type: "open", tab, activate });
