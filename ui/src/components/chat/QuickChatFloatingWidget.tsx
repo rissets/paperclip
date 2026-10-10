@@ -20,6 +20,7 @@ import { heartbeatsApi } from "@/api/heartbeats";
 import { queryKeys } from "@/lib/queryKeys";
 import { AgentIcon } from "@/components/AgentIconPicker";
 import { MarkdownBody } from "@/components/MarkdownBody";
+import { useGeneralSettings } from "@/hooks/useGeneralSettings";
 import { TaskChatReasoningTimeline } from "@/components/task-chat/TaskChatReasoningTimeline";
 import { extractThoughtAndAnswer } from "@/lib/reasoning-parser";
 import { Button } from "@/components/ui/button";
@@ -42,6 +43,7 @@ interface QuickChatFloatingWidgetProps {
 
 export function QuickChatFloatingWidget({ className }: QuickChatFloatingWidgetProps) {
   const { selectedCompanyId, selectedCompany } = useCompany();
+  const { showWorkingActivityAndReasoning } = useGeneralSettings();
   const meetingRecorder = useOptionalMeetingRecorder();
   const isDrawerActive = Boolean(meetingRecorder?.isOpen && !meetingRecorder?.isMinimized);
   const queryClient = useQueryClient();
@@ -599,7 +601,7 @@ export function QuickChatFloatingWidget({ className }: QuickChatFloatingWidgetPr
                         ) : (() => {
                           const parsed = extractThoughtAndAnswer(comment.body);
                           const isOld = Date.now() - new Date(comment.createdAt).getTime() > 60000;
-                          return parsed.hasReasoning ? (
+                          return showWorkingActivityAndReasoning && parsed.hasReasoning ? (
                             <div className="prose-xs">
                               <TaskChatReasoningTimeline
                                 steps={parsed.steps}
@@ -612,7 +614,7 @@ export function QuickChatFloatingWidget({ className }: QuickChatFloatingWidgetPr
                             </div>
                           ) : (
                             <div className="prose-xs">
-                              <MarkdownBody>{comment.body}</MarkdownBody>
+                              <MarkdownBody>{parsed.hasReasoning ? parsed.answer : comment.body}</MarkdownBody>
                             </div>
                           );
                         })()}

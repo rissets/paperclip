@@ -6,6 +6,7 @@ import { AgentAvatar, type AvatarAgent } from "../AgentAvatar";
 import { useCallback, useContext, useMemo, useState, type ReactNode } from "react";
 import { TaskChatReasoningTimeline } from "./TaskChatReasoningTimeline";
 import { extractThoughtAndAnswer } from "@/lib/reasoning-parser";
+import { useGeneralSettings } from "@/hooks/useGeneralSettings";
 import { useEmailComment } from "@/components/EmailMessageCard";
 import type { IssueAttachment } from "@paperclipai/shared";
 import { IssueGalleryContext } from "@/context/IssueGalleryContext";
@@ -144,6 +145,7 @@ function TaskChatBubbleContent({
   tryAgainNoLiveExecutionPathPending,
 }: TaskChatBubbleProps) {
   const streamlined = useStreamlinedTaskChatPresentation();
+  const { showWorkingActivityAndReasoning } = useGeneralSettings();
   const openText = useContext(TextAttachmentContext);
   // Task attachments share the page gallery; standalone images retain the bubble viewer.
   const openIssueGallery = useContext(IssueGalleryContext);
@@ -252,7 +254,7 @@ function TaskChatBubbleContent({
               : "w-full bg-transparent px-1 text-foreground",
           )}
         >
-          {extractedReasoning?.hasReasoning ? (
+          {showWorkingActivityAndReasoning && extractedReasoning?.hasReasoning ? (
             <TaskChatReasoningTimeline
               steps={extractedReasoning.steps}
               title="Pemikiran"
@@ -280,7 +282,7 @@ function TaskChatBubbleContent({
               linkIssueReferences
               onImageClick={openImage}
             >
-              {bodyText}
+              {extractedReasoning?.hasReasoning ? extractedReasoning.answer : bodyText}
             </MarkdownBody>
           )}
         </div>
