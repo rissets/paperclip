@@ -1554,7 +1554,7 @@ export class OnboardingOrchestratorService {
               config.type,
               config.database,
               [{
-                tableName: pt.tableName,
+                tableName: qualifiedName,
                 rowCount: pt.rowCount,
                 columns: colBatch.map((c) => ({
                   name: c.name,
@@ -1576,16 +1576,16 @@ export class OnboardingOrchestratorService {
               finalDomain = aiDbRes.result.domain || finalDomain;
               if (aiDbRes.result.entities) finalEntities.push(...aiDbRes.result.entities);
               if (aiDbRes.result.primaryTopics) finalTopics.push(...aiDbRes.result.primaryTopics);
-              if (aiDbRes.result.tableRoles?.[pt.tableName]) tableRoles[pt.tableName] = aiDbRes.result.tableRoles[pt.tableName];
+              if (aiDbRes.result.tableRoles?.[qualifiedName]) tableRoles[qualifiedName] = aiDbRes.result.tableRoles[qualifiedName];
               if (aiDbRes.result.relationships) relationships.push(...aiDbRes.result.relationships);
               if (aiDbRes.result.suggestedQueries) suggestedQueries.push(...aiDbRes.result.suggestedQueries);
 
               // Observation -> Validation -> Correction loop:
               // Merge column profiles safely instead of overwriting prior batch profiles!
-              if (aiDbRes.result.tableProfiles?.[pt.tableName]) {
-                const existing = tableProfiles[pt.tableName] || {};
-                const incoming = aiDbRes.result.tableProfiles[pt.tableName];
-                tableProfiles[pt.tableName] = {
+              if (aiDbRes.result.tableProfiles?.[qualifiedName]) {
+                const existing = tableProfiles[qualifiedName] || {};
+                const incoming = aiDbRes.result.tableProfiles[qualifiedName];
+                tableProfiles[qualifiedName] = {
                   ...existing,
                   ...incoming,
                   metrics: Array.from(new Set([...(existing.metrics || []), ...(incoming.metrics || [])])),
@@ -1602,19 +1602,23 @@ export class OnboardingOrchestratorService {
             // Apply deterministic JEV correction for this batch
             try {
               const batchSummary = [{
-                name: pt.tableName,
+                name: qualifiedName,
+                tableName: pt.tableName,
+                schemaName: pt.schemaName || "public",
                 columns: colBatch.map((c) => c.name),
                 rowCount: pt.rowCount,
               }];
-              const fallbackRes = await this.jevService.evaluateDatabaseTables(batchSummary);
+              const fallbackRes = await this.jevService.evaluateDatabaseTables(batchSummary, {
+                databaseType: config.type as "postgres" | "mariadb" | "mysql",
+              });
               if (fallbackRes.entities) finalEntities.push(...fallbackRes.entities);
-              if (fallbackRes.tableRoles?.[pt.tableName] && !tableRoles[pt.tableName]) {
-                tableRoles[pt.tableName] = fallbackRes.tableRoles[pt.tableName];
+              if (fallbackRes.tableRoles?.[qualifiedName] && !tableRoles[qualifiedName]) {
+                tableRoles[qualifiedName] = fallbackRes.tableRoles[qualifiedName];
               }
-              if (fallbackRes.tableProfiles?.[pt.tableName]) {
-                const existing = tableProfiles[pt.tableName] || {};
-                const incoming = fallbackRes.tableProfiles[pt.tableName];
-                tableProfiles[pt.tableName] = {
+              if (fallbackRes.tableProfiles?.[qualifiedName]) {
+                const existing = tableProfiles[qualifiedName] || {};
+                const incoming = fallbackRes.tableProfiles[qualifiedName];
+                tableProfiles[qualifiedName] = {
                   ...existing,
                   ...incoming,
                   metrics: Array.from(new Set([...(existing.metrics || []), ...(incoming.metrics || [])])),
@@ -1636,11 +1640,15 @@ export class OnboardingOrchestratorService {
       // Fallback to TypeSafe JEV System One if AI reasoning is offline
       if (finalEntities.length === 0) {
         const tableSummaries = tables.map((t) => ({
-          name: t.tableName,
+          name: `${t.schemaName || "public"}.${t.tableName}`,
+          tableName: t.tableName,
+          schemaName: t.schemaName || "public",
           columns: t.schemaDefinition.map((c) => c.name),
           rowCount: t.rowCount,
         }));
-        const dbSemanticRes = await this.jevService.evaluateDatabaseTables(tableSummaries);
+        const dbSemanticRes = await this.jevService.evaluateDatabaseTables(tableSummaries, {
+          databaseType: config.type as "postgres" | "mariadb" | "mysql",
+        });
         finalEntities.push(...dbSemanticRes.entities);
         Object.assign(tableRoles, dbSemanticRes.tableRoles);
         relationships.push(...dbSemanticRes.relationships);
@@ -1656,12 +1664,13 @@ export class OnboardingOrchestratorService {
       for (const tableData of tables) {
         totalRows += tableData.rowCount;
 
-        const tProf = tableProfiles[tableData.tableName];
+        const tableIdentity = `${tableData.schemaName || "public"}.${tableData.tableName}`;
+        const tProf = tableProfiles[tableIdentity] || tableProfiles[tableData.tableName];
         // Enhance table semantic model with agent's analyzed table role and per-table topics
         const tableSemantic = {
           ...tableData.semanticModel,
           sourceSchema: tableData.schemaName,
-          tableRole: tableRoles[tableData.tableName] || "dimension_table",
+          tableRole: tableRoles[tableIdentity] || tableRoles[tableData.tableName] || "dimension_table",
           context: tProf?.context || tableData.semanticModel?.context,
           topics: tProf?.topics || tableData.semanticModel?.topics || [],
           mappedBy: specialistAgentName,

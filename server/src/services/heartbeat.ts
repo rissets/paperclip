@@ -15640,6 +15640,12 @@ export function heartbeatService(
       nativeControllerProcessStartedAt,
       nativeControllerLeaseExpiresAt,
     } of activeRuns) {
+      // Built-in ingestion runs are telemetry for durable datasource jobs,
+      // not child processes owned by the heartbeat service. The datasource
+      // worker's lease/retry protocol is the authority for their liveness;
+      // these runs intentionally have no heartbeat PID or process group.
+      if (run.runtimeMode === "builtin_ingestion") continue;
+
       // Authentication timeout requires an explicit ownership resolution, not
       // repeated reattachment or a process-gone guess on subsequent sweeps.
       if (isNativeRunnerOwnershipHeld(run)) continue;

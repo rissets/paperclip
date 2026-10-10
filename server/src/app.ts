@@ -1422,6 +1422,8 @@ export async function createApp(
       // fails stays a durable record for the startup reaper.
       await setupTokenLoginService?.shutdown();
       await shutdownDataSourceCache();
+      const { shutdownDatabaseIntegrationPools } = await import("./services/database-integration.js");
+      await shutdownDatabaseIntegrationPools();
     })();
     return appServicesShutdown;
   };

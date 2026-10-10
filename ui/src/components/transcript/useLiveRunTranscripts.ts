@@ -132,7 +132,7 @@ export function useLiveRunTranscripts({
   const [errorsByRun, setErrorsByRun] = useState<ReadonlyMap<string, Error>>(new Map());
   const [retryGeneration, setRetryGeneration] = useState(0);
   const retry = useCallback(() => {
-    missingTerminalLogRunIdsRef.current.clear();
+    unavailableLogRunIdsRef.current.clear();
     setRetryGeneration((value) => value + 1);
   }, []);
   const seenChunkKeysRef = useRef(new Set<string>());
@@ -142,7 +142,7 @@ export function useLiveRunTranscripts({
   const trimmedSeqFloorByRunRef = useRef(new Map<string, number>());
   const pendingLogRowsByRunRef = useRef(new Map<string, string>());
   const logOffsetByRunRef = useRef(new Map<string, number>());
-  const missingTerminalLogRunIdsRef = useRef(new Set<string>());
+  const unavailableLogRunIdsRef = useRef(new Set<string>());
   // PAP-462 B3: buffered runs that dropped out of the `runs` list, mapped to the
   // wall-clock deadline (ms) after which their buffer may be pruned. A run still
   // inside its grace window is retained across the empty poll; `pruneTick` fires
@@ -275,9 +275,9 @@ export function useLiveRunTranscripts({
         trimmedSeqFloorByRunRef.current.delete(runId);
       }
     }
-    for (const runId of missingTerminalLogRunIdsRef.current.keys()) {
+    for (const runId of unavailableLogRunIdsRef.current.keys()) {
       if (!retainedRunIds.has(runId)) {
-        missingTerminalLogRunIdsRef.current.delete(runId);
+        unavailableLogRunIdsRef.current.delete(runId);
       }
     }
     for (const runId of transcriptCacheRef.current.keys()) {
@@ -307,7 +307,7 @@ export function useLiveRunTranscripts({
     const inFlightRunIds = new Set<string>();
 
     const readRunLog = async (run: RunTranscriptSource) => {
-      if (missingTerminalLogRunIdsRef.current.has(run.id) || inFlightRunIds.has(run.id)) {
+      if (unavailableLogRunIdsRef.current.has(run.id) || inFlightRunIds.has(run.id)) {
         return;
       }
       inFlightRunIds.add(run.id);
@@ -329,6 +329,7 @@ export function useLiveRunTranscripts({
 
         if (result.nextOffset !== undefined) {
           logOffsetByRunRef.current.set(run.id, result.nextOffset);
+          unavailableLogRunIdsRef.current.delete(run.id);
           return;
         }
         if (result.content.length > 0) {
@@ -343,8 +344,9 @@ export function useLiveRunTranscripts({
             next.delete(run.id);
             return next;
           });
-          // A newly started run may not have created its log yet.
-          if (isTerminalStatus(run.status)) missingTerminalLogRunIdsRef.current.add(run.id);
+          // A 404 means the run is gone or no longer readable. Stop polling it
+          // until the caller retries or removes the stale run from its list.
+          unavailableLogRunIdsRef.current.add(run.id);
         } else {
           setErrorsByRun((previous) => {
             if (previous.has(run.id)) return previous;

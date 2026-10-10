@@ -14,6 +14,7 @@ const validator = (value: unknown) => ({ valid: true, errors: [], sanitized: val
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("AiReasoningService runtime selection", () => {
@@ -38,6 +39,7 @@ describe("AiReasoningService runtime selection", () => {
         "rissets/llm-hd/qwen3.8-27b",
         instructions,
         undefined,
+        undefined,
       );
       expect(router).not.toHaveBeenCalled();
       expect(result.backend).toBe("pi_cli");
@@ -57,7 +59,7 @@ describe("AiReasoningService runtime selection", () => {
 
     const result = await service.executeAgenticLoop("table mapping", "Map table ran_kpi", validator, {
       adapterType: "pi_local",
-      model: "rissets/llm-hd/qwen3.8-27b",
+      model: "test/pi-router-fallback",
     });
 
     expect(pi).toHaveBeenCalledOnce();
@@ -65,6 +67,123 @@ describe("AiReasoningService runtime selection", () => {
     expect(result.backend).toBe("router_http");
     expect(result.validationStatus).toBe("validated");
     expect(result.reasoningSteps.at(-1)?.backend).toBe("router_http");
+  });
+
+  it("applies bounded Pi and router deadlines to a datasource mapping call", async () => {
+    const service = new AiReasoningService();
+    (service as any).routerApiKey = "test-key";
+    const pi = vi.spyOn(service as any, "runViaPiCli").mockRejectedValue(new Error("Pi execution timed out (75s)"));
+    const router = vi.spyOn(service as any, "runViaRouterHttp").mockResolvedValue(validResponse);
+
+    const result = await service.executeAgenticLoop("table mapping", "Map table ran_kpi", validator, {
+      adapterType: "pi_local",
+      model: `test/bounded-timeouts-${Date.now()}`,
+      maxRetries: 1,
+      piTimeoutMs: 75_000,
+      routerTimeoutMs: 45_000,
+    });
+
+    expect(pi).toHaveBeenCalledWith("Map table ran_kpi", expect.any(String), "", undefined, 75_000);
+    expect(router).toHaveBeenCalledWith("Map table ran_kpi", expect.any(String), undefined, "", 45_000);
+    expect(result.backend).toBe("router_http");
+    expect(result.validationStatus).toBe("validated");
+  });
+
+  it("keeps upstream request disconnects distinct from local inference timeouts", async () => {
+    const service = new AiReasoningService();
+    (service as any).routerApiKey = "test-key";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const pi = vi.spyOn(service as any, "runViaPiCli").mockRejectedValue(new Error(
+      "Pi exited with code 1: Client disconnected: request_signal_aborted",
+    ));
+    const router = vi.spyOn(service as any, "runViaRouterHttp").mockResolvedValue(validResponse);
+
+    const result = await service.executeAgenticLoop("table mapping", "Map table ran_kpi", validator, {
+      adapterType: "pi_local",
+      model: `test/disconnected-request-${Date.now()}`,
+      maxRetries: 1,
+      logContext: "schema mapping group 1/14",
+    });
+
+    expect(pi).toHaveBeenCalledOnce();
+    expect(router).toHaveBeenCalledOnce();
+    expect(result.backend).toBe("router_http");
+    expect(result.validationStatus).toBe("validated");
+    const diagnostics = `${JSON.stringify(result.reasoningSteps)} ${JSON.stringify(warn.mock.calls)}`;
+    expect(diagnostics).toContain("schema mapping group 1/14");
+    expect(diagnostics).toContain("Pi CLI request was disconnected before completion");
+    expect(diagnostics).not.toContain("inference timed out");
+    expect(diagnostics).not.toContain("request_signal_aborted");
+  });
+
+  it("stops provider-failure retries and keeps authentication and gateway details out of agent logs", async () => {
+    const service = new AiReasoningService();
+    (service as any).routerApiKey = "test-key";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const pi = vi.spyOn(service as any, "runViaPiCli").mockRejectedValue(new Error(
+      'Pi exited with code 1: 401: {"message":"No active credentials for provider: private-provider-id"}',
+    ));
+    const router = vi.spyOn(service as any, "runViaRouterHttp").mockRejectedValue(new Error(
+      "HTTP 502: <!doctype html><title>Cloudflare edge failure</title>",
+    ));
+
+    const result = await service.executeAgenticLoop("provider failure", "Map one table", validator, {
+      adapterType: "pi_local",
+      model: `test/provider-failure-${Date.now()}`,
+      maxRetries: 3,
+      logContext: "schema mapping group 2/14",
+    });
+
+    expect(pi).toHaveBeenCalledOnce();
+    expect(router).toHaveBeenCalledOnce();
+    expect(result.iterations).toBe(1);
+    expect(result.validationStatus).toBe("failed");
+    const diagnostics = `${JSON.stringify(result.reasoningSteps)} ${JSON.stringify(warn.mock.calls)}`;
+    expect(diagnostics).toContain("credentials are not accepted (HTTP 401)");
+    expect(diagnostics).toContain("router is temporarily unavailable (HTTP 502)");
+    expect(diagnostics).toContain("schema mapping group 2/14");
+    expect(diagnostics).not.toContain("private-provider-id");
+    expect(diagnostics).not.toContain("Cloudflare");
+  });
+
+  it("honors model cooldowns across schema batches and skips same-model fallback calls", async () => {
+    const service = new AiReasoningService();
+    (service as any).routerApiKey = "test-key";
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const model = `test/cooldown-${Date.now()}`;
+    const pi = vi.spyOn(service as any, "runViaPiCli").mockRejectedValue(new Error(
+      'Pi exited with code 1: 429: {"message":"model cooling down","reset_seconds":56}',
+    ));
+    const router = vi.spyOn(service as any, "runViaRouterHttp").mockResolvedValue(validResponse);
+
+    const first = await service.executeAgenticLoop("first batch", "Map table one", validator, {
+      adapterType: "pi_local",
+      model,
+      maxRetries: 3,
+    });
+    const second = await service.executeAgenticLoop("second batch", "Map table two", validator, {
+      adapterType: "pi_local",
+      model,
+      maxRetries: 3,
+    });
+
+    expect(first.iterations).toBe(1);
+    expect(second.iterations).toBe(0);
+    expect(pi).toHaveBeenCalledOnce();
+    expect(router).not.toHaveBeenCalled();
+  });
+
+  it("does not expose the router response body when an HTTP request fails", async () => {
+    const service = new AiReasoningService();
+    (service as any).routerApiKey = "test-key";
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+      "<html>private edge diagnostics</html>",
+      { status: 502, headers: { "content-type": "text/html" } },
+    )));
+
+    const error = await (service as any).runViaRouterHttp("prompt", "test/router").catch((value: unknown) => value);
+    expect(error).toMatchObject({ message: "Router request failed with HTTP 502" });
+    expect((error as Error).message).not.toContain("private edge diagnostics");
   });
 
   it("keeps router-first behavior for agents configured with another adapter", async () => {
@@ -88,6 +207,7 @@ describe("AiReasoningService runtime selection", () => {
 
     const result = await service.executeAgenticLoop("table mapping", "Map one table", invalidValidator, {
       adapterType: "pi_local",
+      model: "test/best-effort",
       maxRetries: 1,
     });
 
@@ -129,6 +249,7 @@ describe("AiReasoningService runtime selection", () => {
 
     await expect(service.executeAgenticLoop("table mapping", "Map table ran_kpi", validator, {
       adapterType: "pi_local",
+      model: "test/cancelled-pi",
       signal: controller.signal,
     })).rejects.toThrow("Agentic reasoning was cancelled");
 
@@ -148,6 +269,7 @@ describe("AiReasoningService runtime selection", () => {
 
     await expect(service.executeAgenticLoop("table mapping", "Map table ran_kpi", validator, {
       adapterType: "pi_local",
+      model: "test/cancelled-in-flight-pi",
       signal: controller.signal,
     })).rejects.toThrow("Agentic reasoning was cancelled");
 
@@ -165,9 +287,19 @@ describe("AiReasoningService runtime selection", () => {
       validationStatus: "failed",
     });
 
-    await service.analyzeDatabaseSchema("postgres", "warehouse", [], { signal: controller.signal });
+    await service.analyzeDatabaseSchema("postgres", "warehouse", [], {
+      signal: controller.signal,
+      piTimeoutMs: 8_000,
+      routerTimeoutMs: 40_000,
+      logContext: "schema mapping group 1/1",
+    });
 
-    expect(execute.mock.calls.at(-1)?.[3]).toMatchObject({ signal: controller.signal });
+    expect(execute.mock.calls.at(-1)?.[3]).toMatchObject({
+      signal: controller.signal,
+      piTimeoutMs: 8_000,
+      routerTimeoutMs: 40_000,
+      logContext: "schema mapping group 1/1",
+    });
   });
 
   it("uses frozen instruction content supplied by a multi-batch mapping job", async () => {
@@ -320,7 +452,7 @@ describe("bounded external database observation plans", () => {
       tableName: "public.orders",
       rowCount: 100,
       columns: [{ name: "status", dataType: "string", sampleValues: ["pending"] }],
-    }], { adapterType: "pi_local", allowDatabaseObservations: true });
+    }], { adapterType: "pi_local", model: "test/observation-plan", allowDatabaseObservations: true });
 
     expect(result.validationStatus).toBe("validated");
     expect(result.result?.observationRequests).toEqual([request]);
@@ -344,7 +476,7 @@ describe("bounded external database observation plans", () => {
       tableName: "public.orders",
       rowCount: 100,
       columns: [{ name: "status", dataType: "string", observedValues: ["paid@example.com"] }],
-    }], { adapterType: "pi_local", databaseObservationFollowup: true });
+    }], { adapterType: "pi_local", model: "test/observation-followup", databaseObservationFollowup: true });
 
     const prompt = pi.mock.calls[0]?.[0] as string;
     expect(result.validationStatus).toBe("validated");
@@ -371,7 +503,7 @@ describe("bounded external database observation plans", () => {
       tableName: "public.orders",
       rowCount: 100,
       columns: [{ name: "status", dataType: "string", sampleValues: ["paid"] }],
-    }], { adapterType: "pi_local" });
+    }], { adapterType: "pi_local", model: "test/no-observation" });
 
     expect(result.validationStatus).toBe("validated");
     expect(result.result?.observationRequests).toEqual([]);

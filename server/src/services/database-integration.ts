@@ -34,6 +34,25 @@ export interface InspectedTableResult {
 
 type ExternalSqlDialect = "postgresql" | "mysql";
 
+export type ExternalDatabaseType = "postgres" | "mariadb" | "mysql";
+
+/** Quote each PostgreSQL/MySQL identifier independently, including schema names. */
+export function quoteExternalDatabaseIdentifier(identifier: string, type: ExternalDatabaseType): string {
+  const quote = type === "postgres" ? '"' : "`";
+  return `${quote}${identifier.replaceAll(quote, `${quote}${quote}`)}${quote}`;
+}
+
+/** Build a physical table path; PostgreSQL schema and table are separate identifiers. */
+export function externalDatabaseTableReference(
+  schemaName: string | undefined,
+  tableName: string,
+  type: ExternalDatabaseType,
+): string {
+  const table = quoteExternalDatabaseIdentifier(tableName, type);
+  if (!schemaName) return table;
+  return `${quoteExternalDatabaseIdentifier(schemaName, type)}.${table}`;
+}
+
 // Initialize once before accepting datasource SQL. Parsing is local; no SQL is
 // sent to a third party and parser failures are handled closed below.
 await initializeSqlParser();
@@ -204,12 +223,23 @@ export class DatabaseIntegrationService {
 
       const allowedTables = config.allowedTables?.map((t) => t.toLowerCase());
       const allowedSchemas = config.allowedSchemas?.map((schema) => schema.toLowerCase());
+      const allowedNameCounts = new Map<string, number>();
+      for (const table of tablesQuery) {
+        const schemaName = String(table.table_schema).toLowerCase();
+        if (allowedSchemas?.length && !allowedSchemas.includes(schemaName)) continue;
+        const name = String(table.table_name).toLowerCase();
+        allowedNameCounts.set(name, (allowedNameCounts.get(name) || 0) + 1);
+      }
       const selectedTables = tablesQuery.filter((t: any) => {
-        if (allowedSchemas && allowedSchemas.length > 0 && !allowedSchemas.includes(String(t.table_schema).toLowerCase())) {
+        const schemaName = String(t.table_schema).toLowerCase();
+        const tableName = String(t.table_name).toLowerCase();
+        if (allowedSchemas && allowedSchemas.length > 0 && !allowedSchemas.includes(schemaName)) {
           return false;
         }
         if (allowedTables && allowedTables.length > 0) {
-          return allowedTables.includes(t.table_name.toLowerCase());
+          const qualifiedName = `${schemaName}.${tableName}`;
+          return allowedTables.includes(qualifiedName)
+            || (allowedTables.includes(tableName) && allowedNameCounts.get(tableName) === 1);
         }
         return true;
       });
@@ -339,13 +369,13 @@ export class DatabaseIntegrationService {
             rowCountEstimated = true;
           } else {
             const countRes = await sql`
-              SELECT count(1)::int as total FROM ${sql(`${schema}.${tableName}`)}
+              SELECT count(1)::int as total FROM ${sql(schema)}.${sql(tableName)}
             `;
             totalRows = Number(countRes[0]?.total ?? 0);
           }
 
           sampleRows = await sql`
-            SELECT * FROM ${sql(`${schema}.${tableName}`)} LIMIT 10
+            SELECT * FROM ${sql(schema)}.${sql(tableName)} LIMIT 10
           `;
           if (rowCountEstimated && totalRows === 0 && sampleRows.length > 0) {
             totalRows = sampleRows.length;
@@ -432,10 +462,8 @@ export class DatabaseIntegrationService {
 
       synthesizeDatabaseRelationsAndComponents(results, allRelations);
 
-      await sql.end({ timeout: 2 });
       return results;
     } catch (err: any) {
-      await sql.end({ timeout: 1 }).catch(() => {});
       throw new Error(databaseConnectionErrorMessage(err, config));
     }
   }
@@ -460,7 +488,8 @@ export class DatabaseIntegrationService {
       const selectedTables = (tableRows as any[]).filter((t: any) => {
         const name = (t.table_name || t.TABLE_NAME || "").toString();
         if (allowedTables && allowedTables.length > 0) {
-          return allowedTables.includes(name.toLowerCase());
+          return allowedTables.includes(name.toLowerCase())
+            || allowedTables.includes(`${config.database}.${name}`.toLowerCase());
         }
         return Boolean(name);
       });
@@ -797,13 +826,12 @@ export class DatabaseIntegrationService {
       || input.columns.some((column) => !column.trim() || column.length > 255)) {
       throw new Error("Onboarding observation column identities are invalid");
     }
-    if (config.allowedTables?.length
-      && !config.allowedTables.some((name) => name.toLowerCase() === input.tableName.toLowerCase())) {
-      throw new Error("Onboarding observation table is outside the configured table allowlist");
-    }
     if (config.allowedSchemas?.length
       && !config.allowedSchemas.some((name) => name.toLowerCase() === input.schemaName.toLowerCase())) {
       throw new Error("Onboarding observation schema is outside the configured schema allowlist");
+    }
+    if (!await this.isConfiguredTableAllowed(config, input.schemaName, input.tableName)) {
+      throw new Error("Onboarding observation table is outside the configured table allowlist");
     }
     if (input.columns.some(isSensitiveDatabaseSchemaColumn)) {
       throw new Error("Sensitive columns cannot be queried for onboarding semantic observations");
@@ -847,11 +875,11 @@ export class DatabaseIntegrationService {
     if (!input.columns.length || input.columns.length > 500 || !input.columns.includes(input.primaryKey)) {
       throw new Error("Snapshot requires a bounded column list containing its primary key");
     }
-    if (config.allowedTables?.length && !config.allowedTables.some((name) => name.toLowerCase() === input.tableName.toLowerCase())) {
-      throw new Error("Snapshot table is outside the configured table allowlist");
-    }
     if (config.allowedSchemas?.length && !config.allowedSchemas.some((name) => name.toLowerCase() === input.schemaName.toLowerCase())) {
       throw new Error("Snapshot schema is outside the configured schema allowlist");
+    }
+    if (!await this.isConfiguredTableAllowed(config, input.schemaName, input.tableName)) {
+      throw new Error("Snapshot table is outside the configured table allowlist");
     }
     if (config.type !== "postgres" && config.type !== "mysql" && config.type !== "mariadb") {
       throw new Error("Keyset snapshots support PostgreSQL, MySQL, and MariaDB sources only");
@@ -898,11 +926,11 @@ export class DatabaseIntegrationService {
       || (input.deletedAtColumn !== undefined && !input.columns.includes(input.deletedAtColumn))) {
       throw new Error("Incremental sync requires a bounded projection containing its primary and updated-at columns");
     }
-    if (config.allowedTables?.length && !config.allowedTables.some((name) => name.toLowerCase() === input.tableName.toLowerCase())) {
-      throw new Error("Incremental table is outside the configured allowlist");
-    }
     if (config.allowedSchemas?.length && !config.allowedSchemas.some((name) => name.toLowerCase() === input.schemaName.toLowerCase())) {
       throw new Error("Incremental schema is outside the configured allowlist");
+    }
+    if (!await this.isConfiguredTableAllowed(config, input.schemaName, input.tableName)) {
+      throw new Error("Incremental table is outside the configured allowlist");
     }
     if (config.type !== "postgres" && config.type !== "mysql" && config.type !== "mariadb") {
       throw new Error("Incremental sync supports PostgreSQL, MySQL, and MariaDB sources only");
@@ -955,6 +983,31 @@ export class DatabaseIntegrationService {
         : `Table '${tableName}' exists in multiple schemas; reconnect with an explicit schema allowlist`);
     }
     return matches[0];
+  }
+
+  private async isConfiguredTableAllowed(
+    config: DatabaseConnectionConfig,
+    schemaName: string,
+    tableName: string,
+  ): Promise<boolean> {
+    const allowedTables = config.allowedTables?.map((name) => name.toLowerCase());
+    if (!allowedTables?.length) return true;
+    const qualifiedName = `${schemaName}.${tableName}`.toLowerCase();
+    if (allowedTables.includes(qualifiedName)) return true;
+    if (!allowedTables.includes(tableName.toLowerCase())) return false;
+    if (config.type !== "postgres") return true;
+    const allowedSchemas = config.allowedSchemas?.map((schema) => schema.toLowerCase());
+    if (allowedSchemas?.length === 1 && allowedSchemas[0] === schemaName.toLowerCase()) return true;
+
+    // A bare PostgreSQL allowlist entry is safe only when it resolves to one
+    // schema in the configured catalog. Duplicate names must be allowlisted as
+    // schema.table so snapshots and observations cannot silently cross schemas.
+    try {
+      const resolvedSchema = await this.resolveTableSchema(config, tableName);
+      return resolvedSchema.toLowerCase() === schemaName.toLowerCase();
+    } catch {
+      return false;
+    }
   }
 
   // --- Helper Methods ---
@@ -1624,8 +1677,10 @@ export class DatabaseIntegrationService {
     };
   }
 
-  private postgresPools = new Map<string, { sql: ReturnType<typeof postgres>; credentialHash: string; lastUsedAt: number; max: number }>();
-  private mysqlPools = new Map<string, { pool: mysql.Pool; credentialHash: string; lastUsedAt: number }>();
+  // Service wrappers are short-lived and instantiated at several call sites.
+  // Keep external pools process-wide so each wrapper does not leak connections.
+  private static readonly postgresPools = new Map<string, { sql: ReturnType<typeof postgres>; credentialHash: string; lastUsedAt: number; max: number }>();
+  private static readonly mysqlPools = new Map<string, { pool: mysql.Pool; credentialHash: string; lastUsedAt: number }>();
 
   getPoolKey(config: DatabaseConnectionConfig): string {
     const parts = [
@@ -1660,21 +1715,22 @@ export class DatabaseIntegrationService {
   }
 
   getPostgresSql(config: DatabaseConnectionConfig, max = 5, timeout = 5) {
+    this.evictIdlePools();
     const key = this.getPoolKey(config);
     const currentHash = this.getCredentialHash(config);
-    const cached = this.postgresPools.get(key);
+    const cached = DatabaseIntegrationService.postgresPools.get(key);
     if (cached) {
       if (cached.credentialHash !== currentHash) {
         // Credential rotated - invalidate old pool
         cached.sql.end({ timeout: 1 }).catch(() => {});
-        this.postgresPools.delete(key);
+        DatabaseIntegrationService.postgresPools.delete(key);
       } else {
         cached.lastUsedAt = Date.now();
         return cached.sql;
       }
     }
 
-    const boundedMax = Math.min(Math.max(1, max), 10);
+    const boundedMax = Math.min(Math.max(1, max), 4);
     const opts: any = {
       host: config.host,
       port: config.port,
@@ -1683,68 +1739,84 @@ export class DatabaseIntegrationService {
       ssl: config.ssl ? "require" : false,
       connect_timeout: timeout,
       max: boundedMax,
+      idle_timeout: 30,
+      max_lifetime: 300,
     };
     if (config.password && config.password.length > 0) {
       opts.password = config.password;
     }
     const sql = postgres(opts);
-    this.postgresPools.set(key, { sql, credentialHash: currentHash, lastUsedAt: Date.now(), max: boundedMax });
+    DatabaseIntegrationService.postgresPools.set(key, { sql, credentialHash: currentHash, lastUsedAt: Date.now(), max: boundedMax });
     return sql;
   }
 
   getMysqlPool(config: DatabaseConnectionConfig, max = 5, timeout = 5000): mysql.Pool {
+    this.evictIdlePools();
     const key = this.getPoolKey(config);
     const currentHash = this.getCredentialHash(config);
-    const cached = this.mysqlPools.get(key);
+    const cached = DatabaseIntegrationService.mysqlPools.get(key);
     if (cached) {
       if (cached.credentialHash !== currentHash) {
         // Credential rotated - invalidate old pool
         cached.pool.end().catch(() => {});
-        this.mysqlPools.delete(key);
+        DatabaseIntegrationService.mysqlPools.delete(key);
       } else {
         cached.lastUsedAt = Date.now();
         return cached.pool;
       }
     }
 
-    const boundedMax = Math.min(Math.max(1, max), 10);
+    const boundedMax = Math.min(Math.max(1, max), 4);
     const opts = {
       ...this.getMysqlConfig(config, timeout),
       connectionLimit: boundedMax,
+      maxIdle: boundedMax,
+      idleTimeout: 30_000,
     };
     const pool = mysql.createPool(opts);
-    this.mysqlPools.set(key, { pool, credentialHash: currentHash, lastUsedAt: Date.now() });
+    DatabaseIntegrationService.mysqlPools.set(key, { pool, credentialHash: currentHash, lastUsedAt: Date.now() });
     return pool;
   }
 
   invalidatePool(config: DatabaseConnectionConfig): void {
     const key = this.getPoolKey(config);
-    const pg = this.postgresPools.get(key);
+    const pg = DatabaseIntegrationService.postgresPools.get(key);
     if (pg) {
       pg.sql.end({ timeout: 1 }).catch(() => {});
-      this.postgresPools.delete(key);
+      DatabaseIntegrationService.postgresPools.delete(key);
     }
-    const my = this.mysqlPools.get(key);
+    const my = DatabaseIntegrationService.mysqlPools.get(key);
     if (my) {
       my.pool.end().catch(() => {});
-      this.mysqlPools.delete(key);
+      DatabaseIntegrationService.mysqlPools.delete(key);
     }
   }
 
   evictIdlePools(maxIdleMs = 300_000): void {
     const now = Date.now();
-    for (const [key, entry] of this.postgresPools.entries()) {
+    for (const [key, entry] of DatabaseIntegrationService.postgresPools.entries()) {
       if (now - entry.lastUsedAt > maxIdleMs) {
         entry.sql.end({ timeout: 1 }).catch(() => {});
-        this.postgresPools.delete(key);
+        DatabaseIntegrationService.postgresPools.delete(key);
       }
     }
-    for (const [key, entry] of this.mysqlPools.entries()) {
+    for (const [key, entry] of DatabaseIntegrationService.mysqlPools.entries()) {
       if (now - entry.lastUsedAt > maxIdleMs) {
         entry.pool.end().catch(() => {});
-        this.mysqlPools.delete(key);
+        DatabaseIntegrationService.mysqlPools.delete(key);
       }
     }
+  }
+
+  static async shutdownPools(): Promise<void> {
+    const postgresPools = [...this.postgresPools.values()];
+    const mysqlPools = [...this.mysqlPools.values()];
+    this.postgresPools.clear();
+    this.mysqlPools.clear();
+    await Promise.allSettled([
+      ...postgresPools.map(({ sql }) => sql.end({ timeout: 5 })),
+      ...mysqlPools.map(({ pool }) => pool.end()),
+    ]);
   }
 
   private async createMysqlConnection(config: DatabaseConnectionConfig, timeout = 8000): Promise<mysql.Connection> {
@@ -1769,6 +1841,10 @@ export class DatabaseIntegrationService {
     }
     return opts;
   }
+}
+
+export async function shutdownDatabaseIntegrationPools(): Promise<void> {
+  await DatabaseIntegrationService.shutdownPools();
 }
 
 export function synthesizeDatabaseRelationsAndComponents(

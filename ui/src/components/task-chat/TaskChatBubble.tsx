@@ -3,7 +3,9 @@ import { isTextAttachment } from "@/lib/issue-attachments";
 import { ArtifactPreview } from "@/components/artifacts/ArtifactCard";
 import { isVideoLikeOutput } from "@/lib/issue-output";
 import { AgentAvatar, type AvatarAgent } from "../AgentAvatar";
-import { useCallback, useContext, useState, type ReactNode } from "react";
+import { useCallback, useContext, useMemo, useState, type ReactNode } from "react";
+import { TaskChatReasoningTimeline } from "./TaskChatReasoningTimeline";
+import { extractThoughtAndAnswer } from "@/lib/reasoning-parser";
 import { useEmailComment } from "@/components/EmailMessageCard";
 import type { IssueAttachment } from "@paperclipai/shared";
 import { IssueGalleryContext } from "@/context/IssueGalleryContext";
@@ -214,6 +216,11 @@ function TaskChatBubbleContent({
     lightboxSrc === null
       ? -1
       : Math.max(0, mediaRefs.findIndex((ref) => ref.url === lightboxSrc));
+  const extractedReasoning = useMemo(() => {
+    if (isHuman || !bodyText) return null;
+    return extractThoughtAndAnswer(bodyText);
+  }, [isHuman, bodyText]);
+
   return (
     <div
       className={cn(
@@ -245,20 +252,37 @@ function TaskChatBubbleContent({
               : "w-full bg-transparent px-1 text-foreground",
           )}
         >
-          <MarkdownBody
-            // The human bubble sits on the solid --liveness-blue accent, so the
-            // prose body text must follow the bubble's `text-white` rather than
-            // the default light-mode prose color (which reads as black on blue).
-            // `paperclip-markdown-on-accent` flips prose tokens to currentColor
-            // (== inherited white) in both themes; dark mode was already correct
-            // only because `prose-invert` happened to lighten the text.
-            className={isHuman ? "paperclip-markdown-on-accent" : undefined}
-            softBreaks
-            linkIssueReferences
-            onImageClick={openImage}
-          >
-            {bodyText}
-          </MarkdownBody>
+          {extractedReasoning?.hasReasoning ? (
+            <TaskChatReasoningTimeline
+              steps={extractedReasoning.steps}
+              title="Pemikiran"
+              delaySeconds={15}
+              isHistorical={!item.streaming}
+            >
+              <MarkdownBody
+                softBreaks
+                linkIssueReferences
+                onImageClick={openImage}
+              >
+                {extractedReasoning.answer}
+              </MarkdownBody>
+            </TaskChatReasoningTimeline>
+          ) : (
+            <MarkdownBody
+              // The human bubble sits on the solid --liveness-blue accent, so the
+              // prose body text must follow the bubble's `text-white` rather than
+              // the default light-mode prose color (which reads as black on blue).
+              // `paperclip-markdown-on-accent` flips prose tokens to currentColor
+              // (== inherited white) in both themes; dark mode was already correct
+              // only because `prose-invert` happened to lighten the text.
+              className={isHuman ? "paperclip-markdown-on-accent" : undefined}
+              softBreaks
+              linkIssueReferences
+              onImageClick={openImage}
+            >
+              {bodyText}
+            </MarkdownBody>
+          )}
         </div>
       ) : null}
       {imageRefs.length > 0 ? (

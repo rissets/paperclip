@@ -1,9 +1,23 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DataSourceVectorStore } from "../services/data-source-vector-store.js";
-import { EnterpriseOrchestratorService } from "../services/enterprise-orchestrator.js";
+import { coordinatorDeadlineSubmittedAt, EnterpriseOrchestratorService } from "../services/enterprise-orchestrator.js";
 import { RagModelService } from "../services/rag-models.js";
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
+});
+
+describe("Coordinator deadline timestamp", () => {
+  it("starts a fresh budget when the caller timestamp predates coordinator work", () => {
+    const now = 1_800_000_000_000;
+
+    expect(coordinatorDeadlineSubmittedAt(now - 30_000, now)).toBeUndefined();
+    expect(coordinatorDeadlineSubmittedAt(new Date(now - 5_000).toISOString(), now)).toBe(now - 5_000);
+    expect(coordinatorDeadlineSubmittedAt("not-a-date", now)).toBeUndefined();
+  });
+});
 
 describe("Package P4: Schema Vectors, Hybrid Retrieval & Selective Snapshot Routing", () => {
   const createQueryChain = (data: any[]) => {
@@ -153,6 +167,26 @@ describe("Package P4: Schema Vectors, Hybrid Retrieval & Selective Snapshot Rout
   });
 
   describe("P4-03: Hybrid Schema Retriever & Selective Reranker", () => {
+    it("bounds a stalled local BGE embedding call and returns to lexical retrieval", async () => {
+      vi.stubEnv("RAG_EMBEDDING_PROVIDER", "auto");
+      vi.stubEnv("RAG_BGE_EMBEDDING_URL", "http://127.0.0.1:18080");
+      vi.stubEnv("OPENROUTER_API_KEY", "");
+      const fetchMock = vi.fn((_url: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+      }));
+      vi.stubGlobal("fetch", fetchMock);
+      const startedAt = Date.now();
+
+      const result = await new RagModelService().embed(["slow local embedding"], undefined, {
+        localTimeoutMs: 20,
+        gatewayTimeoutMs: 30,
+      });
+
+      expect(result.vectors).toBeNull();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(Date.now() - startedAt).toBeLessThan(500);
+    });
+
     it("includes authorized vector-only table matches with no lexical overlap", async () => {
       vi.spyOn(RagModelService.prototype, "embed").mockResolvedValue({
         vectors: [new Array(1_024).fill(0.1)],
@@ -179,6 +213,53 @@ describe("Package P4: Schema Vectors, Hybrid Retrieval & Selective Snapshot Rout
       expect(result.candidates[0]?.relevanceScore).toBeCloseTo(0.552);
     });
 
+    it("passes the coordinator abort signal and short provider timeouts to semantic retrieval", async () => {
+      const controller = new AbortController();
+      const embed = vi.spyOn(RagModelService.prototype, "embed").mockResolvedValue({
+        vectors: [new Array(1_024).fill(0.1)],
+        space: "bge-m3",
+        generation: "bge-m3@test",
+        backend: "local-bge-m3",
+      });
+      vi.spyOn(DataSourceVectorStore.prototype, "searchSchemaVectors").mockResolvedValue(
+        new Map([["table-2", 0.92]]),
+      );
+      const orchestrator = new EnterpriseOrchestratorService(createMockDb());
+
+      await orchestrator.hybridRetrieveSchema("comp-1", "unrelated operational concepts", ["source-1"], {
+        signal: controller.signal,
+      });
+
+      expect(embed).toHaveBeenCalledWith(["unrelated operational concepts"], undefined, {
+        signal: controller.signal,
+        localTimeoutMs: 2_500,
+        gatewayTimeoutMs: 4_500,
+      });
+    });
+
+    it("skips BGE/OpenRouter calls when the onboarded semantic dimension has one lexical match", async () => {
+      const embed = vi.spyOn(RagModelService.prototype, "embed");
+      const orchestrator = new EnterpriseOrchestratorService(createMockDb({ tables: [{
+        id: "province-summary",
+        dataSourceId: "source-1",
+        companyId: "comp-1",
+        tableName: "customer_summary",
+        rowCount: 250_000,
+        schemaDefinition: [{ name: "province_code", dataType: "string", role: "dimension" }],
+        semanticModel: { dimensions: [{ name: "Provinsi", column: "province_code" }] },
+      }] }));
+
+      const result = await orchestrator.hybridRetrieveSchema(
+        "comp-1",
+        "Tampilkan sebaran berdasarkan provinsi",
+        ["source-1"],
+      );
+
+      expect(result.candidates[0]?.id).toBe("province-summary");
+      expect(result.candidates[0]?.matchedBy).toBe("lexical");
+      expect(embed).not.toHaveBeenCalled();
+    });
+
     it("skips vector reranker when an exact table name or metric is present to preserve low latency", async () => {
       const db = createMockDb();
       const orchestrator = new EnterpriseOrchestratorService(db);
@@ -196,6 +277,30 @@ describe("Package P4: Schema Vectors, Hybrid Retrieval & Selective Snapshot Rout
       expect(result.candidates[0].tableName).toBe("transaksi_penjualan");
       expect(result.candidates[0].matchedBy).toBe("exact_match");
       expect(result.reasoning).toContain("Exact table-name match");
+    });
+
+    it("uses an explicitly qualified schema table match ahead of same-named schemas", async () => {
+      const orchestrator = new EnterpriseOrchestratorService(createMockDb({ tables: [
+        {
+          id: "geo-provinsi", dataSourceId: "source-1", companyId: "comp-1", tableName: "provinsi",
+          schemaDefinition: [{ name: "province_code", dataType: "string" }],
+          semanticModel: { sourceSchema: "geo", dimensions: [{ name: "province_code" }] },
+        },
+        {
+          id: "legacy-provinsi", dataSourceId: "source-1", companyId: "comp-1", tableName: "provinsi",
+          schemaDefinition: [{ name: "province_code", dataType: "string" }],
+          semanticModel: { sourceSchema: "legacy", dimensions: [{ name: "province_code" }] },
+        },
+      ] }));
+
+      const result = await orchestrator.hybridRetrieveSchema("comp-1", "Baca geo.provinsi", ["source-1"]);
+
+      expect(result.candidates.map((candidate) => candidate.id)).toEqual(["geo-provinsi"]);
+      expect(result.candidates[0]).toMatchObject({
+        tableName: "provinsi",
+        schemaName: "geo",
+        qualifiedTableName: "geo.provinsi",
+      });
     });
 
     it("prioritizes an explicitly named table over common exact dimension columns", async () => {

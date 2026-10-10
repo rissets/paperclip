@@ -7,6 +7,7 @@ import {
   DATA_SOURCE_QUERY_RESULT_TTL_MS,
 } from "./data-source-query-jobs.js";
 import { isExternalQueryAbortError } from "./external-query-abort.js";
+import { redactSensitiveText } from "../redaction.js";
 
 type ClaimedQueryJob = {
   id: string;
@@ -57,6 +58,9 @@ export class DataSourceQueryWorker {
   private stopping = false;
   private activeController: AbortController | undefined;
   private abortKind: AbortKind = null;
+  private lastFailureLog = "";
+  private lastFailureLogAt = 0;
+  private suppressedFailureLogs = 0;
 
   constructor(private readonly db: Db) {
     this.service = new DataSourcesService(db);
@@ -172,6 +176,27 @@ export class DataSourceQueryWorker {
     `);
   }
 
+  private logQueryFailure(error: unknown, timedOut: boolean): void {
+    const rawMessage = error instanceof Error ? error.message : String(error ?? "Unknown query failure");
+    const message = /\b53300\b|too many clients/i.test(rawMessage)
+      ? "external PostgreSQL connection limit reached"
+      : redactSensitiveText(rawMessage).replace(/\s+/g, " ").slice(0, 300) || "query failed";
+    const logKey = `${timedOut ? "timeout" : "failure"}:${message}`;
+    const now = Date.now();
+    if (logKey === this.lastFailureLog && now - this.lastFailureLogAt < 60_000) {
+      this.suppressedFailureLogs += 1;
+      return;
+    }
+    const repeated = this.suppressedFailureLogs > 0
+      ? ` (${this.suppressedFailureLogs} duplicate failures suppressed)`
+      : "";
+    const log = timedOut ? console.warn : console.error;
+    log(`[DataSourceQueryWorker] ${timedOut ? "Query cancelled or timed out" : "Query failed"}: ${message}${repeated}`);
+    this.lastFailureLog = logKey;
+    this.lastFailureLogAt = now;
+    this.suppressedFailureLogs = 0;
+  }
+
   async tick(): Promise<void> {
     if (this.running || this.stopping) return;
     this.running = true;
@@ -219,9 +244,9 @@ export class DataSourceQueryWorker {
           error instanceof Error ? error.message : String(error),
         );
         if (isTimeoutOrCancel) {
-          console.warn("[DataSourceQueryWorker] Query cancelled or timed out:", error instanceof Error ? error.message : String(error));
+          this.logQueryFailure(error, true);
         } else {
-          console.error("[DataSourceQueryWorker] Query failed:", error);
+          this.logQueryFailure(error, false);
         }
         await this.finishAborted(job, error);
       } finally {

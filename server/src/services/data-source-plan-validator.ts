@@ -25,10 +25,14 @@ export interface PlanValidationTableMeta {
   tableName: string;
   schemaDefinition?: Array<{ name: string; dataType: string; isPrimaryKey?: boolean }>;
   semanticModel?: {
+    sourceSchema?: string;
+    schemaName?: string;
     relationships?: Array<{
       sourceTable: string;
+      sourceSchema?: string;
       sourceColumn: string;
       targetTable: string;
+      targetSchema?: string;
       targetColumn: string;
       relationType?: string;
     }>;
@@ -75,6 +79,20 @@ export interface PlanValidationResult {
   };
 }
 
+function normalizeTableName(name: string) {
+  return name.trim().replace(/["'`\[\]]/g, "").toLowerCase();
+}
+
+function tableIdentity(table: PlanValidationTableMeta) {
+  const schema = table.semanticModel?.sourceSchema || table.semanticModel?.schemaName;
+  return schema ? `${schema}.${table.tableName}` : table.tableName;
+}
+
+function relationIdentity(tableName: string, schemaName?: string) {
+  if (schemaName) return `${schemaName}.${tableName}`;
+  return tableName;
+}
+
 export class DataSourcePlanValidator {
   /**
    * Validate physical binding, metrics, grain, join paths, data freshness, and query cost.
@@ -85,14 +103,30 @@ export class DataSourcePlanValidator {
     const allowedSourceSet = new Set(input.allowedDataSourceIds);
 
     const tableMap = new Map<string, PlanValidationTableMeta>();
+    const ambiguousNames = new Set<string>();
+    const addTableName = (name: string, table: PlanValidationTableMeta) => {
+      const normalized = normalizeTableName(name);
+      if (ambiguousNames.has(normalized)) return;
+      const previous = tableMap.get(normalized);
+      if (previous && previous.id !== table.id) {
+        tableMap.delete(normalized);
+        ambiguousNames.add(normalized);
+        return;
+      }
+      tableMap.set(normalized, table);
+    };
     for (const t of input.tables) {
-      tableMap.set(t.tableName.toLowerCase(), t);
+      addTableName(tableIdentity(t), t);
+      addTableName(t.tableName, t);
     }
+    const findTable = (name: string) => {
+      const normalized = normalizeTableName(name);
+      return ambiguousNames.has(normalized) ? undefined : tableMap.get(normalized);
+    };
 
     // 1. Physical Binding Verification
     for (const refTableName of input.referencedTables) {
-      const lowerName = refTableName.toLowerCase();
-      const meta = tableMap.get(lowerName);
+      const meta = findTable(refTableName);
       if (!meta) {
         errors.push(`Table '${refTableName}' is not available or does not exist`);
         continue;
@@ -103,7 +137,7 @@ export class DataSourcePlanValidator {
     }
 
     for (const colRef of input.referencedColumns) {
-      const tableMeta = tableMap.get(colRef.table.toLowerCase());
+      const tableMeta = findTable(colRef.table);
       if (!tableMeta) {
         // Table error already recorded
         continue;
@@ -124,7 +158,7 @@ export class DataSourcePlanValidator {
       if (metric.column && metric.column !== "*") {
         let foundCol = false;
         for (const t of input.referencedTables) {
-          const tMeta = tableMap.get(t.toLowerCase());
+          const tMeta = findTable(t);
           if (tMeta?.schemaDefinition?.some((c) => c.name.toLowerCase() === metric.column!.toLowerCase())) {
             foundCol = true;
             break;
@@ -145,8 +179,8 @@ export class DataSourcePlanValidator {
 
     // 3. Join Verification
     for (const join of input.joins || []) {
-      const left = tableMap.get(join.leftTable.toLowerCase());
-      const right = tableMap.get(join.rightTable.toLowerCase());
+      const left = findTable(join.leftTable);
+      const right = findTable(join.rightTable);
       if (!left || !right) {
         errors.push(`Join references unknown table(s): ${join.leftTable} <-> ${join.rightTable}`);
         continue;
@@ -157,12 +191,15 @@ export class DataSourcePlanValidator {
         ...(left.semanticModel?.relationships || []),
         ...(right.semanticModel?.relationships || []),
       ];
+      const leftIdentity = normalizeTableName(tableIdentity(left));
+      const rightIdentity = normalizeTableName(tableIdentity(right));
       const hasVerifiedEdge = relations.some(
-        (r) =>
-          (r.sourceTable.toLowerCase() === join.leftTable.toLowerCase() &&
-            r.targetTable.toLowerCase() === join.rightTable.toLowerCase()) ||
-          (r.sourceTable.toLowerCase() === join.rightTable.toLowerCase() &&
-            r.targetTable.toLowerCase() === join.leftTable.toLowerCase()),
+        (r) => {
+          const source = normalizeTableName(relationIdentity(r.sourceTable, r.sourceSchema));
+          const target = normalizeTableName(relationIdentity(r.targetTable, r.targetSchema));
+          return (source === leftIdentity && target === rightIdentity)
+            || (source === rightIdentity && target === leftIdentity);
+        },
       );
 
       if (!hasVerifiedEdge) {
@@ -174,7 +211,7 @@ export class DataSourcePlanValidator {
 
     // 4. Freshness and Snapshot Verification
     for (const refTableName of input.referencedTables) {
-      const meta = tableMap.get(refTableName.toLowerCase());
+      const meta = findTable(refTableName);
       if (!meta) continue;
 
       if (meta.semanticModel?.pendingExternalSnapshot) {
@@ -195,7 +232,7 @@ export class DataSourcePlanValidator {
     // 5. Query Cost Estimation
     let totalRows = 0;
     for (const refTableName of input.referencedTables) {
-      const meta = tableMap.get(refTableName.toLowerCase());
+      const meta = findTable(refTableName);
       totalRows += meta?.rowCount ?? 1000;
     }
     const estimatedRows = input.estimatedRowsScan ?? totalRows;

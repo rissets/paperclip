@@ -173,14 +173,19 @@ describe("P1-01 & P1-02: Enterprise Orchestrator Fast-Path Resolver & Query Exec
 
     const context = await orchestrator.resolveQueryContext("comp-1", {
       agentId: "agent-1",
-      query: "hallo apa yang bisa kamu lakukan ?",
+      query: "apa yang bisa anda lakukan ?",
     });
 
     expect(context.lane).toBe("fast_path_non_data");
     expect(context.availableTables).toEqual([]);
     const guidance = buildDatasourceOrchestrationGuidance(context);
     expect(guidance).toContain("[Conversational Non-Data Fast Path]");
-    expect(guidance).toContain("Do not call query_structured.py or query_database.py");
+    expect(guidance).toContain("query_structured.py");
+    expect(guidance).toContain("query_database.py");
+    expect(guidance).toContain("Do not inspect files, installed skills, environment variables");
+    expect(guidance).toContain("Do not use tools for discovery or verification");
+    expect(guidance).toContain("PATCH $PAPERCLIP_API_URL/api/issues/$PAPERCLIP_TASK_ID");
+    expect(guidance).toContain("X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID");
   });
 
   it("routes a real data question with greeting words through orchestration", async () => {

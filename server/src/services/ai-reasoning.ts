@@ -32,6 +32,12 @@ export interface AgentReasoningOptions {
   instructionsContent?: string;
   adapterType?: string;
   maxRetries?: number;
+  /** Per-call Pi CLI deadline for bounded ingestion jobs. */
+  piTimeoutMs?: number;
+  /** Per-call router deadline for bounded ingestion jobs. */
+  routerTimeoutMs?: number;
+  /** Short, non-sensitive caller context included in provider failure logs. */
+  logContext?: string;
   signal?: AbortSignal;
   /** Permit one bounded, schema-checked data observation request during onboarding. */
   allowDatabaseObservations?: boolean;
@@ -102,6 +108,155 @@ export interface AiDatabaseAnalysisResult {
   tableProfiles?: Record<string, TableSemanticProfile>;
   crossTableClusters?: CrossTableCluster[];
   observationRequests?: DatabaseSchemaObservationRequest[];
+}
+
+type InferenceBackend = "pi_cli" | "router_http";
+type ProviderCooldown = { until: number; reason: string };
+
+const MODEL_COOLDOWN_MAX_MS = 5 * 60_000;
+const inferenceModelCooldowns = new Map<string, ProviderCooldown>();
+const inferenceBackendCooldowns = new Map<string, ProviderCooldown>();
+
+class InferenceProviderError extends Error {
+  constructor(
+    message: string,
+    readonly status?: number,
+    readonly retryAfterMs?: number,
+  ) {
+    super(message);
+    this.name = "InferenceProviderError";
+  }
+}
+
+function boundedRetryAfterMs(value: number | undefined, fallback: number): number {
+  return Math.min(MODEL_COOLDOWN_MAX_MS, Math.max(1_000, Number.isFinite(value) ? value! : fallback));
+}
+
+function retryAfterMsFromText(value: string): number | undefined {
+  const seconds = value.match(/(?:reset_seconds|retry_after_seconds)\s*["']?\s*[:=]\s*["']?(\d+(?:\.\d+)?)/i)?.[1];
+  if (seconds) return Number(seconds) * 1_000;
+  const retryDate = value.match(/retry_after\s*["']?\s*[:=]\s*["']([^"']+)["']/i)?.[1];
+  if (retryDate) {
+    const dateMs = Date.parse(retryDate);
+    if (Number.isFinite(dateMs)) return Math.max(0, dateMs - Date.now());
+  }
+  return undefined;
+}
+
+function retryAfterMsFromHeader(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1_000);
+  const dateMs = Date.parse(value);
+  return Number.isFinite(dateMs) ? Math.max(0, dateMs - Date.now()) : undefined;
+}
+
+function providerFailure(error: unknown, backend: InferenceBackend): {
+  message: string;
+  cooldownMs: number;
+  modelWide: boolean;
+  status?: number;
+} {
+  const raw = error instanceof Error ? error.message : String(error ?? "");
+  const status = error instanceof InferenceProviderError
+    ? error.status
+    : Number(raw.match(/\b(401|403|429|499|5\d\d)\b/)?.[1]) || undefined;
+  const retryAfterMs = error instanceof InferenceProviderError
+    ? error.retryAfterMs
+    : retryAfterMsFromText(raw);
+
+  if (status === 499 || /request_signal_aborted|client disconnected/i.test(raw)) {
+    return {
+      message: `${backend === "pi_cli" ? "Pi CLI" : "router"} request was disconnected before completion${status === 499 ? " (HTTP 499)" : ""}`,
+      cooldownMs: 5_000,
+      modelWide: false,
+      status,
+    };
+  }
+  if (status === 429) {
+    const cooldownMs = boundedRetryAfterMs(retryAfterMs, 30_000);
+    return {
+      message: "model is rate limited (HTTP 429)",
+      cooldownMs,
+      modelWide: true,
+      status,
+    };
+  }
+  if (status === 401 || status === 403) {
+    return {
+      message: `${backend === "pi_cli" ? "Pi provider" : "router"} credentials are not accepted (HTTP ${status})`,
+      cooldownMs: 60_000,
+      modelWide: false,
+      status,
+    };
+  }
+  if (status && status >= 500) {
+    return {
+      message: `${backend === "pi_cli" ? "Pi provider" : "router"} is temporarily unavailable (HTTP ${status})`,
+      cooldownMs: 15_000,
+      modelWide: false,
+      status,
+    };
+  }
+  if (/timed? ?out|timeout|aborted/i.test(raw)) {
+    return { message: `${backend === "pi_cli" ? "Pi CLI" : "router"} inference timed out`, cooldownMs: 10_000, modelWide: false };
+  }
+  if (backend === "pi_cli" && /\bENOENT\b|spawn .* not found/i.test(raw)) {
+    return { message: "Pi CLI is unavailable on this host", cooldownMs: 30_000, modelWide: false };
+  }
+  return {
+    message: `${backend === "pi_cli" ? "Pi CLI" : "router"} inference failed`,
+    cooldownMs: 5_000,
+    modelWide: false,
+  };
+}
+
+function putCooldown(map: Map<string, ProviderCooldown>, key: string, until: number, reason: string): boolean {
+  const now = Date.now();
+  const existing = map.get(key);
+  if (existing && existing.until > now) {
+    existing.until = Math.max(existing.until, until);
+    existing.reason = reason;
+    return false;
+  }
+  if (map.size >= 512) map.delete(map.keys().next().value!);
+  map.set(key, { until, reason });
+  return true;
+}
+
+function recordProviderFailure(model: string, backend: InferenceBackend, error: unknown): {
+  message: string;
+  shouldLog: boolean;
+} {
+  const failure = providerFailure(error, backend);
+  const key = model.trim().toLowerCase();
+  const cooldownKey = `${key}:${backend}`;
+  const until = Date.now() + failure.cooldownMs;
+  const shouldLog = failure.modelWide
+    ? putCooldown(inferenceModelCooldowns, key, until, failure.message)
+    : putCooldown(inferenceBackendCooldowns, cooldownKey, until, failure.message);
+  const message = failure.status === 429
+    ? `${failure.message}; retry in about ${Math.ceil(failure.cooldownMs / 1_000)}s`
+    : failure.message;
+  return { message, shouldLog };
+}
+
+function activeProviderCooldown(model: string, backend: InferenceBackend): string | null {
+  const now = Date.now();
+  const key = model.trim().toLowerCase();
+  for (const [map, cooldownKey] of [
+    [inferenceModelCooldowns, key],
+    [inferenceBackendCooldowns, `${key}:${backend}`],
+  ] as const) {
+    const cooldown = map.get(cooldownKey);
+    if (!cooldown) continue;
+    if (cooldown.until <= now) {
+      map.delete(cooldownKey);
+      continue;
+    }
+    return `${cooldown.reason}; retry in about ${Math.ceil((cooldown.until - now) / 1_000)}s`;
+  }
+  return null;
 }
 
 export interface DatabaseSchemaObservationRequest {
@@ -309,6 +464,10 @@ export class AiReasoningService {
     let lastParsed: any = null;
     let lastErrors: string[] = [];
     let lastBackend: "pi_cli" | "router_http" | undefined;
+    let completedIterations = 0;
+    const logContext = options?.logContext?.trim()
+      ? ` (${options.logContext.trim().slice(0, 120)})`
+      : "";
 
     for (let iteration = 1; iteration <= maxRetries; iteration++) {
       if (options?.signal?.aborted) {
@@ -337,55 +496,96 @@ export class AiReasoningService {
       let execError: string | null = null;
       let backend: "pi_cli" | "router_http" | undefined;
       const preferPi = options?.adapterType === "pi_local";
+      const appendExecError = (message: string) => {
+        execError = execError ? `${execError}; ${message}` : message;
+      };
 
       // Honor the configured specialist runtime. In particular, a Pi-backed
       // ingestion agent must execute through the local Pi CLI first; router
       // inference remains an explicit, traceable fallback if Pi fails.
       if (preferPi) {
-        try {
-          rawOutput = await this.runViaPiCli(currentPrompt, model, systemInstructions, options?.signal);
-          if (rawOutput) backend = "pi_cli";
-        } catch (err: any) {
-          if (options?.signal?.aborted) {
-            throw new Error("Agentic reasoning was cancelled or exceeded its deadline budget");
-          }
-          execError = `Pi CLI failed: ${err.message}`;
-          console.warn(`[${agentName}] Iteration ${iteration} Pi CLI failed; trying configured router fallback: ${err.message}`);
-        }
-        if (!rawOutput && this.routerApiKey) {
+        const piCooldown = activeProviderCooldown(model, "pi_cli");
+        if (piCooldown) {
+          appendExecError(`Pi CLI skipped: ${piCooldown}`);
+        } else {
+          completedIterations = iteration;
           try {
-            rawOutput = await this.runViaRouterHttp(currentPrompt, model, options?.signal, systemInstructions);
-            if (rawOutput) backend = "router_http";
-          } catch (err: any) {
-            if (options?.signal?.aborted) {
-              throw new Error("Agentic reasoning was cancelled or exceeded its deadline budget");
-            }
-            execError = `${execError ? `${execError}; ` : ""}Router HTTP fallback failed: ${err.message}`;
-            console.warn(`[${agentName}] Iteration ${iteration} router fallback failed: ${err.message}`);
-          }
-        }
-      } else {
-        // Generic/unconfigured agents retain router-first behavior for speed.
-        try {
-          rawOutput = await this.runViaRouterHttp(currentPrompt, model, options?.signal, systemInstructions);
-          if (rawOutput) backend = "router_http";
-        } catch (err: any) {
-          if (options?.signal?.aborted) {
-            throw new Error("Agentic reasoning was cancelled or exceeded its deadline budget");
-          }
-          execError = `Router HTTP failed: ${err.message}`;
-          console.warn(`[${agentName}] Iteration ${iteration} Router HTTP failed. Trying Pi CLI fallback: ${err.message}`);
-        }
-        if (!rawOutput) {
-          try {
-            rawOutput = await this.runViaPiCli(currentPrompt, model, systemInstructions, options?.signal);
+            rawOutput = await this.runViaPiCli(currentPrompt, model, systemInstructions, options?.signal, options?.piTimeoutMs);
             if (rawOutput) backend = "pi_cli";
           } catch (err: any) {
             if (options?.signal?.aborted) {
               throw new Error("Agentic reasoning was cancelled or exceeded its deadline budget");
             }
-            execError = (execError ? `${execError}; ` : "") + err.message;
-            console.warn(`[${agentName}] Iteration ${iteration} Pi CLI fallback failed: ${err.message}`);
+            const failure = recordProviderFailure(model, "pi_cli", err);
+            appendExecError(`Pi CLI failed: ${failure.message}`);
+            if (failure.shouldLog) {
+              console.warn(`[${agentName}]${logContext} Pi CLI failed (${failure.message}); checking configured router fallback`);
+            }
+          }
+        }
+        if (!rawOutput && this.routerApiKey) {
+          const routerCooldown = activeProviderCooldown(model, "router_http");
+          if (routerCooldown) {
+            appendExecError(`Router fallback skipped: ${routerCooldown}`);
+          } else {
+            completedIterations = iteration;
+            try {
+              rawOutput = await this.runViaRouterHttp(currentPrompt, model, options?.signal, systemInstructions, options?.routerTimeoutMs);
+              if (rawOutput) backend = "router_http";
+            } catch (err: any) {
+              if (options?.signal?.aborted) {
+                throw new Error("Agentic reasoning was cancelled or exceeded its deadline budget");
+              }
+              const failure = recordProviderFailure(model, "router_http", err);
+              appendExecError(`Router fallback failed: ${failure.message}`);
+              if (failure.shouldLog) {
+                console.warn(`[${agentName}]${logContext} Router fallback failed: ${failure.message}`);
+              }
+            }
+          }
+        } else if (!rawOutput && !this.routerApiKey) {
+          appendExecError("Router fallback is not configured");
+        }
+      } else {
+        // Generic/unconfigured agents retain router-first behavior for speed.
+        const routerCooldown = activeProviderCooldown(model, "router_http");
+        if (routerCooldown) {
+          appendExecError(`Router skipped: ${routerCooldown}`);
+        } else {
+          completedIterations = iteration;
+          try {
+            rawOutput = await this.runViaRouterHttp(currentPrompt, model, options?.signal, systemInstructions, options?.routerTimeoutMs);
+            if (rawOutput) backend = "router_http";
+          } catch (err: any) {
+            if (options?.signal?.aborted) {
+              throw new Error("Agentic reasoning was cancelled or exceeded its deadline budget");
+            }
+            const failure = recordProviderFailure(model, "router_http", err);
+            appendExecError(`Router failed: ${failure.message}`);
+            if (failure.shouldLog) {
+              console.warn(`[${agentName}] Router failed (${failure.message}); checking Pi CLI fallback`);
+            }
+          }
+        }
+        if (!rawOutput) {
+          const piCooldown = activeProviderCooldown(model, "pi_cli");
+          if (piCooldown) {
+            appendExecError(`Pi CLI fallback skipped: ${piCooldown}`);
+          } else {
+            completedIterations = iteration;
+            try {
+              rawOutput = await this.runViaPiCli(currentPrompt, model, systemInstructions, options?.signal, options?.piTimeoutMs);
+              if (rawOutput) backend = "pi_cli";
+            } catch (err: any) {
+              if (options?.signal?.aborted) {
+                throw new Error("Agentic reasoning was cancelled or exceeded its deadline budget");
+              }
+              const failure = recordProviderFailure(model, "pi_cli", err);
+              appendExecError(`Pi CLI fallback failed: ${failure.message}`);
+              if (failure.shouldLog) {
+                console.warn(`[${agentName}] Pi CLI fallback failed: ${failure.message}`);
+              }
+            }
           }
         }
       }
@@ -399,7 +599,9 @@ export class AiReasoningService {
           error: execError || "Model inference failed",
           iteration,
         });
-        continue;
+        // Provider execution failures cannot be repaired by sending the same
+        // request again. Keep retries for malformed/invalid model output only.
+        break;
       }
       lastBackend = backend;
 
@@ -474,13 +676,13 @@ export class AiReasoningService {
           stage: reasoningSteps.length + 1,
           name: `${taskName} - Best-Effort Sanitization`,
           agent: agentName,
-          thought: `Iterasi maksimum tercapai (${maxRetries}). Menggunakan data terbaik yang berhasil tersanitasi.`,
-          iteration: maxRetries,
+          thought: "Menggunakan hasil terbaik yang berhasil tersanitasi setelah validasi agentic tidak selesai.",
+          iteration: completedIterations,
           backend: lastBackend,
         });
         return {
           result: fallbackSanitization.sanitized,
-          iterations: maxRetries,
+          iterations: completedIterations,
           reasoningSteps,
           backend: lastBackend,
           validationStatus: "best_effort",
@@ -490,7 +692,7 @@ export class AiReasoningService {
 
     return {
       result: null,
-      iterations: maxRetries,
+      iterations: completedIterations,
       reasoningSteps,
       validationStatus: "failed",
     };
@@ -767,6 +969,9 @@ Respond with ONLY valid JSON (no markdown formatting, no code block backticks):
         instructionsPath: agentOptions?.instructionsPath,
         adapterType: agentOptions?.adapterType,
         maxRetries: agentOptions?.maxRetries ?? 3,
+        piTimeoutMs: agentOptions?.piTimeoutMs,
+        routerTimeoutMs: agentOptions?.routerTimeoutMs,
+        logContext: agentOptions?.logContext,
         signal: agentOptions?.signal,
       },
     );
@@ -1262,6 +1467,9 @@ Respond with ONLY valid JSON (no markdown formatting, no code block backticks):
         instructionsContent: agentOptions?.instructionsContent,
         adapterType: agentOptions?.adapterType,
         maxRetries: agentOptions?.maxRetries ?? 3,
+        piTimeoutMs: agentOptions?.piTimeoutMs,
+        routerTimeoutMs: agentOptions?.routerTimeoutMs,
+        logContext: agentOptions?.logContext,
         signal: agentOptions?.signal,
       },
     );
@@ -1391,6 +1599,7 @@ Instructions:
     model: string,
     systemInstructions?: string,
     signal?: AbortSignal,
+    requestedTimeoutMs?: number,
   ): Promise<string> {
     return new Promise((resolve, reject) => {
       if (signal?.aborted) {
@@ -1421,12 +1630,13 @@ Instructions:
         signal.addEventListener("abort", onAbort, { once: true });
       }
 
+      const timeoutMs = Number.isFinite(requestedTimeoutMs) ? Math.max(1_000, requestedTimeoutMs!) : 45_000;
       const timer = setTimeout(() => {
         try {
           proc.kill("SIGKILL");
         } catch {}
-        reject(new Error("Pi execution timed out (45s)"));
-      }, 45000);
+        reject(new Error(`Pi execution timed out (${Math.ceil(timeoutMs / 1_000)}s)`));
+      }, timeoutMs);
 
       proc.stdout.on("data", (chunk) => {
         stdout += chunk.toString();
@@ -1463,6 +1673,7 @@ Instructions:
     model: string,
     signal?: AbortSignal,
     systemInstructions?: string,
+    requestedTimeoutMs?: number,
   ): Promise<string | null> {
     if (!this.routerApiKey) return null;
     if (signal?.aborted) throw new Error("HTTP inference aborted by caller");
@@ -1471,7 +1682,8 @@ Instructions:
     const apiModel = model.replace(/^rissets\//, "");
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 75000);
+    const timeoutMs = Number.isFinite(requestedTimeoutMs) ? Math.max(1_000, requestedTimeoutMs!) : 75_000;
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     const onAbort = () => controller.abort();
     if (signal) {
@@ -1498,7 +1710,8 @@ Instructions:
 
       if (!res.ok) {
         const errText = await res.text().catch(() => "");
-        throw new Error(`HTTP ${res.status}: ${errText.slice(0, 200)}`);
+        const retryAfterMs = retryAfterMsFromHeader(res.headers.get("retry-after")) ?? retryAfterMsFromText(errText);
+        throw new InferenceProviderError(`Router request failed with HTTP ${res.status}`, res.status, retryAfterMs);
       }
 
       const data = (await res.json()) as any;

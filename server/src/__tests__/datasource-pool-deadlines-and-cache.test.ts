@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   rewriteClickhouseQueryWithFinal,
   ClickhouseService,
@@ -11,6 +11,10 @@ import {
   makePlanCacheKey,
   type CachedParameterizedPlanResult,
 } from "../services/data-source-cache.js";
+
+afterEach(async () => {
+  await DatabaseIntegrationService.shutdownPools();
+});
 
 describe("Package P5: ClickHouse Workload Design, Pools, Deadlines & Cache", () => {
   describe("P5-01: ClickHouse typed version/ordering/deduplication workload design", () => {
@@ -91,7 +95,8 @@ describe("Package P5: ClickHouse Workload Design, Pools, Deadlines & Cache", () 
   });
 
   describe("P5-02: External bounded pools, credential rotation & driver cancellation", () => {
-    it("caches persistent connection pools and invalidates on credential rotation", () => {
+    it("shares persistent PostgreSQL pools across service wrappers and invalidates on credential rotation", async () => {
+      await DatabaseIntegrationService.shutdownPools();
       const dbService = new DatabaseIntegrationService();
       const baseConfig = {
         type: "postgres" as const,
@@ -111,8 +116,16 @@ describe("Package P5: ClickHouse Workload Design, Pools, Deadlines & Cache", () 
       const hash2 = dbService.getCredentialHash(rotatedConfig);
       expect(hash2).not.toBe(hash1);
 
+      const firstClient = dbService.getPostgresSql(baseConfig, 5);
+      const secondClient = new DatabaseIntegrationService().getPostgresSql(baseConfig, 1);
+      expect(secondClient).toBe(firstClient);
+
+      const rotatedClient = new DatabaseIntegrationService().getPostgresSql(rotatedConfig, 1);
+      expect(rotatedClient).not.toBe(firstClient);
+
       // Invalidate pool explicitly
       dbService.invalidatePool(baseConfig);
+      await DatabaseIntegrationService.shutdownPools();
     });
 
     it("evicts idle pools based on elapsed time threshold", () => {

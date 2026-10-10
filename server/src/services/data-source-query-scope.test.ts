@@ -96,4 +96,36 @@ describe("resolveQueryTableScope", () => {
     expect(result.unresolvedReferences).toEqual(["incident_stats"]);
     expect(result.needsClarification).toBe(true);
   });
+
+  it("resolves a schema-qualified PostgreSQL table without crossing to a same-named schema", () => {
+    const duplicateTables = [
+      { id: "geo-table", dataSourceId: "source-a", tableName: "provinsi", semanticModel: { sourceSchema: "geo" } },
+      { id: "legacy-table", dataSourceId: "source-b", tableName: "provinsi", semanticModel: { sourceSchema: "legacy" } },
+    ];
+    const result = resolveQueryTableScope({
+      query: 'SELECT * FROM "geo"."provinsi" LIMIT 10',
+      requestedReferences: ["geo.provinsi"],
+      allowedTables: duplicateTables,
+    });
+
+    expect(result.tables?.map((table) => table.id)).toEqual(["geo-table"]);
+    expect(result.referencedTables).toEqual(["geo.provinsi"]);
+    expect(result.needsClarification).toBe(false);
+  });
+
+  it("requires a schema when an explicit PostgreSQL table name is duplicated", () => {
+    const duplicateTables = [
+      { id: "geo-table", dataSourceId: "source-a", tableName: "provinsi", semanticModel: { sourceSchema: "geo" } },
+      { id: "legacy-table", dataSourceId: "source-b", tableName: "provinsi", semanticModel: { sourceSchema: "legacy" } },
+    ];
+    const result = resolveQueryTableScope({
+      query: "Read provinsi",
+      requestedReferences: ["provinsi"],
+      allowedTables: duplicateTables,
+    });
+
+    expect(result.tables).toBeNull();
+    expect(result.unresolvedReferences).toEqual(["provinsi"]);
+    expect(result.needsClarification).toBe(true);
+  });
 });

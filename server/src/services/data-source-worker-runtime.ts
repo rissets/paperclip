@@ -5,11 +5,12 @@ export class DataSourceWorkerRuntime {
   private active: Promise<void> | undefined;
   private lastSuccess = 0;
   private failed = false;
+  private consecutiveFailures = 0;
 
   constructor(
     private readonly tick: () => Promise<void>,
     private readonly pollMs: number,
-    private readonly onError: () => void,
+    private readonly onError: (error: unknown) => void,
   ) {
     if (!Number.isFinite(pollMs) || pollMs < 100 || pollMs > 60_000) {
       throw new Error("Datasource worker polling must be between 100 and 60000 milliseconds");
@@ -21,16 +22,21 @@ export class DataSourceWorkerRuntime {
     this.active = Promise.resolve().then(this.tick).then(() => {
       this.lastSuccess = Date.now();
       this.failed = false;
-    }).catch(() => {
+      this.consecutiveFailures = 0;
+    }).catch((error: unknown) => {
       this.failed = true;
-      this.onError();
+      this.consecutiveFailures += 1;
+      this.onError(error);
     }).finally(() => {
       this.active = undefined;
       if (!this.stopped) {
+        const backoffMs = this.failed
+          ? Math.min(this.pollMs * 2 ** Math.min(this.consecutiveFailures - 1, 6), 60_000)
+          : this.pollMs;
         this.timer = setTimeout(() => {
           this.timer = undefined;
           this.start();
-        }, this.pollMs);
+        }, backoffMs);
       }
     });
   }

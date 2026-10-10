@@ -30,7 +30,8 @@ export function buildDatasourceOrchestrationGuidance(context: QueryContextRespon
       "[Enterprise Datasource Orchestration Active]",
       "[Conversational Non-Data Fast Path]",
       `Trace: ${context.traceId}`,
-      "This is a greeting or capability question, not a request to inspect or query datasource content. Answer briefly from your configured agent name, role, and instructions. Do not call query_structured.py or query_database.py, do not list or describe tables, and do not invoke the datasource coordinator for this turn.",
+      "This is a greeting or capability question, not a request to inspect or query datasource content. Answer in at most 100 words from your configured agent name, role, and instructions already present in this run. Do not inspect files, installed skills, environment variables, agent/task/data-source APIs, or any other runtime metadata. Do not call query_structured.py, query_database.py, search_knowledge.py, or any data-source endpoint; do not list or describe tables; and do not invoke the datasource coordinator for this turn.",
+      "Do not use tools for discovery or verification. If this is an issue/chat turn, publish the concise answer once with PATCH $PAPERCLIP_API_URL/api/issues/$PAPERCLIP_TASK_ID, JSON body {\"comment\":\"<answer>\"}, and the runtime-provided Authorization: Bearer $PAPERCLIP_API_KEY and X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID headers. Never print credential values. Stop after a successful response.",
       "If the user asks a follow-up requiring business data, send that complete question once through query_structured.py --orchestrate.",
     ].join("\n");
   }

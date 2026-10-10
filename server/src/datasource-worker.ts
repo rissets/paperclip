@@ -5,6 +5,36 @@ import { loadConfig } from "./config.js";
 import { DataSourceWorkerRuntime } from "./services/data-source-worker-runtime.js";
 import { validateDataSourceModelConfig } from "./services/data-source-model-config.js";
 
+function safePollFailureSummary(error: unknown): string {
+  const candidate = error as { code?: unknown; message?: unknown } | null;
+  const code = typeof candidate?.code === "string" ? candidate.code : "";
+  const message = typeof candidate?.message === "string" ? candidate.message : "";
+  if (code === "53300" || /too many clients/i.test(message)) return "PostgreSQL connection limit reached";
+  if (["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EHOSTUNREACH"].includes(code)) return "database temporarily unavailable";
+  if (/timeout|timed out/i.test(message)) return "database poll timed out";
+  if (/^[0-9A-Z]{5}$/.test(code)) return `database poll failed (PostgreSQL ${code})`;
+  return "database poll failed; error details omitted";
+}
+
+function createPollErrorReporter(workerName: string): (error: unknown) => void {
+  let previousSummary = "";
+  let lastLoggedAt = 0;
+  let suppressed = 0;
+  return (error) => {
+    const summary = safePollFailureSummary(error);
+    const now = Date.now();
+    if (summary === previousSummary && now - lastLoggedAt < 60_000) {
+      suppressed += 1;
+      return;
+    }
+    const repeated = suppressed > 0 ? ` (${suppressed} duplicate poll errors suppressed)` : "";
+    console.error(`[${workerName}] ${summary}; retry scheduled${repeated}`);
+    previousSummary = summary;
+    lastLoggedAt = now;
+    suppressed = 0;
+  };
+}
+
 async function main() {
   const config = loadConfig();
   validateDataSourceModelConfig();
@@ -54,28 +84,17 @@ async function main() {
     await db.execute(sql`SELECT id, query_text, query_fingerprint, lease_owner FROM data_source_query_jobs LIMIT 0`);
     const { DataSourceIngestionWorker } = await import("./services/data-source-ingestion-worker.js");
     ingestionWorker = new DataSourceIngestionWorker(db);
-    runtime = new DataSourceWorkerRuntime(() => ingestionWorker!.tick(), pollMs, () => {
-      // Driver errors can contain connection credentials; do not log raw errors.
-      console.error("[DatasourceWorker] Poll failed; retrying on the next interval");
-    });
+    runtime = new DataSourceWorkerRuntime(() => ingestionWorker!.tick(), pollMs, createPollErrorReporter("DatasourceWorker"));
     snapshotWorker = new DataSourceIngestionWorker(db, "external_db_snapshot");
-    snapshotRuntime = new DataSourceWorkerRuntime(() => snapshotWorker!.tick(), pollMs, () => {
-      console.error("[DatasourceSnapshotWorker] Poll failed; retrying on the next interval");
-    });
+    snapshotRuntime = new DataSourceWorkerRuntime(() => snapshotWorker!.tick(), pollMs, createPollErrorReporter("DatasourceSnapshotWorker"));
     const { DataSourceQueryWorker } = await import("./services/data-source-query-worker.js");
     queryWorker = new DataSourceQueryWorker(db);
     const queryPollMs = Number(process.env.DATASOURCE_QUERY_WORKER_POLL_MS ?? 500);
-    queryRuntime = new DataSourceWorkerRuntime(() => queryWorker!.tick(), queryPollMs, () => {
-      console.error("[DatasourceQueryWorker] Poll failed; retrying on the next interval");
-    });
+    queryRuntime = new DataSourceWorkerRuntime(() => queryWorker!.tick(), queryPollMs, createPollErrorReporter("DatasourceQueryWorker"));
     embeddingWorker = new DataSourceIngestionWorker(db, "embedding_reindex");
-    embeddingRuntime = new DataSourceWorkerRuntime(() => embeddingWorker!.tick(), pollMs, () => {
-      console.error("[DatasourceEmbeddingWorker] Poll failed; retrying on the next interval");
-    });
+    embeddingRuntime = new DataSourceWorkerRuntime(() => embeddingWorker!.tick(), pollMs, createPollErrorReporter("DatasourceEmbeddingWorker"));
     externalDbWorker = new DataSourceIngestionWorker(db, "external_db_onboarding");
-    externalDbRuntime = new DataSourceWorkerRuntime(() => externalDbWorker!.tick(), pollMs, () => {
-      console.error("[DatasourceExternalDbWorker] Poll failed; retrying on the next interval");
-    });
+    externalDbRuntime = new DataSourceWorkerRuntime(() => externalDbWorker!.tick(), pollMs, createPollErrorReporter("DatasourceExternalDbWorker"));
     await new Promise<void>((resolve, reject) => {
       healthServer.once("error", reject);
       healthServer.listen(port, "0.0.0.0", resolve);
@@ -99,6 +118,8 @@ async function main() {
       await new Promise<void>((resolve) => healthServer.close(() => resolve()));
       const { shutdownDataSourceCache } = await import("./services/data-source-cache.js");
       await shutdownDataSourceCache();
+      const { shutdownDatabaseIntegrationPools } = await import("./services/database-integration.js");
+      await shutdownDatabaseIntegrationPools();
       await db.$client.end({ timeout: 5 });
     };
     for (const signal of ["SIGTERM", "SIGINT"] as const) {
@@ -113,8 +134,11 @@ async function main() {
     snapshotWorker?.stop();
     queryWorker?.stop();
     embeddingWorker?.stop();
-    await Promise.all([runtime?.stop(), snapshotRuntime?.stop(), queryRuntime?.stop(), embeddingRuntime?.stop()]);
+    externalDbWorker?.stop();
+    await Promise.all([runtime?.stop(), snapshotRuntime?.stop(), queryRuntime?.stop(), embeddingRuntime?.stop(), externalDbRuntime?.stop()]);
     healthServer.close();
+    const { shutdownDatabaseIntegrationPools } = await import("./services/database-integration.js");
+    await shutdownDatabaseIntegrationPools();
     await db.$client.end({ timeout: 1 });
     const errorCode =
       typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"

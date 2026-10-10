@@ -376,3 +376,7 @@ export function useMeetingRecorder() {
   }
   return context;
 }
+
+export function useOptionalMeetingRecorder() {
+  return useContext(MeetingRecorderContext);
+}

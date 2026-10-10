@@ -6,7 +6,9 @@ import type { AiDatabaseAnalysisResult } from "./ai-reasoning.js";
 import { assertDataSourceJobLease, type DataSourceJobLease } from "./data-source-job-lease.js";
 
 export const EXTERNAL_SCHEMA_MAPPING_BATCH_SIZE = 20;
-export const EXTERNAL_SCHEMA_MAPPING_BATCH_TIMEOUT_MS = 30_000;
+// One grouped mapping may include a local Pi attempt, router fallback, and
+// one bounded observation/validation follow-up without cancelling inference.
+export const EXTERNAL_SCHEMA_MAPPING_BATCH_TIMEOUT_MS = 180_000;
 export const EXTERNAL_SCHEMA_MAPPING_TABLE_TIMEOUT_MS = 90_000;
 export const EXTERNAL_SCHEMA_MAPPING_CHECKPOINT_MAX_BYTES = 128 * 1024;
 

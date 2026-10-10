@@ -37,6 +37,70 @@ export interface SourceRosterEntry {
   semanticProfile?: DataSourceSemanticProfile | null;
 }
 
+type RelationalDatabaseType = "postgres" | "mariadb" | "mysql";
+type DatabaseTableSummary = {
+  name: string;
+  tableName?: string;
+  schemaName?: string;
+  columns: string[];
+  rowCount: number;
+};
+
+function databaseTableParts(table: Pick<DatabaseTableSummary, "name" | "tableName" | "schemaName">) {
+  const hasQualifiedName = table.name.includes(".");
+  const parsedSchemaName = hasQualifiedName ? table.name.slice(0, table.name.lastIndexOf(".")) : undefined;
+  const parsedTableName = hasQualifiedName ? table.name.slice(table.name.lastIndexOf(".") + 1) : undefined;
+  const tableName = table.tableName || parsedTableName || table.name;
+  const schemaName = table.schemaName || parsedSchemaName;
+  return { tableName, schemaName, identity: schemaName ? `${schemaName}.${tableName}` : tableName };
+}
+
+function quoteSqlIdentifier(identifier: string, databaseType: RelationalDatabaseType) {
+  const quote = databaseType === "postgres" ? '"' : "`";
+  return `${quote}${identifier.replaceAll(quote, `${quote}${quote}`)}${quote}`;
+}
+
+function quoteDatabaseTable(table: Pick<DatabaseTableSummary, "name" | "tableName" | "schemaName">, databaseType: RelationalDatabaseType) {
+  const parts = databaseTableParts(table);
+  const tableRef = quoteSqlIdentifier(parts.tableName, databaseType);
+  return parts.schemaName
+    ? `${quoteSqlIdentifier(parts.schemaName, databaseType)}.${tableRef}`
+    : tableRef;
+}
+
+function relationSideMatchesDatabaseTable(
+  relationTable: string | undefined,
+  relationSchema: string | undefined,
+  table: { identity: string; tableName: string; schemaName?: string },
+  allTables: Array<{ name?: string; tableName?: string; schemaName?: string }>,
+) {
+  if (!relationTable) return false;
+  let physicalTable = relationTable;
+  let physicalSchema = relationSchema;
+  if (!physicalSchema && relationTable.includes(".")) {
+    physicalSchema = relationTable.slice(0, relationTable.lastIndexOf("."));
+    physicalTable = relationTable.slice(relationTable.lastIndexOf(".") + 1);
+  }
+  if (physicalTable.toLowerCase() !== table.tableName.toLowerCase()) return false;
+  if (physicalSchema && table.schemaName) {
+    return physicalSchema.toLowerCase() === table.schemaName.toLowerCase();
+  }
+  if (!physicalSchema && !table.schemaName) return true;
+
+  // Legacy relations may omit schema. Only attach them to a schema-qualified table
+  // when the table name is unique in this profile; otherwise that leaks joins
+  // between same-named tables in different schemas.
+  const sameNamedTables = allTables.filter((candidate) => {
+    const candidateParts = databaseTableParts({
+      name: candidate.name || candidate.tableName || "",
+      tableName: candidate.tableName,
+      schemaName: candidate.schemaName,
+    });
+    return candidateParts.tableName.toLowerCase() === table.tableName.toLowerCase();
+  });
+  return sameNamedTables.length === 1;
+}
+
 export class TypeSafeJevService {
   private static lastFailureTime = 0;
   private baseUrl: string;
@@ -717,11 +781,12 @@ export class TypeSafeJevService {
    * 5. Database Integration Table Role & Join Discovery via JEV System One ('db.table_role')
    */
   async evaluateDatabaseTables(
-    tables: Array<{ name: string; columns: string[]; rowCount: number }>,
+    tables: DatabaseTableSummary[],
+    options: { databaseType?: RelationalDatabaseType } = {},
   ): Promise<{
     tableRoles: Record<string, string>;
     entities: string[];
-    relationships: Array<{ sourceTable: string; sourceColumn: string; targetTable: string; targetColumn: string; relationType: any }>;
+    relationships: TableRelation[];
     suggestedQueries: SuggestedQueryTemplate[];
     reasoningSteps: OnboardingReasoningStep[];
     primaryTopics: string[];
@@ -729,12 +794,14 @@ export class TypeSafeJevService {
     tableProfiles: Record<string, TableSemanticProfile>;
     crossTableClusters: CrossTableCluster[];
   }> {
+    const databaseType = options.databaseType || "mysql";
     const questions: Record<string, any> = {};
 
     for (const t of tables) {
-      questions[`role_${t.name}`] = {
+      const { identity } = databaseTableParts(t);
+      questions[`role_${identity}`] = {
         type: "choice",
-        instructions: `Tentukan peran fungsional tabel '${t.name}' dalam arsitektur database.`,
+        instructions: `Tentukan peran fungsional tabel '${identity}' dalam arsitektur database.`,
         criteria: {
           fact_table: "Tabel transaksi utama / pencatatan kejadian / log bisnis dengan volume tinggi",
           dimension_table: "Tabel master entitas utama (pelanggan, perusahaan, produk, akun, user)",
@@ -745,7 +812,16 @@ export class TypeSafeJevService {
     }
 
     const state = {
-      tables: tables.map((t) => ({ name: t.name, columns: t.columns.slice(0, 10), row_count: t.rowCount })),
+      tables: tables.map((t) => {
+        const parts = databaseTableParts(t);
+        return {
+          name: parts.identity,
+          schema: parts.schemaName,
+          table: parts.tableName,
+          columns: t.columns.slice(0, 10),
+          row_count: t.rowCount,
+        };
+      }),
     };
 
     const res = await this.systemOne(state, questions);
@@ -753,28 +829,51 @@ export class TypeSafeJevService {
     const entities: string[] = [];
 
     for (const t of tables) {
-      const ans = (res.answers[`role_${t.name}`] as JevDecisionChoice)?.choice || "dimension_table";
-      tableRoles[t.name] = ans;
-      entities.push(t.name);
+      const { identity } = databaseTableParts(t);
+      const ans = (res.answers[`role_${identity}`] as JevDecisionChoice)?.choice || "dimension_table";
+      tableRoles[identity] = ans;
+      entities.push(identity);
     }
 
     // Discover relationships dynamically
-    const relationships: Array<{ sourceTable: string; sourceColumn: string; targetTable: string; targetColumn: string; relationType: any }> = [];
+    const relationships: TableRelation[] = [];
     for (const source of tables) {
+      const sourceParts = databaseTableParts(source);
       for (const col of source.columns) {
         const lowerCol = col.toLowerCase();
         if (lowerCol.endsWith("_id") || lowerCol.startsWith("id_")) {
-          const targetCandidateName = lowerCol.replace("_id", "").replace("id_", "");
-          const targetTable = tables.find(
-            (t) => t.name.toLowerCase() === targetCandidateName || t.name.toLowerCase().includes(targetCandidateName),
-          );
-          if (targetTable && targetTable.name !== source.name) {
+          const targetCandidateName = lowerCol.endsWith("_id")
+            ? lowerCol.slice(0, -3)
+            : lowerCol.slice(3);
+          const exactMatches = tables.filter((candidate) => {
+            if (candidate === source) return false;
+            const candidateParts = databaseTableParts(candidate);
+            const normalizedName = candidateParts.tableName.toLowerCase();
+            return normalizedName === targetCandidateName
+              || normalizedName === `${targetCandidateName}s`
+              || (targetCandidateName.endsWith("s") && normalizedName === targetCandidateName.slice(0, -1));
+          });
+          const sameSchemaMatches = sourceParts.schemaName
+            ? exactMatches.filter((candidate) => databaseTableParts(candidate).schemaName?.toLowerCase() === sourceParts.schemaName!.toLowerCase())
+            : [];
+          const candidates = sameSchemaMatches.length > 0 ? sameSchemaMatches : exactMatches;
+          // A naming heuristic is only useful when it has one unambiguous target.
+          // In particular, never guess across schemas when duplicate table names exist.
+          const targetTable = candidates.length === 1 ? candidates[0] : undefined;
+          if (targetTable) {
+            const targetParts = databaseTableParts(targetTable);
             relationships.push({
-              sourceTable: source.name,
+              sourceTable: sourceParts.tableName,
+              ...(sourceParts.schemaName ? { sourceSchema: sourceParts.schemaName } : {}),
               sourceColumn: col,
-              targetTable: targetTable.name,
-              targetColumn: targetTable.columns.find((c) => c.toLowerCase() === "id" || c.toLowerCase().includes("id")) || "id",
+              targetTable: targetParts.tableName,
+              ...(targetParts.schemaName ? { targetSchema: targetParts.schemaName } : {}),
+              targetColumn: targetTable.columns.find((c) => c.toLowerCase() === "id")
+                || targetTable.columns.find((c) => c.toLowerCase() === `${targetCandidateName}_id`)
+                || "id",
               relationType: "many_to_one",
+              provenance: "candidate",
+              confidence: sameSchemaMatches.length > 0 ? 0.75 : 0.55,
             });
           }
         }
@@ -785,6 +884,9 @@ export class TypeSafeJevService {
     const suggestedQueries: SuggestedQueryTemplate[] = [];
 
     for (const t of tables) {
+      const parts = databaseTableParts(t);
+      const qualifiedName = parts.identity;
+      const quotedTable = quoteDatabaseTable(t, databaseType);
       const colNames: string[] = (t.columns || []).map((c: any) => (typeof c === "string" ? c : c?.name || ""));
       const idCol = colNames.find((c) => /^(id|id_|_id)$/i.test(c) || c.toLowerCase().endsWith("_id") || c.toLowerCase().startsWith("id_"));
       const nameCol = colNames.find((c) => /^(nama_|nama$|name$|_name|title|judul|kode_|label)/i.test(c));
@@ -793,36 +895,35 @@ export class TypeSafeJevService {
 
       if (nameCol) {
         suggestedQueries.push({
-          title: `Pencarian Entitas '${t.name}' (Exact Match)`,
-          query: `Cari data lengkap dalam tabel ${t.name} berdasarkan ${nameCol}`,
+          title: `Pencarian Entitas '${qualifiedName}' (Exact Match)`,
+          query: `Cari data lengkap dalam tabel ${qualifiedName} berdasarkan ${nameCol}`,
           category: "filtering",
-          sqlSnippet: `SELECT * FROM \`${t.name}\` WHERE \`${nameCol}\` = '{SEARCH_VALUE}' LIMIT 1;`,
+          sqlSnippet: `SELECT * FROM ${quotedTable} WHERE ${quoteSqlIdentifier(nameCol, databaseType)} = '{SEARCH_VALUE}' LIMIT 1;`,
           description: `Pencarian exact match cepat pada kolom ${nameCol}`,
         });
         suggestedQueries.push({
-          title: `Pencarian Awalan '${t.name}' (Prefix Match)`,
-          query: `Daftar record dalam tabel ${t.name} dengan awalan ${nameCol} tertentu`,
+          title: `Pencarian Awalan '${qualifiedName}' (Prefix Match)`,
+          query: `Daftar record dalam tabel ${qualifiedName} dengan awalan ${nameCol} tertentu`,
           category: "filtering",
-          sqlSnippet: `SELECT * FROM \`${t.name}\` WHERE \`${nameCol}\` LIKE '{PREFIX}%' LIMIT 10;`,
+          sqlSnippet: `SELECT * FROM ${quotedTable} WHERE ${quoteSqlIdentifier(nameCol, databaseType)} LIKE '{PREFIX}%' LIMIT 10;`,
           description: `Pencarian prefix cepat memanfaatkan indeks pada ${nameCol}`,
         });
       } else if (idCol) {
         suggestedQueries.push({
-          title: `Lookup '${t.name}' Berdasarkan ID`,
-          query: `Cari record ${t.name} berdasarkan ${idCol}`,
+          title: `Lookup '${qualifiedName}' Berdasarkan ID`,
+          query: `Cari record ${qualifiedName} berdasarkan ${idCol}`,
           category: "filtering",
-          sqlSnippet: `SELECT * FROM \`${t.name}\` WHERE \`${idCol}\` = '{ID_VALUE}' LIMIT 1;`,
+          sqlSnippet: `SELECT * FROM ${quotedTable} WHERE ${quoteSqlIdentifier(idCol, databaseType)} = '{ID_VALUE}' LIMIT 1;`,
           description: `Direct primary key lookup pada ${t.name}`,
         });
       }
 
       for (const jc of jsonCols) {
-        const displayCol = nameCol ? `\`${nameCol}\`` : (idCol ? `\`${idCol}\`` : "*");
         suggestedQueries.push({
-          title: `Ekstraksi Kolom Terstruktur (${jc}) pada ${t.name}`,
-          query: `Ambil data terperinci dari kolom JSON ${jc} pada tabel ${t.name}`,
+          title: `Ekstraksi Kolom Terstruktur (${jc}) pada ${qualifiedName}`,
+          query: `Ambil data terperinci dari kolom JSON ${jc} pada tabel ${qualifiedName}`,
           category: "json_extraction",
-          sqlSnippet: `SELECT ${displayCol}, \`${jc}\` FROM \`${t.name}\` ${nameCol ? `WHERE \`${nameCol}\` = '{SEARCH_VALUE}'` : ""} LIMIT 1;`,
+          sqlSnippet: `SELECT ${nameCol ? quoteSqlIdentifier(nameCol, databaseType) : (idCol ? quoteSqlIdentifier(idCol, databaseType) : "*")}, ${quoteSqlIdentifier(jc, databaseType)} FROM ${quotedTable} ${nameCol ? `WHERE ${quoteSqlIdentifier(nameCol, databaseType)} = '{SEARCH_VALUE}'` : ""} LIMIT 1;`,
           description: `Mengambil data terstruktur dan sub-field dari kolom JSON ${jc}`,
         });
       }
@@ -830,10 +931,10 @@ export class TypeSafeJevService {
       if (metricCols.length > 0) {
         const mCol = metricCols[0];
         suggestedQueries.push({
-          title: `Agregasi Total & Rata-rata ${mCol} pada ${t.name}`,
-          query: `Hitung agregasi metrik ${mCol} dari tabel ${t.name}`,
+          title: `Agregasi Total & Rata-rata ${mCol} pada ${qualifiedName}`,
+          query: `Hitung agregasi metrik ${mCol} dari tabel ${qualifiedName}`,
           category: "aggregation",
-          sqlSnippet: `SELECT COUNT(*) as total_records, SUM(\`${mCol}\`) as sum_${mCol}, AVG(\`${mCol}\`) as avg_${mCol} FROM \`${t.name}\`;`,
+          sqlSnippet: `SELECT COUNT(*) AS total_records, SUM(${quoteSqlIdentifier(mCol, databaseType)}) AS ${quoteSqlIdentifier(`sum_${mCol}`, databaseType)}, AVG(${quoteSqlIdentifier(mCol, databaseType)}) AS ${quoteSqlIdentifier(`avg_${mCol}`, databaseType)} FROM ${quotedTable};`,
           description: `Perhitungan total dan rata-rata metrik ${mCol}`,
         });
       }
@@ -882,7 +983,8 @@ export class TypeSafeJevService {
 
     const tableProfiles: Record<string, TableSemanticProfile> = {};
     for (const t of tables) {
-      tableProfiles[t.name] = this.deriveTableSemanticProfile(t, tables, relationships, tableRoles);
+      const { identity } = databaseTableParts(t);
+      tableProfiles[identity] = this.deriveTableSemanticProfile(t, tables, relationships, tableRoles);
     }
     const crossTableClusters = this.deriveCrossTableClusters(tables, relationships, tableRoles);
 
@@ -904,7 +1006,7 @@ export class TypeSafeJevService {
    * entity humanization, and column profiles without any hardcoded dictionary strings.
    */
   private deriveDynamicDatabaseTopics(
-    tables: Array<{ name: string; columns: any[]; rowCount?: number }>,
+    tables: DatabaseTableSummary[],
     tableRoles: Record<string, string>,
   ): string[] {
     const topicsSet = new Set<string>();
@@ -937,8 +1039,9 @@ export class TypeSafeJevService {
     let hasIdentifiers = false;
 
     for (const t of tables) {
-      const role = tableRoles[t.name] || "dimension_table";
-      const cleanName = cleanEntityName(t.name);
+      const parts = databaseTableParts(t);
+      const role = tableRoles[parts.identity] || "dimension_table";
+      const cleanName = cleanEntityName(parts.tableName);
 
       if (role === "fact_table") {
         if (cleanName) factEntities.push(cleanName);
@@ -1080,13 +1183,19 @@ export class TypeSafeJevService {
    * business context, entity isolation, role classification, and local join relations.
    */
   public deriveTableSemanticProfile(
-    table: { name?: string; tableName?: string; columns?: any[]; rowCount?: number },
-    allTables: Array<{ name?: string; tableName?: string; columns?: any[]; rowCount?: number }> = [],
+    table: { name?: string; tableName?: string; schemaName?: string; columns?: any[]; rowCount?: number },
+    allTables: Array<{ name?: string; tableName?: string; schemaName?: string; columns?: any[]; rowCount?: number }> = [],
     allRelationships: TableRelation[] = [],
     tableRoles: Record<string, string> = {},
   ): TableSemanticProfile {
-    const rawTableName = table.tableName || table.name || "table";
+    const tableParts = databaseTableParts({
+      name: table.name || table.tableName || "table",
+      tableName: table.tableName,
+      schemaName: table.schemaName,
+    });
+    const rawTableName = tableParts.tableName;
     const role =
+      (tableRoles[tableParts.identity] as any) ||
       (tableRoles[rawTableName] as any) ||
       (table.rowCount && table.rowCount > 500 ? "fact_table" : "dimension_table");
     const humanEntity = this.humanizeIdentifier(rawTableName);
@@ -1190,12 +1299,12 @@ export class TypeSafeJevService {
 
     const tableRels = allRelationships.filter(
       (r) =>
-        r.sourceTable?.toLowerCase() === rawTableName.toLowerCase() ||
-        r.targetTable?.toLowerCase() === rawTableName.toLowerCase()
+        relationSideMatchesDatabaseTable(r.sourceTable, r.sourceSchema, tableParts, allTables) ||
+        relationSideMatchesDatabaseTable(r.targetTable, r.targetSchema, tableParts, allTables)
     );
 
     return {
-      tableName: rawTableName,
+      tableName: tableParts.identity,
       tableRole: role,
       context,
       topics: uniqueTopics,
@@ -1211,7 +1320,7 @@ export class TypeSafeJevService {
    * in the foreign key graph and grouping related business domains together.
    */
   public deriveCrossTableClusters(
-    tables: Array<{ name?: string; tableName?: string; columns?: any[]; rowCount?: number }>,
+    tables: Array<{ name?: string; tableName?: string; schemaName?: string; columns?: any[]; rowCount?: number }>,
     relationships: TableRelation[] = [],
     tableRoles: Record<string, string> = {},
   ): CrossTableCluster[] {
@@ -1219,11 +1328,20 @@ export class TypeSafeJevService {
     const assignedTables = new Set<string>();
 
     const normalizedTables = tables
-      .map((t) => ({
-        name: t.tableName || t.name || "",
+      .map((t) => {
+        const parts = databaseTableParts({
+          name: t.name || t.tableName || "",
+          tableName: t.tableName,
+          schemaName: t.schemaName,
+        });
+        return {
+        name: parts.identity,
+        tableName: parts.tableName,
+        schemaName: parts.schemaName,
         columns: t.columns || [],
         rowCount: t.rowCount,
-      }))
+        };
+      })
       .filter((t) => Boolean(t.name));
 
     // 1. Build adjacency graph from relationships
@@ -1232,9 +1350,21 @@ export class TypeSafeJevService {
       adjacency.set(t.name.toLowerCase(), new Set());
     }
     for (const r of relationships) {
-      const src = r.sourceTable?.toLowerCase();
-      const tgt = r.targetTable?.toLowerCase();
-      if (src && tgt && adjacency.has(src) && adjacency.has(tgt)) {
+      const sourceTable = normalizedTables.find((table) => relationSideMatchesDatabaseTable(
+        r.sourceTable,
+        r.sourceSchema,
+        { identity: table.name, tableName: table.tableName, schemaName: table.schemaName },
+        tables,
+      ));
+      const targetTable = normalizedTables.find((table) => relationSideMatchesDatabaseTable(
+        r.targetTable,
+        r.targetSchema,
+        { identity: table.name, tableName: table.tableName, schemaName: table.schemaName },
+        tables,
+      ));
+      const src = sourceTable?.name.toLowerCase();
+      const tgt = targetTable?.name.toLowerCase();
+      if (src && tgt && src !== tgt && adjacency.has(src) && adjacency.has(tgt)) {
         adjacency.get(src)!.add(tgt);
         adjacency.get(tgt)!.add(src);
       }

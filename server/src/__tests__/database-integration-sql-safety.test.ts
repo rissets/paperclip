@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import postgres from "postgres";
-import { DatabaseIntegrationService, validateReadOnlySqlQuery } from "../services/database-integration.js";
+import {
+  DatabaseIntegrationService,
+  externalDatabaseTableReference,
+  validateReadOnlySqlQuery,
+} from "../services/database-integration.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 describe("external SQL safety parser", () => {
@@ -92,6 +96,63 @@ if (!postgresSupport.supported) console.warn(`SQL safety PostgreSQL integration 
       expect(result.valuesByColumn["status.code"]).toEqual(["paid", "pending"]);
       expect(result.rowCount).toBe(2);
       expect(result.executionTimeMs).toBeGreaterThanOrEqual(0);
+    } finally {
+      service.invalidatePool(config);
+      await source.end({ timeout: 1 });
+      await temporary.cleanup();
+    }
+  }, 90_000);
+
+  it("discovers and reads a PostgreSQL table outside public using schema-qualified identifiers", async () => {
+    const temporary = await startEmbeddedPostgresTestDatabase("paperclip-datasource-schema-qualified-");
+    const source = postgres(temporary.connectionString, { max: 1 });
+    const service = new DatabaseIntegrationService();
+    const remote = new URL(temporary.connectionString);
+    const config = {
+      type: "postgres" as const,
+      host: remote.hostname,
+      port: Number(remote.port),
+      database: decodeURIComponent(remote.pathname.slice(1)),
+      username: decodeURIComponent(remote.username),
+      password: decodeURIComponent(remote.password),
+      ssl: false,
+      allowedTables: ["geo.provinsi"],
+    };
+
+    try {
+      await source.unsafe('CREATE SCHEMA "geo"');
+      await source.unsafe('CREATE TABLE "geo"."provinsi" ("id" integer PRIMARY KEY, "province_code" text NOT NULL)');
+      await source.unsafe('INSERT INTO "geo"."provinsi" SELECT n, $1 || n::text FROM generate_series(1, 42) AS n', ["provinsi-"]);
+
+      const discovered = await service.inspectDatabase(config);
+      expect(discovered.map((table) => ({ schema: table.schemaName, name: table.tableName }))).toEqual([
+        { schema: "geo", name: "provinsi" },
+      ]);
+      expect(discovered[0]?.semanticModel.sourceSchema).toBe("geo");
+
+      const qualifiedTable = externalDatabaseTableReference("geo", "provinsi", "postgres");
+      expect(qualifiedTable).toBe('"geo"."provinsi"');
+      const direct = await service.queryDatabase(config, `SELECT * FROM ${qualifiedTable} ORDER BY "id" LIMIT 10`, 10);
+      expect(direct.rowCount).toBe(10);
+      expect(direct.rows[0]).toMatchObject({ id: 1, province_code: "provinsi-1" });
+
+      const observed = await service.observeExternalTableColumns(config, {
+        schemaName: "geo",
+        tableName: "provinsi",
+        columns: ["province_code"],
+      });
+      expect(observed.rowCount).toBe(8);
+      expect(observed.valuesByColumn.province_code).toContain("provinsi-1");
+
+      const page = await service.queryKeysetPage(config, {
+        schemaName: "geo",
+        tableName: "provinsi",
+        columns: ["id", "province_code"],
+        primaryKey: "id",
+        pageSize: 3,
+      });
+      expect(page.rowCount).toBe(3);
+      expect(page.rows[0]).toMatchObject({ id: 1, province_code: "provinsi-1" });
     } finally {
       service.invalidatePool(config);
       await source.end({ timeout: 1 });

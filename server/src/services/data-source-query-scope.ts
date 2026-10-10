@@ -45,6 +45,17 @@ function containsExactIdentifier(query: string, identifier: string): boolean {
   return false;
 }
 
+function schemaNameFor(table: QueryScopeTable): string | undefined {
+  const semanticModel = table.semanticModel as Record<string, unknown> | undefined;
+  const schemaName = semanticModel?.sourceSchema ?? semanticModel?.schemaName;
+  return typeof schemaName === "string" && schemaName.length > 0 ? schemaName : undefined;
+}
+
+function tableIdentity(table: QueryScopeTable): string {
+  const schemaName = schemaNameFor(table);
+  return schemaName ? `${schemaName}.${table.tableName}` : table.tableName;
+}
+
 function chooseUniqueRankedTable(
   rankedTables: RankedQueryTable[],
   exactMatchFound: boolean,
@@ -72,11 +83,20 @@ export function resolveQueryTableScope<T extends QueryScopeTable>(input: {
   exactMatchFound?: boolean;
 }): QueryTableScopeResolution<T> {
   const byName = new Map<string, T>();
+  const ambiguousNames = new Set<string>();
+  const addUnambiguousName = (name: string, table: T) => {
+    const normalized = normalizeTableIdentity(name);
+    if (ambiguousNames.has(normalized)) return;
+    if (byName.has(normalized) && byName.get(normalized)?.id !== table.id) {
+      byName.delete(normalized);
+      ambiguousNames.add(normalized);
+      return;
+    }
+    byName.set(normalized, table);
+  };
   for (const table of input.allowedTables) {
-    byName.set(normalizeTableIdentity(table.tableName), table);
-    const semanticModel = table.semanticModel as Record<string, unknown> | undefined;
-    const schemaName = typeof semanticModel?.schemaName === "string" ? semanticModel.schemaName : undefined;
-    if (schemaName) byName.set(`${normalizeTableIdentity(schemaName)}.${normalizeTableIdentity(table.tableName)}`, table);
+    addUnambiguousName(tableIdentity(table), table);
+    addUnambiguousName(table.tableName, table);
   }
 
   const requested = Array.from(new Set(input.requestedReferences.map((name) => name.trim()).filter(Boolean)));
@@ -85,7 +105,8 @@ export function resolveQueryTableScope<T extends QueryScopeTable>(input: {
   const unresolvedReferences: string[] = [];
 
   for (const reference of requested) {
-    const exact = byName.get(normalizeTableIdentity(reference));
+    const normalizedReference = normalizeTableIdentity(reference);
+    const exact = ambiguousNames.has(normalizedReference) ? undefined : byName.get(normalizedReference);
     if (exact) {
       exactTables.set(exact.id, exact);
       continue;
@@ -97,10 +118,19 @@ export function resolveQueryTableScope<T extends QueryScopeTable>(input: {
     }
   }
 
-  const naturalLanguageMatches = input.allowedTables.filter((table) =>
-    !GENERIC_TABLE_REFERENCES.has(normalizeTableIdentity(table.tableName))
-    && containsExactIdentifier(input.query, table.tableName),
-  );
+  const qualifiedNaturalLanguageMatches = exactTables.size > 0 ? [] : input.allowedTables.filter((table) => {
+    const identity = tableIdentity(table);
+    return identity !== table.tableName
+      && containsExactIdentifier(input.query, identity);
+  });
+  const naturalLanguageMatches = exactTables.size > 0
+    ? []
+    : qualifiedNaturalLanguageMatches.length > 0
+      ? qualifiedNaturalLanguageMatches
+      : input.allowedTables.filter((table) =>
+        !GENERIC_TABLE_REFERENCES.has(normalizeTableIdentity(table.tableName))
+        && containsExactIdentifier(input.query, table.tableName),
+      );
   const matchesByName = new Map<string, T[]>();
   for (const table of naturalLanguageMatches) {
     const key = normalizeTableIdentity(table.tableName);
@@ -144,7 +174,7 @@ export function resolveQueryTableScope<T extends QueryScopeTable>(input: {
     const tables = [...exactTables.values()];
     return {
       tables,
-      referencedTables: tables.map((table) => table.tableName),
+      referencedTables: tables.map(tableIdentity),
       unresolvedReferences: [],
       needsClarification: false,
     };
@@ -156,7 +186,7 @@ export function resolveQueryTableScope<T extends QueryScopeTable>(input: {
     if (selected) {
       return {
         tables: [selected],
-        referencedTables: [selected.tableName],
+        referencedTables: [tableIdentity(selected)],
         unresolvedReferences: [],
         needsClarification: false,
       };

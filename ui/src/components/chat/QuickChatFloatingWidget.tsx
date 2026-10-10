@@ -20,6 +20,8 @@ import { heartbeatsApi } from "@/api/heartbeats";
 import { queryKeys } from "@/lib/queryKeys";
 import { AgentIcon } from "@/components/AgentIconPicker";
 import { MarkdownBody } from "@/components/MarkdownBody";
+import { TaskChatReasoningTimeline } from "@/components/task-chat/TaskChatReasoningTimeline";
+import { extractThoughtAndAnswer } from "@/lib/reasoning-parser";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -31,7 +33,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn, agentRouteRef } from "@/lib/utils";
 import { useNavigate, useLocation } from "@/lib/router";
-import { useMeetingRecorder } from "@/context/MeetingRecorderContext";
+import { useOptionalMeetingRecorder } from "@/context/MeetingRecorderContext";
 import type { Agent, Issue, IssueComment } from "@paperclipai/shared";
 
 interface QuickChatFloatingWidgetProps {
@@ -40,8 +42,8 @@ interface QuickChatFloatingWidgetProps {
 
 export function QuickChatFloatingWidget({ className }: QuickChatFloatingWidgetProps) {
   const { selectedCompanyId, selectedCompany } = useCompany();
-  const meetingRecorder = useMeetingRecorder();
-  const isDrawerActive = meetingRecorder.isOpen && !meetingRecorder.isMinimized;
+  const meetingRecorder = useOptionalMeetingRecorder();
+  const isDrawerActive = Boolean(meetingRecorder?.isOpen && !meetingRecorder?.isMinimized);
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const location = useLocation();
@@ -594,11 +596,26 @@ export function QuickChatFloatingWidget({ className }: QuickChatFloatingWidgetPr
                       >
                         {isUser ? (
                           <p className="whitespace-pre-wrap">{comment.body}</p>
-                        ) : (
-                          <div className="prose-xs">
-                            <MarkdownBody>{comment.body}</MarkdownBody>
-                          </div>
-                        )}
+                        ) : (() => {
+                          const parsed = extractThoughtAndAnswer(comment.body);
+                          const isOld = Date.now() - new Date(comment.createdAt).getTime() > 60000;
+                          return parsed.hasReasoning ? (
+                            <div className="prose-xs">
+                              <TaskChatReasoningTimeline
+                                steps={parsed.steps}
+                                title="Pemikiran"
+                                delaySeconds={15}
+                                isHistorical={isOld}
+                              >
+                                <MarkdownBody>{parsed.answer}</MarkdownBody>
+                              </TaskChatReasoningTimeline>
+                            </div>
+                          ) : (
+                            <div className="prose-xs">
+                              <MarkdownBody>{comment.body}</MarkdownBody>
+                            </div>
+                          );
+                        })()}
                       </div>
                       <span className="mt-1 text-xs text-muted-foreground px-1">
                         {new Date(comment.createdAt).toLocaleTimeString([], {

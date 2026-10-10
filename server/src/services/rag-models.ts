@@ -2,6 +2,11 @@ import { parseDataSourceModelConfig } from "./data-source-model-config.js";
 
 type EmbeddingSpace = "bge-m3" | "openrouter-text-embedding-3-small";
 type EmbeddingBatch = { vectors: number[][] | null; space: EmbeddingSpace | null; generation: string | null; backend: string | null };
+type RagRequestOptions = {
+  signal?: AbortSignal;
+  localTimeoutMs?: number;
+  gatewayTimeoutMs?: number;
+};
 
 const OPENROUTER_VECTOR_DIMENSIONS = 1536;
 
@@ -34,12 +39,21 @@ function normalizeResolvedModel(value: unknown): string | null {
   return model;
 }
 
-async function postJson(url: string, body: unknown, headers: Record<string, string>, timeoutMs = 30000): Promise<any> {
+async function postJson(
+  url: string,
+  body: unknown,
+  headers: Record<string, string>,
+  timeoutMs = 30000,
+  parentSignal?: AbortSignal,
+): Promise<any> {
+  if (parentSignal?.aborted) throw parentSignal.reason || new Error("RAG model request was cancelled");
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const signal = parentSignal ? AbortSignal.any([parentSignal, timeoutSignal]) : timeoutSignal;
   const response = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(timeoutMs),
+    signal,
   });
   if (!response.ok) {
     // Provider error bodies may echo queries, document snippets, or credentials.
@@ -49,10 +63,10 @@ async function postJson(url: string, body: unknown, headers: Record<string, stri
   return response.json();
 }
 
-async function embedWithBge(texts: string[]): Promise<{ vectors: number[][]; resolvedModel: string | null }> {
+async function embedWithBge(texts: string[], options?: RagRequestOptions): Promise<{ vectors: number[][]; resolvedModel: string | null }> {
   const endpoint = parseDataSourceModelConfig().bgeEmbeddingUrl;
   if (!endpoint) throw new Error("Local BGE embedding endpoint is not configured");
-  const response = await postJson(endpoint.replace(/\/+$/, "") + "/embed", { inputs: texts }, {}, 60000);
+  const response = await postJson(endpoint.replace(/\/+$/, "") + "/embed", { inputs: texts }, {}, options?.localTimeoutMs ?? 60000, options?.signal);
   const vectors = Array.isArray(response) ? response : response?.embeddings;
   if (!Array.isArray(vectors) || vectors.length !== texts.length) {
     throw new Error("Local BGE endpoint returned a different number of embeddings than inputs");
@@ -63,14 +77,15 @@ async function embedWithBge(texts: string[]): Promise<{ vectors: number[][]; res
   };
 }
 
-async function embedWithGateway(texts: string[]): Promise<{ vectors: number[][]; resolvedModel: string }> {
+async function embedWithGateway(texts: string[], options?: RagRequestOptions): Promise<{ vectors: number[][]; resolvedModel: string }> {
   const config = gatewayConfig();
   if (!config.apiKey) throw new Error("OPENROUTER_API_KEY is required when the local BGE service is unavailable");
   const response = await postJson(
     `${config.baseUrl}/embeddings`,
     { model: config.embeddingModel, input: texts },
     { authorization: `Bearer ${config.apiKey}` },
-    60000,
+    options?.gatewayTimeoutMs ?? 60000,
+    options?.signal,
   );
   const entries = Array.isArray(response?.data) ? [...response.data].sort((a, b) => Number(a.index) - Number(b.index)) : [];
   if (entries.length !== texts.length) throw new Error("Embedding gateway returned a different number of vectors than inputs");
@@ -123,7 +138,7 @@ export class RagModelService {
    * compatible endpoint when the VM has no GPU/model service. One batch uses
    * one embedding space so vectors from different models are never mixed.
    */
-  async embed(texts: string[], preferredSpace?: EmbeddingSpace): Promise<EmbeddingBatch> {
+  async embed(texts: string[], preferredSpace?: EmbeddingSpace, options?: RagRequestOptions): Promise<EmbeddingBatch> {
     if (texts.length === 0) return { vectors: [], space: null, generation: null, backend: null };
     const provider = parseDataSourceModelConfig().embeddingProvider;
     const canTryBge = provider !== "openrouter" && (!preferredSpace || preferredSpace === "bge-m3");
@@ -133,7 +148,7 @@ export class RagModelService {
         const vectors: number[][] = [];
         let resolvedGeneration: string | null = null;
         for (let offset = 0; offset < texts.length; offset += 32) {
-          const result = await embedWithBge(texts.slice(offset, offset + 32));
+          const result = await embedWithBge(texts.slice(offset, offset + 32), options);
           const generation = this.embeddingGeneration("bge-m3", result.resolvedModel);
           if (resolvedGeneration && resolvedGeneration !== generation) {
             throw new Error("Local BGE model identity changed between embedding batches");
@@ -147,7 +162,7 @@ export class RagModelService {
         // callers such as the durable reindex worker can publish the actual
         // gateway space/generation returned below. Explicit BGE mode remains
         // strict so an operator can require local-only inference.
-        if (provider === "bge") throw error;
+        if (provider === "bge" || options?.signal?.aborted) throw error;
       }
     }
 
@@ -159,7 +174,7 @@ export class RagModelService {
       const vectors: number[][] = [];
       let resolvedGeneration: string | null = null;
       for (let offset = 0; offset < texts.length; offset += 32) {
-        const result = await embedWithGateway(texts.slice(offset, offset + 32));
+        const result = await embedWithGateway(texts.slice(offset, offset + 32), options);
         const generation = this.embeddingGeneration("openrouter-text-embedding-3-small", result.resolvedModel);
         if (resolvedGeneration && resolvedGeneration !== generation) {
           throw new Error("Embedding gateway model identity changed between batches");
@@ -183,7 +198,11 @@ export class RagModelService {
     }
   }
 
-  async rerank(query: string, documents: Array<{ id: string; text: string }>): Promise<Array<{ id: string; score: number }> | null> {
+  async rerank(
+    query: string,
+    documents: Array<{ id: string; text: string }>,
+    options?: RagRequestOptions,
+  ): Promise<Array<{ id: string; score: number }> | null> {
     if (documents.length === 0) return [];
     const localEndpoint = parseDataSourceModelConfig().bgeRerankUrl;
     if (localEndpoint) {
@@ -192,11 +211,13 @@ export class RagModelService {
           localEndpoint.replace(/\/+$/, "") + "/rerank",
           { query, texts: documents.map((item) => item.text), return_text: false },
           {},
-          30000,
+          options?.localTimeoutMs ?? 30000,
+          options?.signal,
         );
         const entries = Array.isArray(response) ? response : response?.results;
         return parseRerankResults(entries, documents, (entry) => entry.score ?? entry.relevance_score);
       } catch (error) {
+        if (options?.signal?.aborted) throw error;
         console.warn("[RagModelService] Local BGE reranking unavailable; trying gateway/JEV fallback:", error instanceof Error ? error.message : error);
       }
     }
@@ -214,12 +235,14 @@ export class RagModelService {
           return_documents: false,
         },
         { authorization: `Bearer ${config.apiKey}` },
-        30000,
+        options?.gatewayTimeoutMs ?? 30000,
+        options?.signal,
       );
       const entries: Array<{ index?: unknown; relevance_score?: unknown; score?: unknown }> =
         Array.isArray(response?.results) ? response.results : [];
       return parseRerankResults(entries, documents, (entry) => entry.relevance_score ?? entry.score);
     } catch (error) {
+      if (options?.signal?.aborted) throw error;
       console.warn("[RagModelService] Gateway reranking unavailable; using TypeSafe JEV fallback:", error instanceof Error ? error.message : error);
       return null;
     }

@@ -11,6 +11,8 @@ import { TaskChatStatusPill } from "./TaskChatStatusPill";
 import { TaskChatAgentIdentity } from "./TaskChatBubble";
 
 import { useGeneralSettings } from "@/hooks/useGeneralSettings";
+import { TaskChatReasoningTimeline } from "./TaskChatReasoningTimeline";
+import { itemsToReasoningSteps, extractThoughtAndAnswer } from "@/lib/reasoning-parser";
 
 interface TaskChatTurnProps {
   item: TaskChatTurnItem;
@@ -90,7 +92,29 @@ export function TaskChatTurn({
   const streamlined = useStreamlinedTaskChatPresentation();
   const parentRow = !item.settled && item.liveStatus != null;
   const [standaloneExpanded, setStandaloneExpanded] = useState(false);
+  const reasoningSteps = useMemo(() => {
+    if (item.items.length > 0) {
+      return itemsToReasoningSteps(item.items);
+    }
+    if (item.finalResponse?.text) {
+      const extracted = extractThoughtAndAnswer(item.finalResponse.text);
+      if (extracted.hasReasoning) {
+        return extracted.steps;
+      }
+    }
+    return [];
+  }, [item.items, item.finalResponse?.text]);
+
+  const cleanFinalResponseText = useMemo(() => {
+    if (!item.finalResponse?.text) return "";
+    const extracted = extractThoughtAndAnswer(item.finalResponse.text);
+    return extracted.hasReasoning ? extracted.answer : item.finalResponse.text;
+  }, [item.finalResponse?.text]);
+
   const stepCount = useMemo(() => {
+    if (reasoningSteps.length > 0) {
+      return reasoningSteps.length;
+    }
     let count = 0;
     for (const child of item.items) {
       if (child.kind === "activity_phase") {
@@ -100,7 +124,7 @@ export function TaskChatTurn({
       }
     }
     return Math.max(1, count || item.items.length || 1);
-  }, [item.items]);
+  }, [item.items, reasoningSteps]);
 
   // The new Paperclip Runner task surface owns one durable chronological
   // timeline. The Worked/Stopped row is its stable header, so it stays directly
@@ -122,7 +146,7 @@ export function TaskChatTurn({
                   data-testid="task-chat-agent-bubble"
                 >
                   <MarkdownBody softBreaks linkIssueReferences>
-                    {item.finalResponse.text}
+                    {cleanFinalResponseText}
                   </MarkdownBody>
                 </div>
               </div>
@@ -130,67 +154,63 @@ export function TaskChatTurn({
           </div>
         );
       }
+
+      const hasActivity = reasoningSteps.length > 0 || item.items.length > 0;
       return (
         <div
           data-testid="task-chat-turn"
           data-settled={item.settled ? "true" : "false"}
         >
-          {item.items.length > 0 ? (
-            <div className="py-1">
-              <button
-                type="button"
-                onClick={() => setStandaloneExpanded(!standaloneExpanded)}
-                aria-expanded={standaloneExpanded}
-                className="flex items-center gap-1.5 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors group cursor-pointer"
-                data-testid="task-chat-turn-summary"
-              >
-                <ChevronRight
-                  className={cn(
-                    "size-3.5 shrink-0 transition-transform group-hover:text-foreground",
-                    standaloneExpanded && "rotate-90",
-                  )}
-                  aria-hidden="true"
-                />
-                <span>
-                  {stepCount} {stepCount === 1 ? "step" : "steps"}
-                </span>
-              </button>
-              {standaloneExpanded ? (
-                <div
-                  className="flex min-w-0 flex-col gap-2 py-1 pl-4 border-l border-border/50"
-                  data-testid="task-chat-turn-timeline"
-                >
-                  {item.items.map((child) => (
-                    <div
-                      className="min-w-0"
-                      key={child.id}
-                      data-testid="task-chat-turn-timeline-row"
-                      data-timeline-row-id={child.id}
-                      data-thread-anchor={child.id}
-                    >
-                      {renderChild(child)}
-                    </div>
-                  ))}
+          {hasActivity ? (
+            <TaskChatReasoningTimeline
+              steps={reasoningSteps}
+              title="Pemikiran"
+              stepCount={stepCount}
+              defaultOpen={standaloneExpanded}
+              delaySeconds={15}
+              isHistorical={item.historical || Boolean(item.settled && item.finalResponse)}
+              renderStepChild={(idx) => {
+                const child = item.items[idx];
+                return child ? renderChild(child) : null;
+              }}
+            >
+              {item.finalResponse ? (
+                <div className="w-full" data-testid="task-chat-final-response">
+                  <div
+                    className="break-words px-1 py-2 text-sm text-foreground"
+                    data-testid="task-chat-agent-bubble"
+                  >
+                    <MarkdownBody softBreaks linkIssueReferences>
+                      {cleanFinalResponseText}
+                    </MarkdownBody>
+                  </div>
+                </div>
+              ) : item.settled && item.summary.failed ? (
+                <div className="w-full px-1 py-2 text-xs text-destructive">
+                  Run stopped with an error
                 </div>
               ) : null}
-            </div>
-          ) : null}
-          {item.finalResponse ? (
-            <div className="w-full" data-testid="task-chat-final-response">
-              <div
-                className="break-words px-1 py-2 text-sm text-foreground"
-                data-testid="task-chat-agent-bubble"
-              >
-                <MarkdownBody softBreaks linkIssueReferences>
-                  {item.finalResponse.text}
-                </MarkdownBody>
-              </div>
-            </div>
-          ) : item.settled && item.summary.failed ? (
-            <div className="w-full px-1 py-2 text-xs text-destructive">
-              Run stopped with an error
-            </div>
-          ) : null}
+            </TaskChatReasoningTimeline>
+          ) : (
+            <>
+              {item.finalResponse ? (
+                <div className="w-full" data-testid="task-chat-final-response">
+                  <div
+                    className="break-words px-1 py-2 text-sm text-foreground"
+                    data-testid="task-chat-agent-bubble"
+                  >
+                    <MarkdownBody softBreaks linkIssueReferences>
+                      {cleanFinalResponseText}
+                    </MarkdownBody>
+                  </div>
+                </div>
+              ) : item.settled && item.summary.failed ? (
+                <div className="w-full px-1 py-2 text-xs text-destructive">
+                  Run stopped with an error
+                </div>
+              ) : null}
+            </>
+          )}
         </div>
       );
     }

@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import type { HeartbeatRun } from "@paperclipai/shared";
 import { afterEach, expect, it, vi } from "vitest";
+import { ApiError } from "../api/client";
 import { LogViewer } from "./AgentDetail";
 import { LogViewer as ProductionLogViewer } from "./AgentDetail.production";
 
@@ -59,6 +60,25 @@ it.each([LogViewer, ProductionLogViewer])("retains legacy history and reads only
   } finally {
     await act(async () => root.unmount());
     container.remove();
+  }
+});
+
+it.each([LogViewer, ProductionLogViewer])("stops polling when the heartbeat run no longer exists (%#)", async (Viewer) => {
+  vi.useFakeTimers();
+  vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+  log.mockRejectedValue(new ApiError("Heartbeat run not found", 404, { error: "Heartbeat run not found" }));
+  const run = { id: "run-404", companyId: "company-1", agentId: "agent-1", status: "running" } as HeartbeatRun;
+  const root = createRoot(document.createElement("div"));
+  try {
+    await act(async () => {
+      root.render(<Viewer run={run} adapterType="codex_local" />);
+      await Promise.resolve();
+    });
+    expect(log).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(8_000); });
+    expect(log).toHaveBeenCalledTimes(1);
+  } finally {
+    await act(async () => root.unmount());
   }
 });
 

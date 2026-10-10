@@ -113,6 +113,10 @@ export class DataAgentService {
     }
 
     const queryLower = query.toLowerCase();
+    const isDistributionQuery = /\b(sebaran|distribusi|distribution|breakdown)\b/i.test(query);
+    const asksForRowCount = /\b(berapa banyak|jumlah (?:baris|data|record|catatan|pelanggan|perusahaan|entitas)|hitung|count|total (?:record|data|pelanggan|perusahaan|entitas))\b/i.test(query);
+    const hasStructuredAnalyticalIntent = isDistributionQuery
+      || /\b(total|sum|avg|average|mean|count|jumlah|berapa banyak|rata-rata|tertinggi|terendah|minimum|maximum|group\s+by|berdasarkan|per|by)\b/i.test(query);
 
     // 1. Dynamic Entity Lookup & Profiling Detection
     // Collect all known entity names from onboarded tables' semantic models and table names
@@ -136,8 +140,8 @@ export class DataAgentService {
       queryLower.includes("detail");
 
     // Also check with TypeSafe Jev System One if ambiguous
-    let isProfiling = matchesKnownEntity || hasLookupVerb;
-    if (!isProfiling) {
+    let isProfiling = !hasStructuredAnalyticalIntent && (matchesKnownEntity || hasLookupVerb);
+    if (!isProfiling && !hasStructuredAnalyticalIntent) {
       try {
         const jevCheck = await this.jevService.systemOne(
           { user_query: query },
@@ -208,7 +212,7 @@ export class DataAgentService {
           });
 
           // Focus search on matching tables, or at most the top 2 sorted tables
-          const targetTables = relevantTables.length > 0 ? relevantTables : sortedTables.slice(0, 2);
+          const targetTables = relevantTables.length > 0 ? relevantTables.slice(0, 4) : sortedTables.slice(0, 2);
           for (const t of targetTables) {
             allCheckedTables.push(t.tableName);
           }
@@ -234,7 +238,18 @@ export class DataAgentService {
                 c.semanticCategory === "identity" ||
                 /^(nama_|nama$|name$|_name|title|judul|kode_|code|label)/i.test(c.name)
               );
-            }).slice(0, 3);
+            });
+            const indexedColumns = new Set<string>([
+              ...((Array.isArray(semModel.indexes) ? semModel.indexes : []).flatMap((index: any) =>
+                Array.isArray(index?.columns) ? index.columns.map((column: unknown) => String(column).toLowerCase()) : [])),
+              ...cols.filter((column: any) => column.isPrimaryKey).map((column: any) => String(column.name).toLowerCase()),
+            ]);
+            searchableCols.sort((left: any, right: any) => {
+              const leftIndexed = indexedColumns.has(String(left.name).toLowerCase()) ? 1 : 0;
+              const rightIndexed = indexedColumns.has(String(right.name).toLowerCase()) ? 1 : 0;
+              return rightIndexed - leftIndexed;
+            });
+            searchableCols.splice(3);
             const searchableColNames: string[] = searchableCols.map((c: any) => c.name);
 
             // Dynamic candidate search terms:
@@ -268,55 +283,80 @@ export class DataAgentService {
               }
             }
 
-            // Search across all candidate terms and searchable columns
-            for (const sTerm of candidateTerms) {
-              if (sTerm.length < 2) continue;
+            // Batch exact and prefix candidates into one parameterized probe per
+            // table. The old candidate × column loop could make dozens of remote
+            // round trips for one profile request, often serially.
+            const terms = Array.from(new Set(candidateTerms.map((term) => term.trim()).filter((term) => term.length >= 2))).slice(0, 6);
+            const prefixTerms = Array.from(new Set(terms.map((term) => `${term.split(/\s+/).slice(0, 2).join(" ")}%`)));
+            if (searchableColNames.length === 0 || terms.length === 0) continue;
 
-              for (const colName of searchableColNames) {
-                try {
-                  const escapedExact = sTerm.replace(/'/g, "''");
-                  const schemaName = (semModel as any)?.schemaName;
-                  const schemaPrefix = schemaName ? `${quote}${schemaName}${quote}.` : "";
-                  // 1. Exact match
-                  let sql = `SELECT * FROM ${schemaPrefix}${quote}${tbl.tableName}${quote} WHERE ${quote}${colName}${quote} = '${escapedExact}' LIMIT 5`;
-                  let res = await this.dataSourcesService.querySql(companyId, dbSource.id, sql, 5, options?.signal, { statementTimeoutMs: 10_000 });
+            const schemaName = semModel.sourceSchema || semModel.schemaName;
+            const quoteIdentifier = (value: string) => `${quote}${String(value).replaceAll(quote, `${quote}${quote}`)}${quote}`;
+            const schemaPrefix = typeof schemaName === "string" && schemaName
+              ? `${quoteIdentifier(schemaName)}.`
+              : "";
+            const tableReference = `${schemaPrefix}${quoteIdentifier(tbl.tableName)}`;
+            const placeholder = (index: number) => dbSource.sourceType === "postgres" ? `$${index}` : "?";
+            const exactOrderPredicates = searchableColNames.map((column, columnIndex) => {
+              const start = columnIndex * terms.length + 1;
+              return `${quoteIdentifier(column)} IN (${terms.map((_, index) => placeholder(start + index)).join(", ")})`;
+            });
+            const exactFilterPredicates = searchableColNames.map((column, columnIndex) => {
+              const start = searchableColNames.length * terms.length + columnIndex * terms.length + 1;
+              return `${quoteIdentifier(column)} IN (${terms.map((_, index) => placeholder(start + index)).join(", ")})`;
+            });
+            const prefixFilterPredicates = searchableColNames.map((column, columnIndex) => {
+              const start = searchableColNames.length * terms.length * 2 + columnIndex * prefixTerms.length + 1;
+              const operator = dbSource.sourceType === "postgres" ? "ILIKE" : "LIKE";
+              return `(${prefixTerms.map((_, index) => `${quoteIdentifier(column)} ${operator} ${placeholder(start + index)}`).join(" OR ")})`;
+            });
+            const sql = `SELECT * FROM ${tableReference} WHERE (${exactFilterPredicates.join(" OR ")}) OR (${prefixFilterPredicates.join(" OR ")}) ORDER BY CASE WHEN (${exactOrderPredicates.join(" OR ")}) THEN 0 ELSE 1 END LIMIT 5`;
+            const params = [
+              ...searchableColNames.flatMap(() => terms),
+              ...searchableColNames.flatMap(() => terms),
+              ...searchableColNames.flatMap(() => prefixTerms),
+            ];
 
-                  // 2. Prefix match fallback if exact match returns 0 rows
-                  if (res.rows.length === 0) {
-                    const prefixTerm = sTerm.split(" ").slice(0, 2).join(" ");
-                    sql = `SELECT * FROM ${schemaPrefix}${quote}${tbl.tableName}${quote} WHERE ${quote}${colName}${quote} LIKE '${prefixTerm.replace(/'/g, "''")}%' LIMIT 5`;
-                    res = await this.dataSourcesService.querySql(companyId, dbSource.id, sql, 5, options?.signal, { statementTimeoutMs: 10_000 });
-                  }
-
-                  if (res.rows.length > 0) {
-                    const matchedRow = res.rows[0];
-                    const summary = this.formatDynamicEntityProfile(
-                      matchedRow,
-                      tbl.tableName,
-                      dbSource.name,
-                      cols,
-                      semModel.jsonStructures,
-                      semModel.entities
-                    );
-                    const trace = tracer.finish({
-                      engine: dbSource.sourceType === "postgres" ? "postgres" : "mysql",
-                      outcome: "success",
-                    });
-                    return {
-                      agent: "data_agent",
-                      task: `Profil entitas internal: ${matchedRow[colName] || sTerm}`,
-                      query: sql,
-                      resultsSummary: summary,
-                      dataPreview: res.rows,
-                      traceId: trace.traceId,
-                      stageTimings: trace.timings,
-                    };
-                  }
-                } catch (err: any) {
-                  // Table/column query error logged quietly, continue to next candidate table
-                  console.warn(`[DataAgent] Dynamic query on ${tbl.tableName}.${colName} error:`, err.message);
-                }
+            try {
+              const result = await this.dataSourcesService.querySql(
+                companyId,
+                dbSource.id,
+                sql,
+                5,
+                options?.signal,
+                { params, statementTimeoutMs: 3_000 },
+              );
+              if (result.rows.length > 0) {
+                const matchedRow = result.rows[0];
+                const normalizedTerms = new Set(terms.map((term) => term.toLowerCase()));
+                const matchedColumn = searchableColNames.find((column) =>
+                  normalizedTerms.has(String(matchedRow[column] ?? "").toLowerCase())
+                  || prefixTerms.some((prefix) => String(matchedRow[column] ?? "").toLowerCase().startsWith(prefix.slice(0, -1).toLowerCase())),
+                ) || searchableColNames[0];
+                const summary = this.formatDynamicEntityProfile(
+                  matchedRow,
+                  tbl.tableName,
+                  dbSource.name,
+                  cols,
+                  semModel.jsonStructures,
+                  semModel.entities,
+                );
+                const trace = tracer.finish({
+                  engine: dbSource.sourceType === "postgres" ? "postgres" : "mysql",
+                  outcome: "success",
+                });
+                return {
+                  agent: "data_agent",
+                  task: `Profil entitas internal: ${matchedRow[matchedColumn] || cleanQuery}`,
+                  query: sql,
+                  resultsSummary: summary,
+                  dataPreview: result.rows,
+                  traceId: trace.traceId,
+                  stageTimings: trace.timings,
+                };
               }
+            } catch (err: any) {
+              console.warn(`[DataAgent] Entity profile probe on ${tbl.tableName} failed:`, err.message);
             }
           }
         }
@@ -369,7 +409,32 @@ export class DataAgentService {
         return false;
       }) || queryLower.includes(targetDbSource.name.toLowerCase()) || dbSources.length === 1;
 
-      if (dbTables.length > 0 && hasDbRelevance) {
+      // Common analytics should be answered from mappings created during
+      // onboarding. Keep model-generated SQL for joins, rankings, cohorts and
+      // questions whose metric cannot be bound to verified metadata.
+      const requiresAdvancedSql = /\b(join|top\s+\d+|rank(?:ing)?|percent(?:age|ile)?|median|growth|pertumbuhan|churn|retention|cohort|kohort|funnel|moving\s+average|tren|trend)\b/i.test(query);
+      const hasSemanticAnalyticsCoverage = !requiresAdvancedSql && dbTables.some((table) => {
+        const semanticModel = (table.semanticModel as any) || {};
+        const columns = (table.schemaDefinition as any[]) || [];
+        const metrics = resolveSemanticMetricBindings(semanticModel.metrics || [], columns, semanticModel.synonyms || {});
+        const dimensions = resolveSemanticDimensionBindings(semanticModel.dimensions || [], columns, semanticModel.synonyms || {});
+        const normalized = queryLower.replace(/[^a-z0-9]+/g, "");
+        const namedMetrics = metrics.filter((metric) =>
+          [metric.name, metric.column, ...metric.synonyms].some((identity) => {
+            const phrase = identity.toLowerCase();
+            const compact = phrase.replace(/[^a-z0-9]+/g, "");
+            return phrase.length >= 3 && (queryLower.includes(phrase) || normalized.includes(compact));
+          }),
+        );
+        const groupBy = resolveRequestedDimension(query, dimensions);
+        const groupingIsSafe = groupBy.status === "resolved" || groupBy.status === "not_requested";
+        return isDistributionQuery
+          ? dimensions.length > 0
+          : asksForRowCount || (hasStructuredAnalyticalIntent && namedMetrics.length === 1 && groupingIsSafe);
+      });
+      const useSemanticFastPath = hasDbRelevance && hasSemanticAnalyticsCoverage;
+
+      if (dbTables.length > 0 && hasDbRelevance && !useSemanticFastPath) {
         const tablesInput = dbTables.map((t) => ({
           tableName: t.tableName,
           columns: (t.schemaDefinition as any[]) || [],
@@ -387,7 +452,9 @@ export class DataAgentService {
               signal: options?.signal,
             });
 
-            if (sqlDecision?.sql) {
+            if (!sqlDecision?.sql) break;
+
+            if (sqlDecision.sql) {
               // P1-04: Validate LLM-generated dynamic SQL against schema and authorized sources
               const sqlTableMatches = Array.from(sqlDecision.sql.matchAll(/\b(?:from|join)\s+([a-zA-Z0-9_."]+)/gi))
                 .map((m) => m[1].replace(/["`]/g, "").split(".").pop() || "")
@@ -498,7 +565,10 @@ export class DataAgentService {
       for (const m of sModel.metrics || []) {
         const mName = String(m.name).toLowerCase();
         if (queryLower.includes(mName)) score += 6;
-        const syns = sModel.synonyms?.[m.name] || [];
+        const syns = [
+          ...(Array.isArray(m.synonyms) ? m.synonyms : []),
+          ...(Array.isArray(sModel.synonyms?.[m.name]) ? sModel.synonyms[m.name] : []),
+        ];
         for (const s of syns) {
           if (queryLower.includes(String(s).toLowerCase())) score += 4;
         }
@@ -508,7 +578,10 @@ export class DataAgentService {
       for (const d of sModel.dimensions || []) {
         const dName = String(d.name).toLowerCase();
         if (queryLower.includes(dName)) score += 4;
-        const syns = sModel.synonyms?.[d.name] || [];
+        const syns = [
+          ...(Array.isArray(d.synonyms) ? d.synonyms : []),
+          ...(Array.isArray(sModel.synonyms?.[d.name]) ? sModel.synonyms[d.name] : []),
+        ];
         for (const s of syns) {
           if (queryLower.includes(String(s).toLowerCase())) score += 3;
         }
@@ -565,7 +638,28 @@ export class DataAgentService {
       semModel.synonyms || {},
     );
     const dimNames = dimensionBindings.map((dimension) => dimension.name);
-    const requestedDimension = resolveRequestedDimension(query, dimensionBindings);
+    let requestedDimension = resolveRequestedDimension(query, dimensionBindings);
+    if (isDistributionQuery && requestedDimension.status === "not_requested") {
+      if (dimensionBindings.length === 1) {
+        requestedDimension = {
+          status: "resolved",
+          column: dimensionBindings[0].column,
+          name: dimensionBindings[0].name,
+        };
+      } else {
+        const trace = tracer.finish({ outcome: "abstained" });
+        const availableDimensions = dimensionBindings.map((dimension) => dimension.name).slice(0, 8);
+        return {
+          agent: "data_agent",
+          task: `Analisis Data (${bestTable.tableName})`,
+          resultsSummary: availableDimensions.length > 0
+            ? `Sebutkan dimensi untuk sebaran data. Dimensi yang sudah dipetakan: ${availableDimensions.join(", ")}.`
+            : "Tabel ini belum memiliki dimensi semantic yang terpetakan untuk menghitung sebaran.",
+          traceId: trace.traceId,
+          stageTimings: trace.timings,
+        };
+      }
+    }
     if (requestedDimension.status === "ambiguous" || requestedDimension.status === "unmatched") {
       const trace = tracer.finish({ outcome: "abstained" });
       const detail = requestedDimension.status === "ambiguous"
@@ -591,6 +685,8 @@ export class DataAgentService {
     });
     const aggregationFromQuestion = /\b(rata-rata|average|mean|avg)\b/i.test(query)
       ? "avg"
+      : isDistributionQuery || asksForRowCount
+        ? "count"
       : /\b(tertinggi|highest|max(?:imum)?)\b/i.test(query)
         ? "max"
         : /\b(terendah|lowest|min(?:imum)?)\b/i.test(query)
@@ -603,7 +699,10 @@ export class DataAgentService {
 
     // Exact physical-column and unambiguous semantic-label matches are
     // deterministic; avoid an extra model call for those common queries.
-    if (explicitMetricBindings.length === 1) {
+    if (isDistributionQuery || asksForRowCount) {
+      matchedMetric = "*";
+      matchedAggregation = "count";
+    } else if (explicitMetricBindings.length === 1) {
       matchedMetric = explicitMetricBindings[0].column;
       if (aggregationFromQuestion) matchedAggregation = aggregationFromQuestion;
     } else if (metricNames.length > 0) {

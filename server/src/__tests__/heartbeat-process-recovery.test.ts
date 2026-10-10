@@ -705,7 +705,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     processPid?: number | null;
     processGroupId?: number | null;
     processLossRetryCount?: number;
-    runtimeMode?: "legacy" | "native";
+    runtimeMode?: "legacy" | "native" | "builtin_ingestion";
     includeIssue?: boolean;
     runErrorCode?: string | null;
     runError?: string | null;
@@ -2309,6 +2309,33 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       .where(eq(agentWakeupRequests.id, wakeupRequestId))
       .then((rows) => rows[0] ?? null);
     expect(wakeup?.status).toBe("claimed");
+  });
+
+  it("leaves built-in ingestion telemetry to the datasource job lease owner", async () => {
+    const { runId } = await seedRunFixture({
+      runtimeMode: "builtin_ingestion",
+      includeIssue: false,
+      contextSnapshot: {},
+    });
+    await db.update(heartbeatRuns).set({
+      resultJson: {
+        jobId: randomUUID(),
+        attempt: 1,
+        builtInAgentKey: "database-ingestion",
+        stage: "table_mapping",
+      },
+    }).where(eq(heartbeatRuns.id, runId));
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reapOrphanedRuns();
+
+    expect(result).toEqual({ reaped: 0, runIds: [] });
+    expect(await heartbeat.getRun(runId)).toMatchObject({
+      status: "running",
+      runtimeMode: "builtin_ingestion",
+      errorCode: null,
+      resultJson: { stage: "table_mapping" },
+    });
   });
 
   it("keeps a native run active without granting legacy retry or signal authority", async () => {

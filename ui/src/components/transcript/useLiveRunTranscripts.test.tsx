@@ -305,6 +305,36 @@ describe("useLiveRunTranscripts", () => {
     container.remove();
   });
 
+  it("stops polling an active run after the server reports that run is missing", async () => {
+    vi.useFakeTimers();
+    logMock.mockRejectedValue(new ApiError("Heartbeat run not found", 404, { error: "Heartbeat run not found" }));
+
+    function Harness() {
+      useLiveRunTranscripts({
+        companyId: "company-1",
+        enableRealtimeUpdates: false,
+        runs: [{ id: "run-404-active", status: "running", adapterType: "codex_local" }],
+      });
+      return null;
+    }
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(<Harness />);
+        await Promise.resolve();
+      });
+      expect(logMock).toHaveBeenCalledTimes(1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(8_000); });
+      expect(logMock).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   it("does not request persisted logs until a queued run starts", async () => {
     function Harness({ status }: { status: "queued" | "running" }) {
       useLiveRunTranscripts({

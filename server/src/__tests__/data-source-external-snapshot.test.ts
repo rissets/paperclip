@@ -191,6 +191,52 @@ if (!support.supported) console.warn(`External snapshot PostgreSQL integration u
   });
   afterAll(async () => { await temporary?.cleanup(); });
 
+  it("schema-qualifies live structured PostgreSQL queries from the table semantic model", async () => {
+    const companyId = randomUUID();
+    const sourceId = randomUUID();
+    const tableId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Schema-qualified query", issuePrefix: `S${companyId.slice(0, 8)}` });
+    await db.insert(dataSources).values({
+      id: sourceId,
+      companyId,
+      name: "Geo source",
+      sourceType: "postgres",
+      status: "ready",
+    });
+    await db.insert(dataSourceTables).values({
+      id: tableId,
+      companyId,
+      dataSourceId: sourceId,
+      tableName: "provinsi",
+      rowCount: 1,
+      columnCount: 2,
+      schemaDefinition: [{ name: "id", dataType: "number" }, { name: "nama", dataType: "string" }],
+      semanticModel: { tableName: "provinsi", sourceSchema: "geo" },
+    });
+
+    vi.spyOn(DataSourceDatabaseConfigService.prototype, "resolve").mockResolvedValue({
+      type: "postgres", host: "source.test", port: 5432, database: "analytics", username: "reader", password: "secret",
+    });
+    const query = vi.spyOn(DatabaseIntegrationService.prototype, "queryDatabase").mockResolvedValue({
+      columns: ["id", "nama", "__paperclip_filtered_total"],
+      rows: [{ id: 1, nama: "Aceh", __paperclip_filtered_total: 1 }],
+      rowCount: 1,
+      executionTimeMs: 1,
+      sql: "",
+    });
+
+    const result = await new DataSourcesService(db).queryTable(companyId, tableId, { mode: "live", limit: 10 });
+
+    expect(query).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "postgres" }),
+      expect.stringContaining('FROM "geo"."provinsi" LIMIT 10'),
+      10,
+      [],
+      undefined,
+    );
+    expect(result.rows).toEqual([{ id: 1, nama: "Aceh" }]);
+  });
+
   it("reconciles terminal unreferenced ClickHouse targets without dropping active bases or deltas", async () => {
     const companyId = randomUUID();
     const sourceId = randomUUID();

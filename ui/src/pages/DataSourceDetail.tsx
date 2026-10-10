@@ -54,6 +54,20 @@ function relationBelongsToTable(relation: any, table: any) {
   );
 }
 
+function databaseTableDisplayName(table: any, sourceType?: string) {
+  const schema = sourceType === "postgres" ? table?.semanticModel?.sourceSchema : undefined;
+  return schema ? `${schema}.${table.tableName}` : table?.tableName || "table";
+}
+
+function quoteDatabaseTable(table: any, sourceType?: string) {
+  const quote = sourceType === "postgres" ? '"' : "`";
+  const quoteIdentifier = (identifier: string) => `${quote}${identifier.replaceAll(quote, `${quote}${quote}`)}${quote}`;
+  const schema = sourceType === "postgres" ? table?.semanticModel?.sourceSchema : undefined;
+  return schema
+    ? `${quoteIdentifier(schema)}.${quoteIdentifier(table.tableName)}`
+    : quoteIdentifier(table?.tableName || "table");
+}
+
 export function DataSourceDetail() {
   const { id } = useParams<{ id: string }>();
   const { selectedCompanyId } = useCompany();
@@ -164,12 +178,11 @@ export function DataSourceDetail() {
   // Update starter SQL when active table changes
   useEffect(() => {
     if (activeTable && ds) {
-      const quote = ds.sourceType === "postgres" ? `"` : "`";
-      setSqlQuery(`SELECT * FROM ${quote}${activeTable.tableName}${quote} LIMIT 10`);
+      setSqlQuery(`SELECT * FROM ${quoteDatabaseTable(activeTable, ds.sourceType)} LIMIT 10`);
       setSqlResult(null);
       setSqlError(null);
     }
-  }, [activeTable?.tableName, ds?.sourceType]);
+  }, [activeTable?.tableName, activeTable?.semanticModel?.sourceSchema, ds?.sourceType]);
 
   const queryMutation = useMutation({
     mutationFn: (params: any) => {
@@ -768,7 +781,7 @@ export function DataSourceDetail() {
                         : "bg-muted text-muted-foreground hover:text-foreground"
                     }`}
                   >
-                    {tbl.tableName} ({tbl.rowCount} rows)
+                    {databaseTableDisplayName(tbl, ds.sourceType)} ({tbl.rowCount} rows)
                   </button>
                 ))}
               </div>
@@ -863,7 +876,7 @@ export function DataSourceDetail() {
             <div className="rounded-xl border border-border bg-card overflow-hidden shadow-sm">
               <div className="p-4 border-b border-border flex items-center justify-between">
                 <h3 className="font-semibold text-sm text-foreground">
-                  Table Columns: <span className="font-mono text-primary">{activeTable.tableName}</span> (
+                  Table Columns: <span className="font-mono text-primary">{databaseTableDisplayName(activeTable, ds.sourceType)}</span> (
                   {activeTable.columnCount} columns, {activeTable.rowCount} rows)
                 </h3>
               </div>
@@ -1196,8 +1209,8 @@ export function DataSourceDetail() {
                   <button
                     type="button"
                     onClick={() => {
-                      const quote = ds.sourceType === "postgres" ? `"` : "`";
-                      setSqlQuery(`SELECT * FROM ${quote}${activeTable?.tableName}${quote} LIMIT 10`);
+                      if (!activeTable) return;
+                      setSqlQuery(`SELECT * FROM ${quoteDatabaseTable(activeTable, ds.sourceType)} LIMIT 10`);
                     }}
                     className="rounded border border-border px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
                   >
@@ -1206,8 +1219,8 @@ export function DataSourceDetail() {
                   <button
                     type="button"
                     onClick={() => {
-                      const quote = ds.sourceType === "postgres" ? `"` : "`";
-                      setSqlQuery(`SELECT COUNT(*) as total_rows FROM ${quote}${activeTable?.tableName}${quote}`);
+                      if (!activeTable) return;
+                      setSqlQuery(`SELECT COUNT(*) AS total_rows FROM ${quoteDatabaseTable(activeTable, ds.sourceType)}`);
                     }}
                     className="rounded border border-border px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
                   >

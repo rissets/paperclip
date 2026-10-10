@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
-import type { Db } from "@paperclipai/db";
+import { activityLog, agents, dataSources, heartbeatRuns, type Db } from "@paperclipai/db";
 import { DataSourcesService } from "./data-sources.js";
 import { EXTERNAL_SCHEMA_MAPPING_CHECKPOINT_TYPE } from "./external-database-mapping-checkpoints.js";
 import { DataSourceDatabaseConfigService } from "./data-source-database-config.js";
 import { DataSourceUploadSessionsService } from "./data-source-upload-sessions.js";
 import { DataSourceLeaseLostError } from "./data-source-job-lease.js";
+import { readBuiltInAgentMarker } from "./built-in-agent-metadata.js";
+import { appendHeartbeatRunEvent } from "./heartbeat-run-events.js";
 
 type ClaimedDataSourceJob = {
   id: string;
@@ -29,6 +31,24 @@ type DurableCsvCheckpoint = {
   delimiter: string | null;
 };
 
+type ResolvedDatabaseIngestionAgent = {
+  id: string;
+  name: string;
+  metadata: Record<string, unknown> | null;
+  adapterType: string;
+  adapterConfig: Record<string, unknown>;
+};
+
+type DatabaseIngestionRun = {
+  id: string;
+  companyId: string;
+  agentId: string;
+  agentName: string;
+  sourceName: string;
+  sourceType: string;
+  model?: string;
+};
+
 const LEASE_MS = 30 * 60 * 1000;
 const HEARTBEAT_MS = 60 * 1000;
 
@@ -46,6 +66,7 @@ export class DataSourceIngestionWorker {
   private lastUploadSessionSweepAt = 0;
   private lastSnapshotOrphanSweepAt = 0;
   private lastPendingEmbeddingSweepAt = 0;
+  private lastDatabaseIngestionRunReconcileAt = 0;
   private running = false;
   private activeController: AbortController | undefined;
   private cancellationRequested = false;
@@ -170,6 +191,8 @@ export class DataSourceIngestionWorker {
         safeDetails[key] = value;
       } else if (key === "nextChunkId" && typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value)) {
         safeDetails.nextChunkId = value;
+      } else if (key === "ingestionRunId" && typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value)) {
+        safeDetails.ingestionRunId = value;
       } else if ((key === "targetGeneration" || key === "fromGeneration")
         && typeof value === "string" && /^[a-z0-9._:/@-]{1,256}$/i.test(value)) {
         safeDetails[key] = value;
@@ -202,6 +225,340 @@ export class DataSourceIngestionWorker {
       RETURNING id
     `);
     if (Array.from(result).length !== 1) throw new DataSourceLeaseLostError();
+    Object.assign(job.progress, safeDetails, { stage });
+  }
+
+  private async resolveDatabaseIngestionAgent(job: ClaimedDataSourceJob): Promise<ResolvedDatabaseIngestionAgent> {
+    const companyAgents = await this.db.select({
+      id: agents.id,
+      name: agents.name,
+      metadata: agents.metadata,
+      adapterType: agents.adapterType,
+      adapterConfig: agents.adapterConfig,
+    }).from(agents).where(sql`${agents.companyId} = ${job.companyId}`);
+    const requestedId = typeof job.progress.specialistAgentId === "string" ? job.progress.specialistAgentId : null;
+    const requested = requestedId ? companyAgents.find((agent) => agent.id === requestedId) : undefined;
+    if (requestedId && (!requested || readBuiltInAgentMarker(requested.metadata)?.key !== "database-ingestion")) {
+      throw new Error("External database onboarding is assigned to an agent other than the built-in Database Ingestion Agent");
+    }
+    const agent = requested ?? companyAgents.find((candidate) => readBuiltInAgentMarker(candidate.metadata)?.key === "database-ingestion");
+    if (!agent) throw new Error("Required built-in Database Ingestion Agent is not provisioned for this company");
+    return {
+      id: agent.id,
+      name: agent.name,
+      metadata: agent.metadata,
+      adapterType: agent.adapterType,
+      adapterConfig: agent.adapterConfig,
+    };
+  }
+
+  private async startDatabaseIngestionRun(
+    job: ClaimedDataSourceJob,
+    agent: ResolvedDatabaseIngestionAgent,
+  ): Promise<DatabaseIngestionRun | null> {
+    const [source] = await this.db.select({ name: dataSources.name, sourceType: dataSources.sourceType })
+      .from(dataSources)
+      .where(sql`${dataSources.id} = ${job.dataSourceId} AND ${dataSources.companyId} = ${job.companyId}`)
+      .limit(1);
+    const agentMarker = readBuiltInAgentMarker(agent.metadata);
+    if (!agentMarker || agentMarker.key !== "database-ingestion") {
+      throw new Error("Resolved ingestion specialist is not marked as the built-in Database Ingestion Agent");
+    }
+    const adapterConfig = agent.adapterConfig;
+    const model = typeof adapterConfig.model === "string" ? adapterConfig.model : undefined;
+    const instructionsFilePath = typeof adapterConfig.instructionsFilePath === "string"
+      ? adapterConfig.instructionsFilePath
+      : undefined;
+    const run: DatabaseIngestionRun = {
+      id: randomUUID(),
+      companyId: job.companyId,
+      agentId: agent.id,
+      agentName: agent.name,
+      sourceName: source?.name ?? job.dataSourceId,
+      sourceType: source?.sourceType ?? "postgres",
+      model,
+    };
+    const now = new Date();
+    try {
+      await this.db.insert(heartbeatRuns).values({
+        id: run.id,
+        companyId: job.companyId,
+        agentId: run.agentId,
+        invocationSource: "on_demand",
+        triggerDetail: `datasource-onboarding:${job.id}:attempt:${job.attempt}`,
+        status: "running",
+        runtimeMode: "builtin_ingestion",
+        startedAt: now,
+        resultJson: {
+          dataSourceId: job.dataSourceId,
+          dataSourceName: run.sourceName,
+          sourceType: run.sourceType,
+          jobId: job.id,
+          attempt: job.attempt,
+          builtInAgentKey: "database-ingestion",
+          model,
+          stage: "starting",
+        },
+      });
+    } catch (error) {
+      // Run telemetry should not stop ingestion, but the agent assignment still
+      // must be valid before any external database request is made.
+      console.warn(`[DataSourceIngestionWorker] Could not create Database Ingestion Agent run: ${safeErrorMessage(error)}`);
+      return null;
+    }
+
+    Object.assign(job.progress, {
+      specialistAgentId: run.agentId,
+      specialistAgentName: run.agentName,
+      agentModel: model,
+      agentInstructions: instructionsFilePath,
+      adapterType: agent.adapterType,
+    });
+    await this.db.update(agents).set({ lastHeartbeatAt: now }).where(sql`${agents.id} = ${run.agentId} AND ${agents.companyId} = ${job.companyId}`)
+      .catch((error) => console.warn(`[DataSourceIngestionWorker] Could not update specialist activity time: ${safeErrorMessage(error)}`));
+    await this.appendDatabaseIngestionRunEvent(run, "info", `[START] ${run.agentName} started external database onboarding`, {
+      jobId: job.id,
+      attempt: job.attempt,
+      sourceType: run.sourceType,
+      model,
+    });
+    return run;
+  }
+
+  private async appendDatabaseIngestionRunEvent(
+    run: DatabaseIngestionRun,
+    level: "info" | "warn" | "error",
+    message: string,
+    payload?: Record<string, unknown>,
+  ): Promise<void> {
+    try {
+      await appendHeartbeatRunEvent(this.db, {
+        companyId: run.companyId,
+        runId: run.id,
+        agentId: run.agentId,
+        eventType: "log",
+        level,
+        message: message.slice(0, 1000),
+        payload: payload ?? null,
+      });
+    } catch (error) {
+      console.warn(`[DataSourceIngestionWorker] Could not append ingestion run event: ${safeErrorMessage(error)}`);
+    }
+  }
+
+  private async recordDatabaseIngestionProgress(
+    run: DatabaseIngestionRun,
+    stage: string,
+    details: Record<string, unknown> | undefined,
+    emitted: Set<string>,
+  ): Promise<void> {
+    const checkpointStage = typeof details?.checkpointStage === "string" ? details.checkpointStage : "";
+    const currentTable = typeof details?.currentTable === "string"
+      ? details.currentTable.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 128)
+      : "";
+    let key: string | null = null;
+    let level: "info" | "warn" = "info";
+    let message = "";
+    if (stage === "connectivity") {
+      key = stage;
+      message = "Checking the external database connection with the configured read-only credentials";
+    } else if (stage === "discovery") {
+      key = stage;
+      message = "Connection verified; discovering schemas, tables, columns, row counts, and declared relations";
+    } else if (stage === "column_profiling") {
+      key = stage;
+      message = `Catalog profiling completed for ${Number(details?.tablesCount ?? 0)} tables and ${Number(details?.columnsCount ?? 0)} columns`;
+    } else if (stage === "table_mapping" && checkpointStage === "mapping_batch") {
+      key = "ai_mapping_started";
+      message = `Database Ingestion Agent is semantically mapping ${currentTable || "the discovered schema"}${run.model ? ` with ${run.model}` : ""}`;
+    } else if (stage === "table_mapping" && ["batch_timeout", "batch_fallback", "batch_validation_fallback", "table_budget_exhausted", "batch_result_too_large"].includes(checkpointStage)) {
+      key = `${checkpointStage}:${currentTable}`;
+      level = "warn";
+      message = `Semantic mapping used deterministic JEV metadata for ${currentTable || "a database table"} (${checkpointStage})`;
+    } else if (stage === "relation_verification") {
+      key = stage;
+      message = "Verifying declared and evidence-backed relationships between discovered tables";
+    } else if (stage === "publication") {
+      key = stage;
+      message = "Publishing the validated schema map and preparing schema-vector indexing";
+    }
+    if (!key || emitted.has(key) || emitted.size >= 200) return;
+    emitted.add(key);
+    await this.appendDatabaseIngestionRunEvent(run, level, `[${stage.toUpperCase()}] ${message}`, {
+      stage,
+      ...(checkpointStage ? { checkpointStage } : {}),
+      ...(currentTable ? { currentTable } : {}),
+    });
+  }
+
+  private async finishDatabaseIngestionRun(
+    job: ClaimedDataSourceJob,
+    run: DatabaseIngestionRun,
+    status: "succeeded" | "failed" | "cancelled",
+    error?: unknown,
+  ): Promise<void> {
+    const finishedAt = new Date();
+    const failure = error === undefined ? null : safeErrorMessage(error);
+    try {
+      const updated = await this.db.update(heartbeatRuns).set({
+        status,
+        finishedAt,
+        error: failure,
+        resultJson: {
+          dataSourceId: job.dataSourceId,
+          dataSourceName: run.sourceName,
+          sourceType: run.sourceType,
+          jobId: job.id,
+          attempt: job.attempt,
+          builtInAgentKey: "database-ingestion",
+          model: run.model,
+          stage: status,
+          ...(failure ? { error: failure } : {}),
+        },
+        updatedAt: finishedAt,
+      }).where(sql`${heartbeatRuns.id} = ${run.id} AND ${heartbeatRuns.companyId} = ${job.companyId} AND ${heartbeatRuns.agentId} = ${run.agentId} AND ${heartbeatRuns.status} = 'running'`)
+        .returning({ id: heartbeatRuns.id });
+      if (updated.length === 0) return;
+
+      if (status === "succeeded") {
+        await this.appendDatabaseIngestionRunEvent(run, "info", `[COMPLETE] ${run.agentName} finished database onboarding for '${run.sourceName}'`, {
+          dataSourceId: job.dataSourceId,
+          attempt: job.attempt,
+        });
+        try {
+          await this.db.insert(activityLog).values({
+            companyId: job.companyId,
+            actorType: "agent",
+            actorId: run.agentId,
+            agentId: run.agentId,
+            runId: run.id,
+            action: "data_source.onboarded.database",
+            entityType: "data_source",
+            entityId: job.dataSourceId,
+            details: {
+              name: run.sourceName,
+              dataSourceName: run.sourceName,
+              sourceType: run.sourceType,
+              jobId: job.id,
+              builtInAgentKey: "database-ingestion",
+              description: `${run.agentName} onboarded and semantically mapped external database '${run.sourceName}'.`,
+            },
+          });
+        } catch (activityError) {
+          console.warn(`[DataSourceIngestionWorker] Could not write ingestion activity: ${safeErrorMessage(activityError)}`);
+        }
+      } else {
+        await this.appendDatabaseIngestionRunEvent(run, status === "failed" ? "error" : "warn", `[${status.toUpperCase()}] ${failure || "Database onboarding did not complete"}`, {
+          dataSourceId: job.dataSourceId,
+          attempt: job.attempt,
+        });
+      }
+    } catch (recordError) {
+      console.warn(`[DataSourceIngestionWorker] Could not finalize Database Ingestion Agent run: ${safeErrorMessage(recordError)}`);
+    }
+  }
+
+  private async reconcileDatabaseIngestionRuns(): Promise<number> {
+    const restoreFalseProcessLoss = sql`run.status = 'failed' AND run.error_code = 'process_lost'
+      AND job.status = 'running' AND job.lease_expires_at > now()
+      AND CASE
+        WHEN run.result_json->>'attempt' ~ '^[0-9]{1,9}$' THEN (run.result_json->>'attempt')::integer
+        ELSE 0
+      END = job.attempt`;
+    const result = await this.db.execute(sql`
+      UPDATE heartbeat_runs AS run
+      SET status = CASE
+            WHEN ${restoreFalseProcessLoss} THEN 'running'
+            WHEN job.status = 'succeeded' THEN 'succeeded'
+            WHEN job.status = 'cancelled'
+              OR (job.status = 'cancel_requested' AND job.lease_expires_at <= now()) THEN 'cancelled'
+            WHEN job.status = 'failed'
+              OR (job.status = 'running' AND job.lease_expires_at <= now() AND job.attempt >= job.max_attempts) THEN 'failed'
+            ELSE 'interrupted'
+          END,
+          finished_at = CASE
+            WHEN ${restoreFalseProcessLoss} THEN NULL
+            ELSE now()
+          END,
+          error = CASE
+            WHEN ${restoreFalseProcessLoss} OR job.status = 'succeeded' THEN NULL
+            WHEN job.status = 'cancelled'
+              OR (job.status = 'cancel_requested' AND job.lease_expires_at <= now())
+              THEN 'Datasource ingestion job was cancelled before its agent run was finalized'
+            WHEN job.status = 'failed'
+              OR (job.status = 'running' AND job.lease_expires_at <= now() AND job.attempt >= job.max_attempts)
+              THEN 'Datasource ingestion job ended before its agent run was finalized'
+            ELSE 'Datasource worker lease expired or was superseded by a later attempt'
+          END,
+          error_code = CASE
+            WHEN ${restoreFalseProcessLoss} OR job.status = 'succeeded' THEN NULL
+            WHEN job.status = 'cancelled'
+              OR (job.status = 'cancel_requested' AND job.lease_expires_at <= now()) THEN 'datasource_job_cancelled'
+            WHEN job.status = 'failed'
+              OR (job.status = 'running' AND job.lease_expires_at <= now() AND job.attempt >= job.max_attempts) THEN 'datasource_job_failed'
+            ELSE 'datasource_worker_lease_expired'
+          END,
+          liveness_state = CASE
+            WHEN ${restoreFalseProcessLoss} THEN 'running'
+            WHEN job.status = 'succeeded' THEN 'succeeded'
+            WHEN job.status = 'failed'
+              OR (job.status = 'running' AND job.lease_expires_at <= now() AND job.attempt >= job.max_attempts) THEN 'failed'
+            WHEN job.status = 'cancelled'
+              OR (job.status = 'cancel_requested' AND job.lease_expires_at <= now()) THEN 'cancelled'
+            ELSE 'interrupted'
+          END,
+          liveness_reason = CASE
+            WHEN ${restoreFalseProcessLoss} THEN NULL
+            WHEN job.status = 'succeeded' THEN NULL
+            ELSE 'datasource_job_reconciled'
+          END,
+          result_json = CASE
+            WHEN ${restoreFalseProcessLoss} THEN
+                (COALESCE(run.result_json, '{}'::jsonb) - 'processLossDiagnostic' - 'stopReason' - 'error')
+                || jsonb_build_object(
+                  'stage', COALESCE(job.progress->>'stage', run.result_json->>'stage', 'starting'),
+                  'recoveredAfterDatasourceLeaseCheck', true
+                )
+            ELSE COALESCE(run.result_json, '{}'::jsonb) || jsonb_build_object(
+            'stage', CASE
+              WHEN job.status = 'succeeded' THEN 'succeeded'
+              WHEN job.status = 'cancelled'
+                OR (job.status = 'cancel_requested' AND job.lease_expires_at <= now()) THEN 'cancelled'
+              WHEN job.status = 'failed'
+                OR (job.status = 'running' AND job.lease_expires_at <= now() AND job.attempt >= job.max_attempts) THEN 'failed'
+              ELSE 'interrupted'
+            END,
+            'stopReason', CASE
+              WHEN job.status = 'succeeded' THEN NULL
+              WHEN job.status = 'cancelled'
+                OR (job.status = 'cancel_requested' AND job.lease_expires_at <= now()) THEN 'datasource_job_cancelled'
+              WHEN job.status = 'failed'
+                OR (job.status = 'running' AND job.lease_expires_at <= now() AND job.attempt >= job.max_attempts) THEN 'datasource_job_failed'
+              ELSE 'datasource_worker_lease_expired'
+            END
+          )
+          END,
+          updated_at = now()
+      FROM data_source_jobs AS job
+      WHERE run.runtime_mode = 'builtin_ingestion'
+        AND run.result_json->>'jobId' = job.id::text
+        AND (
+          (run.status = 'running' AND (
+            job.status IN ('succeeded', 'failed', 'cancelled', 'queued')
+            OR (job.status = 'running' AND (
+            job.lease_expires_at IS NULL OR job.lease_expires_at <= now()
+            OR CASE
+              WHEN run.result_json->>'attempt' ~ '^[0-9]{1,9}$' THEN (run.result_json->>'attempt')::integer
+              ELSE 0
+            END < job.attempt
+          ))
+            OR (job.status = 'cancel_requested' AND job.lease_expires_at <= now())
+          ))
+          OR (${restoreFalseProcessLoss})
+        )
+      RETURNING run.id
+    `);
+    return Array.from(result as Iterable<{ id: string }>).length;
   }
 
   private isDurableCsvCheckpoint(value: unknown): value is DurableCsvCheckpoint {
@@ -232,6 +589,7 @@ export class DataSourceIngestionWorker {
           AND attempt = ${job.attempt} AND lease_expires_at > clock_timestamp()
         RETURNING id
       `);
+      if (Array.from(completed).length !== 1) throw new DataSourceLeaseLostError();
       // Mapping outputs are needed for worker retries, but become dead weight
       // once the success receipt is committed. Delete them atomically with that
       // receipt so a stale worker cannot purge another attempt's recovery data.
@@ -319,6 +677,12 @@ export class DataSourceIngestionWorker {
           console.warn("[DataSourceEmbeddingWorker] Pending schema embedding reconciliation failed; retrying later:", safeErrorMessage(error));
         });
       }
+      if (this.jobType === "external_db_onboarding" && Date.now() - this.lastDatabaseIngestionRunReconcileAt > 15_000) {
+        this.lastDatabaseIngestionRunReconcileAt = Date.now();
+        await this.reconcileDatabaseIngestionRuns().catch((error) => {
+          console.warn("[DatasourceExternalDbWorker] Database Ingestion Agent run reconciliation failed; retrying later:", safeErrorMessage(error));
+        });
+      }
       const job = await this.claim();
       if (!job) return;
       if (
@@ -352,7 +716,24 @@ export class DataSourceIngestionWorker {
         });
       }, HEARTBEAT_MS);
       heartbeat.unref?.();
+      let ingestionRun: DatabaseIngestionRun | null = null;
+      const emittedRunProgress = new Set<string>();
       try {
+        if (job.jobType === "external_db_onboarding") {
+          const specialist = await this.resolveDatabaseIngestionAgent(job);
+          const config = specialist.adapterConfig;
+          Object.assign(job.progress, {
+            specialistAgentId: specialist.id,
+            specialistAgentName: specialist.name,
+            agentModel: typeof config.model === "string" ? config.model : undefined,
+            agentInstructions: typeof config.instructionsFilePath === "string" ? config.instructionsFilePath : undefined,
+            adapterType: specialist.adapterType,
+          });
+          ingestionRun = await this.startDatabaseIngestionRun(job, specialist);
+          if (ingestionRun) {
+            await this.reportProgress(job, "agent_run_started", { ingestionRunId: ingestionRun.id });
+          }
+        }
         const lease = {
           jobId: job.id,
           owner: this.owner,
@@ -366,6 +747,9 @@ export class DataSourceIngestionWorker {
               throw new Error("Datasource ingestion was cancelled");
             }
             await this.reportProgress(job, stage, details);
+            if (ingestionRun) {
+              await this.recordDatabaseIngestionProgress(ingestionRun, stage, details, emittedRunProgress);
+            }
           },
         };
         if (job.jobType === "ingest_file") {
@@ -378,12 +762,18 @@ export class DataSourceIngestionWorker {
           await this.service.runEmbeddingReindex(job.companyId, job.dataSourceId, job.progress, lease);
         }
         await this.finish(job);
+        if (ingestionRun) await this.finishDatabaseIngestionRun(job, ingestionRun, "succeeded");
       } catch (error) {
         if (!this.cancellationRequested) {
           await this.pollCancellation(job, controller).catch(() => undefined);
         }
-        if (this.cancellationRequested) await this.finishCancelled(job);
-        else if (leaseOwned) await this.fail(job, error);
+        if (this.cancellationRequested) {
+          if (ingestionRun) await this.finishDatabaseIngestionRun(job, ingestionRun, "cancelled", error);
+          await this.finishCancelled(job);
+        } else {
+          if (ingestionRun) await this.finishDatabaseIngestionRun(job, ingestionRun, "failed", error);
+          if (leaseOwned) await this.fail(job, error);
+        }
         console.error(`[DataSourceIngestionWorker] Attempt ${job.attempt} for job ${job.id} failed:`, safeErrorMessage(error));
       } finally {
         clearInterval(heartbeat);

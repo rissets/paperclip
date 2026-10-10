@@ -28,8 +28,8 @@ import type {
   TableSemanticMappingCoverage,
 } from "@paperclipai/shared";
 import { KnowledgeIngestionService } from "./knowledge-ingestion.js";
-import { DatabaseIntegrationService } from "./database-integration.js";
-import { aiReasoningService, loadAgentReasoningInstructions } from "./ai-reasoning.js";
+import { DatabaseIntegrationService, externalDatabaseTableReference } from "./database-integration.js";
+import { aiReasoningService, loadAgentReasoningInstructions, type AiDatabaseAnalysisResult } from "./ai-reasoning.js";
 import { TypeSafeJevService } from "./typesafe-jev.js";
 import {
   buildClickhouseTableAliasMap,
@@ -54,21 +54,29 @@ import {
 import { DataSourceCacheService, makeDataSourceCacheKey } from "./data-source-cache.js";
 import { externalQueryAdmission } from "./external-query-admission.js";
 import { DataSourceDatabaseConfigService, publicDatabaseMetadata } from "./data-source-database-config.js";
-import { analyzeExternalDatabaseSchemaBatch } from "./external-database-schema-mapping.js";
+import {
+  analyzeExternalDatabaseSchemaGroup,
+  EXTERNAL_SCHEMA_MAPPING_PI_TIMEOUT_MS,
+  EXTERNAL_SCHEMA_MAPPING_ROUTER_TIMEOUT_MS,
+  groupExternalDatabaseSchemaTables,
+  mergeExternalDatabaseMappingResults,
+  mergeExternalDatabaseTableProfileBatches,
+  type ExternalDatabaseSchemaTable,
+} from "./external-database-schema-mapping.js";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { assertDataSourceJobLease, completeDataSourceJobLease, DataSourceLeaseLostError, type DataSourceJobLease } from "./data-source-job-lease.js";
 import { StructuredIngestionService } from "./structured-ingestion.js";
 import {
   EXTERNAL_SCHEMA_MAPPING_BATCH_SIZE,
-  EXTERNAL_SCHEMA_MAPPING_TABLE_TIMEOUT_MS,
+  EXTERNAL_SCHEMA_MAPPING_BATCH_TIMEOUT_MS,
   ExternalDatabaseMappingCheckpointSizeError,
   ExternalDatabaseMappingCheckpointStore,
-  externalSchemaMappingBatchTimeoutMs,
   fingerprintExternalDatabaseMappingBatch,
   fingerprintExternalDatabaseSchema,
 } from "./external-database-mapping-checkpoints.js";
 
 type StructuredColumn = { name: string; dataType?: string; role?: string; clickhouseType?: string };
+export { mergeExternalDatabaseTableProfileBatches };
 export type QueryFilterDialect = "postgres" | "mysql" | "clickhouse";
 type SnapshotActor = { actorType: "user" | "agent" | "system"; actorId: string; agentId?: string | null; runId?: string | null };
 export type StructuredAggregateFunction = "sum" | "avg" | "count" | "min" | "max";
@@ -299,6 +307,21 @@ function quoteDataIdentifier(identifier: string, quote: string): string {
   return `${quote}${identifier.replaceAll(quote, `${quote}${quote}`)}${quote}`;
 }
 
+function mergeDatabaseRelations(...groups: Array<readonly TableRelation[]>): TableRelation[] {
+  const merged = new Map<string, TableRelation>();
+  for (const relation of groups.flat()) {
+    const identity = (table: string, schema?: string) => `${(schema ? `${schema}.` : "")}${table}`.toLowerCase();
+    const key = [
+      identity(relation.sourceTable, relation.sourceSchema),
+      relation.sourceColumn.toLowerCase(),
+      identity(relation.targetTable, relation.targetSchema),
+      relation.targetColumn.toLowerCase(),
+    ].join("|");
+    if (!merged.has(key)) merged.set(key, relation);
+  }
+  return [...merged.values()];
+}
+
 function sourceClickhouseTableName(table: typeof dataSourceTables.$inferSelect): string {
   const storedName = (table.semanticModel as any)?.clickhouseTable;
   return typeof storedName === "string" && storedName.length > 0
@@ -328,35 +351,6 @@ function reprocessingCutoff(metadata: unknown): Date | null {
 
 function throwIfIngestionAborted(lease: DataSourceJobLease): void {
   if (lease.signal?.aborted) throw new Error("Datasource ingestion was cancelled or stopped");
-}
-
-export function mergeExternalDatabaseTableProfileBatches(
-  current: Record<string, any> | undefined,
-  incoming: Record<string, any>,
-): Record<string, any> {
-  const previous = current || {};
-  const mergeItems = (field: string, identity: (value: any) => string) => {
-    const merged = new Map<string, any>();
-    for (const item of [...(Array.isArray(previous[field]) ? previous[field] : []), ...(Array.isArray(incoming[field]) ? incoming[field] : [])]) {
-      const key = identity(item);
-      if (key) merged.set(key, item);
-    }
-    return [...merged.values()];
-  };
-  const identity = (value: any) => typeof value === "string" ? value.trim().toLowerCase() : "";
-
-  return {
-    ...previous,
-    ...incoming,
-    context: [...new Set([previous.context, incoming.context].filter((value) => typeof value === "string" && value.trim()))].join("\n\n"),
-    topics: mergeItems("topics", identity),
-    entities: mergeItems("entities", identity),
-    decisionSpecRefs: mergeItems("decisionSpecRefs", identity),
-    metrics: mergeItems("metrics", (value) => `${String(value?.name || "").toLowerCase()}|${String(value?.column || "").toLowerCase()}|${String(value?.aggregation || "").toLowerCase()}`),
-    dimensions: mergeItems("dimensions", (value) => `${String(value?.name || "").toLowerCase()}|${String(value?.column || "").toLowerCase()}`),
-    relationships: mergeItems("relationships", (value) => `${String(value?.sourceTable || "").toLowerCase()}.${String(value?.sourceColumn || "").toLowerCase()}->${String(value?.targetTable || "").toLowerCase()}.${String(value?.targetColumn || "").toLowerCase()}`),
-    suggestedQueries: mergeItems("suggestedQueries", (value) => `${String(value?.title || "").toLowerCase()}|${String(value?.query || value?.sqlSnippet || "").trim().toLowerCase()}`),
-  };
 }
 
 export function compileStructuredFilters(
@@ -731,29 +725,64 @@ export class DataSourcesService {
           .from(dataSourceTables)
           .where(eq(dataSourceTables.dataSourceId, ds.id));
 
-        const tableSummaries = tables.map((t) => ({
-          name: t.tableName,
-          columns: ((t.schemaDefinition as any[]) || []).map((c: any) => c.name),
-          rowCount: t.rowCount,
-        }));
+        const tableSummaries = tables.map((t) => {
+          const model = (t.semanticModel as Record<string, unknown> | null) || {};
+          const sourceSchema = typeof model.sourceSchema === "string" ? model.sourceSchema : undefined;
+          return {
+            name: sourceSchema ? `${sourceSchema}.${t.tableName}` : t.tableName,
+            tableName: t.tableName,
+            schemaName: sourceSchema,
+            columns: ((t.schemaDefinition as any[]) || []).map((c: any) => c.name),
+            rowCount: t.rowCount,
+          };
+        });
 
-        const dbSemanticRes = await jev.evaluateDatabaseTables(tableSummaries);
-        const tableNames = tables.map((t) => t.tableName);
+        const dbSemanticRes = await jev.evaluateDatabaseTables(tableSummaries, {
+          databaseType: ds.sourceType as "postgres" | "mariadb" | "mysql",
+        });
+        const persistedRelationships = tables.flatMap((table) => {
+          const relationships = (table.semanticModel as any)?.relationships;
+          return Array.isArray(relationships) ? relationships as TableRelation[] : [];
+        });
+        const relationships = mergeDatabaseRelations(persistedRelationships, dbSemanticRes.relationships);
+        const tableProfiles = { ...(dbSemanticRes.tableProfiles || {}) };
+        const crossTableClusters = jev.deriveCrossTableClusters(tableSummaries, relationships, dbSemanticRes.tableRoles);
+        const tableNames = tableSummaries.map((table) => table.name);
+        const tableNameCounts = new Map<string, number>();
+        for (const table of tableSummaries) {
+          const bareName = table.tableName!.toLowerCase();
+          tableNameCounts.set(bareName, (tableNameCounts.get(bareName) || 0) + 1);
+        }
 
         // Update each table's semanticModel with per-table context, role, and topics
         for (const tbl of tables) {
-          const tProfile = dbSemanticRes.tableProfiles?.[tbl.tableName];
           const currentModel = (tbl.semanticModel as any) || {};
-          const tableRels = dbSemanticRes.relationships.filter(
+          const sourceSchema = typeof currentModel.sourceSchema === "string" ? currentModel.sourceSchema : undefined;
+          const tableIdentity = sourceSchema ? `${sourceSchema}.${tbl.tableName}` : tbl.tableName;
+          const tProfile = tableProfiles[tableIdentity] || tableProfiles[tbl.tableName];
+          const relationMatchesThisTable = (relationTable: string, relationSchema: string | undefined) => {
+            let physicalName = relationTable;
+            let physicalSchema = relationSchema;
+            if (!physicalSchema && relationTable.includes(".")) {
+              physicalSchema = relationTable.slice(0, relationTable.lastIndexOf("."));
+              physicalName = relationTable.slice(relationTable.lastIndexOf(".") + 1);
+            }
+            if (physicalName.toLowerCase() !== tbl.tableName.toLowerCase()) return false;
+            if (physicalSchema) return Boolean(sourceSchema && physicalSchema.toLowerCase() === sourceSchema.toLowerCase());
+            return tableNameCounts.get(tbl.tableName.toLowerCase()) === 1;
+          };
+          const tableRels = relationships.filter(
             (r) =>
-              r.sourceTable.toLowerCase() === tbl.tableName.toLowerCase() ||
-              r.targetTable.toLowerCase() === tbl.tableName.toLowerCase()
+              relationMatchesThisTable(r.sourceTable, r.sourceSchema)
+              || relationMatchesThisTable(r.targetTable, r.targetSchema)
           );
+          if (tProfile) tableProfiles[tableIdentity] = { ...tProfile, relationships: tableRels };
           await this.db
             .update(dataSourceTables)
             .set({
               semanticModel: {
                 ...currentModel,
+                sourceSchema: sourceSchema || currentModel.sourceSchema,
                 tableRole: tProfile?.tableRole || currentModel.tableRole,
                 context: tProfile?.context || currentModel.context,
                 topics: tProfile?.topics || currentModel.topics,
@@ -772,11 +801,11 @@ export class DataSourcesService {
           targetAgentAffinity: "data_agent",
           entities: dbSemanticRes.entities.length > 0 ? dbSemanticRes.entities : tableNames,
           tableRoles: dbSemanticRes.tableRoles,
-          relationships: dbSemanticRes.relationships,
+          relationships,
           primaryTopics: dbSemanticRes.primaryTopics,
           topics: dbSemanticRes.topics,
-          tableProfiles: dbSemanticRes.tableProfiles,
-          crossTableClusters: dbSemanticRes.crossTableClusters,
+          tableProfiles,
+          crossTableClusters,
           summary: existingProfile?.summary || `Database ${ds.sourceType} dengan ${tableNames.length} tabel relasional terhubung.`,
           onboardedAt: new Date().toISOString(),
           suggestedQueries: dbSemanticRes.suggestedQueries,
@@ -2825,265 +2854,284 @@ export class DataSourcesService {
       }
     };
 
-    // Filter tables that haven't been checkpointed yet by schema-qualified name
+    // Filter tables that haven't been checkpointed yet by schema-qualified name.
     const pendingTables = tables.filter((t) => {
       const qName = `${t.schemaName || "public"}.${t.tableName}`;
       const checkpoint = completedTableMappings[qName] || completedTableMappings[t.tableName];
       return !checkpoint || checkpoint.schemaFingerprint !== schemaFingerprint;
     });
+    const sourceTableByQualifiedName = new Map(tables.map((table) => [
+      `${table.schemaName || "public"}.${table.tableName}`,
+      table,
+    ]));
+    const tableNameCounts = new Map<string, number>();
+    for (const table of tables) {
+      const name = table.tableName.toLocaleLowerCase();
+      tableNameCounts.set(name, (tableNameCounts.get(name) || 0) + 1);
+    }
 
-    let completedBatchesCount = 0;
-    for (const pt of pendingTables) {
-      if (signal?.aborted || lease.isCancellationRequested?.()) throw new Error("Datasource onboarding was cancelled");
-      const qualifiedName = `${pt.schemaName || "public"}.${pt.tableName}`;
-
-      // Bounded column batching: if columns > 20, batch columns into chunks
-      const allCols = pt.schemaDefinition || [];
-      const colBatches: Array<typeof allCols> = [];
-      for (let i = 0; i < allCols.length; i += EXTERNAL_SCHEMA_MAPPING_BATCH_SIZE) {
-        colBatches.push(allCols.slice(i, i + EXTERNAL_SCHEMA_MAPPING_BATCH_SIZE));
+    const applyBatchResult = (result: AiDatabaseAnalysisResult) => {
+      if (!hasValidatedDomain && result.domain) {
+        finalDomain = result.domain;
+        hasValidatedDomain = true;
       }
-      const tableStartedAt = Date.now();
+      appendUnique(finalEntities, seenEntities, result.entities, (entity) => entity);
+      appendUnique(finalTopics, seenTopics, result.primaryTopics, (topic) => topic);
+      appendUnique(relationships, seenRelationships, result.relationships, (relationship) => JSON.stringify(relationship));
+      appendUnique(suggestedQueries, seenSuggestedQueries, result.suggestedQueries, (query) => query.sqlSnippet || query.query || query.title);
+      appendUnique(crossTableClusters, seenCrossTableClusters, result.crossTableClusters, (cluster) => cluster.clusterName);
 
-      const applyBatchResult = (result: NonNullable<Awaited<ReturnType<typeof aiReasoningService.analyzeDatabaseSchema>>["result"]>) => {
-        if (!hasValidatedDomain && result.domain) {
-          finalDomain = result.domain;
-          hasValidatedDomain = true;
-        }
-        appendUnique(finalEntities, seenEntities, result.entities, (entity) => entity);
-        appendUnique(finalTopics, seenTopics, result.primaryTopics, (topic) => topic);
-        const tableRole = result.tableRoles?.[qualifiedName] || result.tableRoles?.[pt.tableName];
+      for (const table of tables) {
+        const qualifiedName = `${table.schemaName || "public"}.${table.tableName}`;
+        const canUseUnqualifiedName = tableNameCounts.get(table.tableName.toLocaleLowerCase()) === 1;
+        const tableRole = result.tableRoles?.[qualifiedName]
+          || (canUseUnqualifiedName ? result.tableRoles?.[table.tableName] : undefined);
         if (tableRole) tableRoles[qualifiedName] = tableRole;
-        appendUnique(relationships, seenRelationships, result.relationships, (relationship) => JSON.stringify(relationship));
-        appendUnique(suggestedQueries, seenSuggestedQueries, result.suggestedQueries, (query) => query.sqlSnippet || query.query || query.title);
-        const tableProfile = result.tableProfiles?.[qualifiedName] || result.tableProfiles?.[pt.tableName];
+        const tableProfile = result.tableProfiles?.[qualifiedName]
+          || (canUseUnqualifiedName ? result.tableProfiles?.[table.tableName] : undefined);
         if (tableProfile) {
           tableProfiles[qualifiedName] = mergeExternalDatabaseTableProfileBatches(
             tableProfiles[qualifiedName],
             tableProfile,
           );
         }
-        appendUnique(crossTableClusters, seenCrossTableClusters, result.crossTableClusters, (cluster) => cluster.clusterName);
+      }
+    };
+
+    type ExternalSchemaMappingUnit = {
+      qualifiedName: string;
+      checkpointKey: string;
+      mappingTable: ExternalDatabaseSchemaTable;
+    };
+    let completedBatchesCount = 0;
+    const pendingMappingUnits: ExternalSchemaMappingUnit[] = [];
+
+    for (const table of pendingTables) {
+      if (signal?.aborted || lease.isCancellationRequested?.()) throw new Error("Datasource onboarding was cancelled");
+      const qualifiedName = `${table.schemaName || "public"}.${table.tableName}`;
+      const allColumns = table.schemaDefinition || [];
+      const columnBatches: Array<typeof allColumns> = [];
+      for (let offset = 0; offset < allColumns.length; offset += EXTERNAL_SCHEMA_MAPPING_BATCH_SIZE) {
+        columnBatches.push(allColumns.slice(offset, offset + EXTERNAL_SCHEMA_MAPPING_BATCH_SIZE));
+      }
+      tableMappingCoverage[qualifiedName] = {
+        status: "complete",
+        expectedBatches: columnBatches.length,
+        validatedBatches: 0,
+        fallbackBatches: 0,
+        timeBudgetExceeded: false,
       };
 
-      for (let batchIndex = 0; batchIndex < colBatches.length; batchIndex += 1) {
-        const colBatch = colBatches[batchIndex]!;
-        const checkpointKey = fingerprintExternalDatabaseMappingBatch(qualifiedName, colBatch);
+      for (const columns of columnBatches) {
+        const checkpointKey = fingerprintExternalDatabaseMappingBatch(qualifiedName, columns);
+        const mappingTable: ExternalDatabaseSchemaTable = {
+          tableName: qualifiedName,
+          rowCount: table.rowCount,
+          columns: columns.map((column) => ({
+            name: column.name,
+            dataType: column.dataType,
+            isPrimary: column.isPrimaryKey,
+            isForeign: column.isForeignKey,
+            references: column.foreignKeyTarget
+              ? `${column.foreignKeyTarget.schema ? `${column.foreignKeyTarget.schema}.` : ""}${column.foreignKeyTarget.table}.${column.foreignKeyTarget.column}`
+              : undefined,
+            sampleValues: column.sampleValues.slice(0, 3),
+            distinctCount: column.distinctCount,
+            nullRatio: column.nullRatio,
+            role: column.role,
+          })),
+        };
+        const unit: ExternalSchemaMappingUnit = {
+          qualifiedName,
+          checkpointKey,
+          mappingTable,
+        };
         const checkpointResult = await checkpointStore.load(companyId, id, lease, schemaFingerprint, checkpointKey);
         if (checkpointResult) {
           applyBatchResult(checkpointResult);
-          tableMappingCoverage[qualifiedName] ??= {
-            status: "complete", expectedBatches: colBatches.length, validatedBatches: 0, fallbackBatches: 0, timeBudgetExceeded: false,
-          };
           tableMappingCoverage[qualifiedName].validatedBatches += 1;
           completedBatchesCount += 1;
-          continue;
+        } else {
+          pendingMappingUnits.push(unit);
         }
-
-        const timeoutMs = externalSchemaMappingBatchTimeoutMs(tableStartedAt);
-        if (timeoutMs <= 0) {
-          const remainingBatches = colBatches.length - batchIndex;
-          tableMappingCoverage[qualifiedName] ??= {
-            status: "fallback", expectedBatches: colBatches.length, validatedBatches: 0, fallbackBatches: 0, timeBudgetExceeded: true,
-          };
-          tableMappingCoverage[qualifiedName].fallbackBatches += remainingBatches;
-          tableMappingCoverage[qualifiedName].timeBudgetExceeded = true;
-          await lease.reportProgress?.("table_mapping", {
-            currentTable: qualifiedName,
-            currentBatchIndex: batchIndex + 1,
-            batchCount: colBatches.length,
-            checkpointStage: "table_budget_exhausted",
-            tableBudgetMs: EXTERNAL_SCHEMA_MAPPING_TABLE_TIMEOUT_MS,
-            statusSummary: "Per-table semantic mapping budget exhausted; remaining batches retain deterministic metadata",
-          });
-          break;
-        }
-        const batchTimeout = AbortSignal.timeout(timeoutMs);
-        const batchSignal = signal ? AbortSignal.any([signal, batchTimeout]) : batchTimeout;
-        let aiDbRes: Awaited<ReturnType<typeof aiReasoningService.analyzeDatabaseSchema>>;
-        const mappingReasoningSteps: any[] = [];
-        try {
-          await lease.reportProgress?.("table_mapping", {
-            tablesCount: tables.length,
-            columnsCount: totalColumns,
-            completedTablesCount: Object.keys(completedTableMappings).length,
-            completedBatchesCount,
-            currentTable: qualifiedName,
-            currentBatchIndex: batchIndex + 1,
-            batchCount: colBatches.length,
-            checkpointStage: "mapping_batch",
-            schemaFingerprint,
-          });
-          const mappingTable = {
-            tableName: qualifiedName,
-            rowCount: pt.rowCount,
-            columns: colBatch.map((c) => ({
-              name: c.name,
-              dataType: c.dataType,
-              isPrimary: c.isPrimaryKey,
-              isForeign: c.isForeignKey,
-              references: c.foreignKeyTarget
-                ? `${c.foreignKeyTarget.schema ? `${c.foreignKeyTarget.schema}.` : ""}${c.foreignKeyTarget.table}.${c.foreignKeyTarget.column}`
-                : undefined,
-              sampleValues: c.sampleValues.slice(0, 3),
-              distinctCount: c.distinctCount,
-              nullRatio: c.nullRatio,
-              role: c.role,
-            })),
-          };
-          aiDbRes = await analyzeExternalDatabaseSchemaBatch({
-            databaseType: config.type,
-            databaseName: config.database,
-            table: mappingTable,
-            options: {
-              agentName: specialistAgentName,
-              model: agentModel,
-              instructionsPath: agentInstructions,
-              instructionsContent: mappingInstructions.content,
-              adapterType,
-              maxRetries: 2,
-              signal: batchSignal,
-            },
-            analyze: (databaseType, databaseName, schemaTables, options) => aiReasoningService.analyzeDatabaseSchema(
-              databaseType,
-              databaseName,
-              schemaTables,
-              options,
-            ),
-            observe: (columns) => dbIntegration.observeExternalTableColumns(config, {
-              schemaName: pt.schemaName || "public",
-              tableName: pt.tableName,
-              columns,
-              signal: batchSignal,
-            }),
-            onObservationRequested: async (requests) => lease.reportProgress?.("table_mapping", {
-              currentTable: qualifiedName,
-              currentBatchIndex: batchIndex + 1,
-              batchCount: colBatches.length,
-              checkpointStage: "observation_requested",
-              observationCount: requests.length,
-              statusSummary: "Mapper requested bounded samples for ambiguous non-sensitive columns",
-            }),
-            onObservationCompleted: async (requests, observed) => lease.reportProgress?.("table_mapping", {
-              currentTable: qualifiedName,
-              currentBatchIndex: batchIndex + 1,
-              batchCount: colBatches.length,
-              checkpointStage: "observation_completed",
-              observationCount: requests.length,
-              observedRows: observed.rowCount,
-              observationQueryMs: observed.executionTimeMs,
-              statusSummary: "Bounded read-only sample completed; mapper is validating its semantic conclusions",
-            }),
-          });
-          mappingReasoningSteps.push(...(aiDbRes.reasoningSteps || []));
-        } catch (error) {
-          if (signal?.aborted || lease.signal?.aborted || lease.isCancellationRequested?.()) {
-            throw new Error("Datasource onboarding was cancelled");
-          }
-          const timedOut = batchTimeout.aborted;
-          const tableBudgetExpired = externalSchemaMappingBatchTimeoutMs(tableStartedAt) <= 0;
-          tableMappingCoverage[qualifiedName] ??= {
-            status: "fallback", expectedBatches: colBatches.length, validatedBatches: 0, fallbackBatches: 0, timeBudgetExceeded: false,
-          };
-          tableMappingCoverage[qualifiedName].fallbackBatches += 1;
-          if (tableBudgetExpired) {
-            tableMappingCoverage[qualifiedName].fallbackBatches += colBatches.length - batchIndex - 1;
-            tableMappingCoverage[qualifiedName].timeBudgetExceeded = true;
-          }
-          await lease.reportProgress?.("table_mapping", {
-            currentTable: qualifiedName,
-            currentBatchIndex: batchIndex + 1,
-            batchCount: colBatches.length,
-            checkpointStage: tableBudgetExpired ? "table_budget_exhausted" : timedOut ? "batch_timeout" : "batch_fallback",
-            tableBudgetMs: EXTERNAL_SCHEMA_MAPPING_TABLE_TIMEOUT_MS,
-            statusSummary: tableBudgetExpired
-              ? "Per-table semantic mapping budget exhausted; remaining batches retain deterministic metadata"
-              : timedOut ? "Semantic mapping batch timed out; deterministic metadata retained" : "Semantic mapping unavailable; deterministic metadata retained",
-          });
-          // Fall through to deterministic processing
-          if (tableBudgetExpired) break;
-          continue;
-        }
-
-        if (!aiDbRes?.result || aiDbRes.validationStatus !== "validated") {
-          tableMappingCoverage[qualifiedName] ??= {
-            status: "fallback", expectedBatches: colBatches.length, validatedBatches: 0, fallbackBatches: 0, timeBudgetExceeded: false,
-          };
-          tableMappingCoverage[qualifiedName].fallbackBatches += 1;
-          await lease.reportProgress?.("table_mapping", {
-            currentTable: qualifiedName,
-            currentBatchIndex: batchIndex + 1,
-            batchCount: colBatches.length,
-            checkpointStage: "batch_validation_fallback",
-            statusSummary: "Semantic mapping failed validation; deterministic metadata retained",
-          });
-          continue;
-        }
-
-        // Persist the validated model result before using it so a worker
-        // takeover cannot repeat this batch or publish a result it cannot resume.
-        try {
-          await checkpointStore.save(companyId, id, lease, schemaFingerprint, checkpointKey, aiDbRes.result);
-        } catch (error) {
-          if (!(error instanceof ExternalDatabaseMappingCheckpointSizeError)) throw error;
-          tableMappingCoverage[qualifiedName] ??= {
-            status: "fallback", expectedBatches: colBatches.length, validatedBatches: 0, fallbackBatches: 0, timeBudgetExceeded: false,
-          };
-          tableMappingCoverage[qualifiedName].fallbackBatches += 1;
-          await lease.reportProgress?.("table_mapping", {
-            currentTable: qualifiedName,
-            currentBatchIndex: batchIndex + 1,
-            batchCount: colBatches.length,
-            checkpointStage: "batch_result_too_large",
-            statusSummary: "Batch semantic result exceeded checkpoint size limit; deterministic metadata retained",
-          });
-          continue;
-        }
-
-        tableMappingCoverage[qualifiedName] ??= {
-          status: "complete", expectedBatches: colBatches.length, validatedBatches: 0, fallbackBatches: 0, timeBudgetExceeded: false,
-        };
-        tableMappingCoverage[qualifiedName].validatedBatches += 1;
-        completedBatchesCount += 1;
-        applyBatchResult(aiDbRes.result);
-        if (mappingReasoningSteps.length > 0) reasoningSteps.push(...mappingReasoningSteps);
-        await lease.reportProgress?.("table_mapping", {
-          tablesCount: tables.length,
-          columnsCount: totalColumns,
-          completedTablesCount: Object.keys(completedTableMappings).length,
-          completedBatchesCount,
-          currentTable: qualifiedName,
-          currentBatchIndex: batchIndex + 1,
-          batchCount: colBatches.length,
-          checkpointStage: "batch_checkpointed",
-          schemaFingerprint,
-        });
       }
+    }
 
-      // Checkpoint immediately per table
-      completedTableMappings[qualifiedName] = {
-        schemaFingerprint,
-        tableRole: tableRoles[qualifiedName] || "dimension_table",
-        profile: tableProfiles[qualifiedName],
-        columnsCount: pt.columnCount,
-        semanticMapping: tableMappingCoverage[qualifiedName] || {
-          status: "fallback", expectedBatches: colBatches.length, validatedBatches: 0,
-          fallbackBatches: colBatches.length, timeBudgetExceeded: false,
-        },
-      };
-      tableMappingCoverage[qualifiedName] ??= completedTableMappings[qualifiedName].semanticMapping;
-      tableMappingCoverage[qualifiedName].status = tableMappingCoverage[qualifiedName].fallbackBatches === 0
-        ? "complete"
-        : tableMappingCoverage[qualifiedName].validatedBatches > 0 ? "partial" : "fallback";
+    const mappingGroups = groupExternalDatabaseSchemaTables(pendingMappingUnits.map((unit) => unit.mappingTable));
+    let mappingAdapterType = adapterType;
+    for (const [mappingGroupIndex, mappingGroup] of mappingGroups.entries()) {
+      if (signal?.aborted || lease.signal?.aborted || lease.isCancellationRequested?.()) {
+        throw new Error("Datasource onboarding was cancelled");
+      }
+      const groupUnits = mappingGroup.map((mappingTable) => pendingMappingUnits.find((unit) => unit.mappingTable === mappingTable)!)
+        .filter(Boolean);
+      const currentTable = groupUnits[0]?.qualifiedName || mappingGroup[0]?.tableName || "database schema";
+      const groupLabel = groupUnits.length > 1 ? `${currentTable} (+${groupUnits.length - 1} tables)` : currentTable;
+      const groupAdapterType = mappingAdapterType;
+      const batchTimeout = AbortSignal.timeout(EXTERNAL_SCHEMA_MAPPING_BATCH_TIMEOUT_MS);
+      const batchSignal = signal ? AbortSignal.any([signal, batchTimeout]) : batchTimeout;
+      let aiDbRes: Awaited<ReturnType<typeof aiReasoningService.analyzeDatabaseSchema>>;
 
       await lease.reportProgress?.("table_mapping", {
         tablesCount: tables.length,
         columnsCount: totalColumns,
         completedTablesCount: Object.keys(completedTableMappings).length,
         completedBatchesCount,
+        currentTable: groupLabel,
+        currentBatchIndex: completedBatchesCount + 1,
+        batchCount: mappingGroups.length,
+        checkpointStage: "mapping_batch",
+        schemaFingerprint,
+        statusSummary: `Database Ingestion Agent is mapping ${groupUnits.length} bounded table batches together`,
+      });
+
+      try {
+        aiDbRes = await analyzeExternalDatabaseSchemaGroup({
+          databaseType: config.type,
+          databaseName: config.database,
+          tables: mappingGroup,
+          options: {
+            agentName: specialistAgentName,
+            model: agentModel,
+            instructionsPath: agentInstructions,
+            instructionsContent: mappingInstructions.content,
+            adapterType: groupAdapterType,
+            maxRetries: 1,
+            piTimeoutMs: EXTERNAL_SCHEMA_MAPPING_PI_TIMEOUT_MS,
+            routerTimeoutMs: EXTERNAL_SCHEMA_MAPPING_ROUTER_TIMEOUT_MS,
+            logContext: `schema mapping group ${mappingGroupIndex + 1}/${mappingGroups.length}`,
+            signal: batchSignal,
+          },
+          analyze: (databaseType, databaseName, schemaTables, options) => aiReasoningService.analyzeDatabaseSchema(
+            databaseType,
+            databaseName,
+            schemaTables,
+            options,
+          ),
+          observe: async (tableName, columns) => {
+            const sourceTable = sourceTableByQualifiedName.get(tableName);
+            if (!sourceTable) throw new Error(`Database Ingestion Agent requested samples for unknown table '${tableName}'`);
+            return dbIntegration.observeExternalTableColumns(config, {
+              schemaName: sourceTable.schemaName || "public",
+              tableName: sourceTable.tableName,
+              columns,
+              signal: batchSignal,
+            });
+          },
+          onObservationRequested: async (requests) => lease.reportProgress?.("table_mapping", {
+            currentTable: groupLabel,
+            batchCount: mappingGroups.length,
+            checkpointStage: "observation_requested",
+            observationCount: requests.length,
+            statusSummary: "Mapper requested bounded samples for ambiguous non-sensitive columns",
+          }),
+          onObservationCompleted: async (requests, observations) => lease.reportProgress?.("table_mapping", {
+            currentTable: groupLabel,
+            batchCount: mappingGroups.length,
+            checkpointStage: "observation_completed",
+            observationCount: requests.length,
+            observedRows: observations.reduce((total, observation) => total + observation.result.rowCount, 0),
+            observationQueryMs: observations.reduce((total, observation) => total + observation.result.executionTimeMs, 0),
+            statusSummary: "Bounded read-only samples completed; Database Ingestion Agent is validating the mapping",
+          }),
+        });
+      } catch (error) {
+        if (signal?.aborted || lease.signal?.aborted || lease.isCancellationRequested?.()) {
+          throw new Error("Datasource onboarding was cancelled");
+        }
+        for (const unit of groupUnits) tableMappingCoverage[unit.qualifiedName].fallbackBatches += 1;
+        if (groupAdapterType === "pi_local" && batchTimeout.aborted) mappingAdapterType = "router_http";
+        await lease.reportProgress?.("table_mapping", {
+          currentTable: groupLabel,
+          batchCount: mappingGroups.length,
+          checkpointStage: batchTimeout.aborted ? "batch_timeout" : "batch_fallback",
+          statusSummary: batchTimeout.aborted
+            ? `Semantic mapping request for ${groupUnits.length} table batches timed out; deterministic JEV metadata will be applied`
+            : `Semantic mapping request for ${groupUnits.length} table batches failed; deterministic JEV metadata will be applied`,
+        });
+        continue;
+      }
+
+      const piFallbackUsed = aiDbRes.backend === "router_http" || aiDbRes.reasoningSteps.some((step) =>
+        /Pi CLI (?:failed|skipped)/i.test(`${step.error || ""} ${step.thought || ""}`),
+      );
+      if (groupAdapterType === "pi_local" && piFallbackUsed) mappingAdapterType = "router_http";
+
+      if (!aiDbRes?.result || aiDbRes.validationStatus !== "validated") {
+        for (const unit of groupUnits) tableMappingCoverage[unit.qualifiedName].fallbackBatches += 1;
+        await lease.reportProgress?.("table_mapping", {
+          currentTable: groupLabel,
+          batchCount: mappingGroups.length,
+          checkpointStage: "batch_validation_fallback",
+          statusSummary: `Semantic mapping for ${groupUnits.length} table batches failed validation; deterministic JEV metadata will be applied`,
+        });
+        continue;
+      }
+
+      try {
+        // Persist the validated response against every constituent column batch
+        // so worker takeover resumes without repeating a successful model call.
+        for (const unit of groupUnits) {
+          await checkpointStore.save(companyId, id, lease, schemaFingerprint, unit.checkpointKey, aiDbRes.result);
+        }
+      } catch (error) {
+        if (!(error instanceof ExternalDatabaseMappingCheckpointSizeError)) throw error;
+        for (const unit of groupUnits) tableMappingCoverage[unit.qualifiedName].fallbackBatches += 1;
+        await lease.reportProgress?.("table_mapping", {
+          currentTable: groupLabel,
+          batchCount: mappingGroups.length,
+          checkpointStage: "batch_result_too_large",
+          statusSummary: `Semantic mapping response for ${groupUnits.length} table batches exceeded the checkpoint limit; deterministic JEV metadata will be applied`,
+        });
+        continue;
+      }
+
+      applyBatchResult(aiDbRes.result);
+      if (aiDbRes.reasoningSteps.length > 0) reasoningSteps.push(...aiDbRes.reasoningSteps);
+      for (const unit of groupUnits) {
+        tableMappingCoverage[unit.qualifiedName].validatedBatches += 1;
+        completedBatchesCount += 1;
+      }
+      await lease.reportProgress?.("table_mapping", {
+        tablesCount: tables.length,
+        columnsCount: totalColumns,
+        completedTablesCount: Object.keys(completedTableMappings).length,
+        completedBatchesCount,
+        currentTable: groupLabel,
+        currentBatchIndex: completedBatchesCount,
+        batchCount: mappingGroups.length,
+        checkpointStage: "batch_checkpointed",
+        schemaFingerprint,
+      });
+    }
+
+    for (const table of pendingTables) {
+      const qualifiedName = `${table.schemaName || "public"}.${table.tableName}`;
+      const coverage = tableMappingCoverage[qualifiedName] || {
+        status: "fallback" as const,
+        expectedBatches: 0,
+        validatedBatches: 0,
+        fallbackBatches: 0,
+        timeBudgetExceeded: false,
+      };
+      coverage.status = coverage.fallbackBatches === 0
+        ? "complete"
+        : coverage.validatedBatches > 0 ? "partial" : "fallback";
+      tableMappingCoverage[qualifiedName] = coverage;
+      completedTableMappings[qualifiedName] = {
+        schemaFingerprint,
+        tableRole: tableRoles[qualifiedName] || "dimension_table",
+        profile: tableProfiles[qualifiedName],
+        columnsCount: table.columnCount,
+        semanticMapping: coverage,
+      };
+      await lease.reportProgress?.("table_mapping", {
+        tablesCount: tables.length,
+        columnsCount: totalColumns,
+        completedTablesCount: Object.keys(completedTableMappings).length,
+        completedBatchesCount,
         currentTable: qualifiedName,
-        checkpointStage: tableMappingCoverage[qualifiedName].timeBudgetExceeded ? "table_budget_exhausted" : "table_mapping_complete",
-        tableBudgetMs: EXTERNAL_SCHEMA_MAPPING_TABLE_TIMEOUT_MS,
+        checkpointStage: "table_mapping_complete",
         schemaFingerprint,
       });
     }
@@ -3102,21 +3150,50 @@ export class DataSourcesService {
       }
     }
 
-    if (finalEntities.length === 0) {
-      const jevService = new TypeSafeJevService();
-      const tableSummaries = tables.map((t) => ({
-        name: `${t.schemaName || "public"}.${t.tableName}`,
-        columns: t.schemaDefinition.map((c) => c.name),
-        rowCount: t.rowCount,
-      }));
-      const jevRes = await jevService.evaluateDatabaseTables(tableSummaries);
-      finalEntities = jevRes.entities;
-      tableRoles = jevRes.tableRoles;
-      relationships = jevRes.relationships;
-      finalTopics = jevRes.primaryTopics;
-      suggestedQueries = jevRes.suggestedQueries;
-      tableProfiles = jevRes.tableProfiles || {};
-    }
+    const jevService = new TypeSafeJevService();
+    const tableSummaries = tables.map((table) => ({
+      name: `${table.schemaName || "public"}.${table.tableName}`,
+      tableName: table.tableName,
+      schemaName: table.schemaName || "public",
+      columns: table.schemaDefinition.map((column) => column.name),
+      rowCount: table.rowCount,
+    }));
+    const jevRes = await jevService.evaluateDatabaseTables(tableSummaries, {
+      databaseType: config.type as "postgres" | "mariadb" | "mysql",
+    });
+    const aiMapping: AiDatabaseAnalysisResult = {
+      domain: finalDomain,
+      entities: finalEntities,
+      primaryTopics: finalTopics,
+      tableRoles: tableRoles as AiDatabaseAnalysisResult["tableRoles"],
+      relationships,
+      suggestedQueries,
+      reasoningSummary: summary,
+      tableProfiles,
+      crossTableClusters,
+      observationRequests: [],
+    };
+    const deterministicMapping: AiDatabaseAnalysisResult = {
+      domain: `${config.type.toUpperCase()} Relational Database`,
+      entities: jevRes.entities,
+      primaryTopics: jevRes.primaryTopics,
+      tableRoles: jevRes.tableRoles as AiDatabaseAnalysisResult["tableRoles"],
+      relationships: jevRes.relationships,
+      suggestedQueries: jevRes.suggestedQueries,
+      reasoningSummary: "Deterministic JEV mapping used to fill semantic coverage not validated by the Database Ingestion Agent.",
+      tableProfiles: jevRes.tableProfiles,
+      crossTableClusters: jevRes.crossTableClusters,
+      observationRequests: [],
+    };
+    const completeMapping = mergeExternalDatabaseMappingResults(aiMapping, deterministicMapping);
+    finalDomain = completeMapping.domain;
+    finalEntities = completeMapping.entities;
+    finalTopics = completeMapping.primaryTopics;
+    tableRoles = completeMapping.tableRoles;
+    relationships = completeMapping.relationships;
+    suggestedQueries = completeMapping.suggestedQueries;
+    tableProfiles = completeMapping.tableProfiles || {};
+    crossTableClusters = completeMapping.crossTableClusters || [];
 
     // Stage 5: Relation verification
     const allTableRelationships: TableRelation[] = [];
@@ -3446,11 +3523,16 @@ export class DataSourcesService {
     }
     if (externalDatabase && !useExternalSnapshot) {
       const config = await new DataSourceDatabaseConfigService(this.db).resolve(companyId, ds);
+      const dbIntegration = new DatabaseIntegrationService();
       const dialect = ds.sourceType === "postgres" ? "postgres" : "mysql";
       const quote = dialect === "postgres" ? '"' : "`";
-      const quotedTable = quoteDataIdentifier(table.tableName, quote);
+      const sourceSchema = typeof (table.semanticModel as any)?.sourceSchema === "string"
+        ? (table.semanticModel as any).sourceSchema as string
+        : dialect === "postgres"
+          ? await dbIntegration.resolveTableSchema(config, table.tableName)
+          : config.database;
+      const quotedTable = externalDatabaseTableReference(sourceSchema, table.tableName, config.type as "postgres" | "mariadb" | "mysql");
       const filters = compileStructuredFilters(options.filter, schema, dialect);
-      const dbIntegration = new DatabaseIntegrationService();
       const runExternalQuery = (querySql: string, queryLimit: number, values: unknown[]) =>
         externalQueryAdmission.run(
           `${companyId}:${ds.id}`,

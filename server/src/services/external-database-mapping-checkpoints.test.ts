@@ -51,8 +51,9 @@ describe("external database mapping fingerprints", () => {
   });
 
   it("caps each batch by a finite per-table mapping deadline", () => {
-    expect(externalSchemaMappingBatchTimeoutMs(1_000, 1_000)).toBe(EXTERNAL_SCHEMA_MAPPING_BATCH_TIMEOUT_MS);
-    expect(externalSchemaMappingBatchTimeoutMs(1_000, 61_000)).toBe(EXTERNAL_SCHEMA_MAPPING_BATCH_TIMEOUT_MS);
+    expect(EXTERNAL_SCHEMA_MAPPING_BATCH_TIMEOUT_MS).toBeGreaterThanOrEqual(110_000);
+    expect(externalSchemaMappingBatchTimeoutMs(1_000, 1_000)).toBe(Math.min(EXTERNAL_SCHEMA_MAPPING_BATCH_TIMEOUT_MS, EXTERNAL_SCHEMA_MAPPING_TABLE_TIMEOUT_MS));
+    expect(externalSchemaMappingBatchTimeoutMs(1_000, 61_000)).toBe(EXTERNAL_SCHEMA_MAPPING_TABLE_TIMEOUT_MS - 60_000);
     expect(externalSchemaMappingBatchTimeoutMs(1_000, 61_001)).toBe(EXTERNAL_SCHEMA_MAPPING_TABLE_TIMEOUT_MS - 60_001);
     expect(externalSchemaMappingBatchTimeoutMs(1_000, 91_000)).toBe(0);
   });

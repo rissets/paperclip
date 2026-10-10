@@ -1,7 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { companies, createDb, dataSourceJobs, dataSources, dataSourceTables } from "@paperclipai/db";
+import {
+  activityLog,
+  agents,
+  companies,
+  createDb,
+  dataSourceJobs,
+  dataSources,
+  dataSourceTables,
+  heartbeatRunEvents,
+  heartbeatRuns,
+} from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import {
   DatabaseIntegrationService,
@@ -307,6 +317,10 @@ describe("Package P2: Durable External Onboarding, Index Discovery & Relation Ve
 
     beforeEach(async () => {
       pipelineMock.mockReset();
+      await db.delete(heartbeatRunEvents);
+      await db.delete(activityLog);
+      await db.delete(heartbeatRuns);
+      await db.delete(agents);
       await db.delete(companies);
     });
 
@@ -318,6 +332,7 @@ describe("Package P2: Durable External Onboarding, Index Discovery & Relation Ve
       const companyId = randomUUID();
       const sourceId = randomUUID();
       const jobId = randomUUID();
+      const specialistAgentId = randomUUID();
       await db.insert(companies).values({
         id: companyId,
         name: "Durable DB Co",
@@ -331,6 +346,14 @@ describe("Package P2: Durable External Onboarding, Index Discovery & Relation Ve
         status: "processing",
         metadata: { host: "localhost", database: "prod_db" },
       });
+      await db.insert(agents).values({
+        id: specialistAgentId,
+        companyId,
+        name: "Database Ingestion Agent",
+        adapterType: "pi_local",
+        adapterConfig: { model: "rissets/llm-hd/qwen3.8-27b" },
+        metadata: { paperclipBuiltInAgent: { key: "database-ingestion", featureKeys: ["database-ingestion"] } },
+      });
       await db.insert(dataSourceJobs).values({
         id: jobId,
         companyId,
@@ -339,9 +362,9 @@ describe("Package P2: Durable External Onboarding, Index Discovery & Relation Ve
         status: "queued",
         stage: "queued",
         idempotencyKey: `ext-onboard-${randomUUID()}`,
-        progress: { schemaVersion: 1 },
+        progress: { schemaVersion: 1, specialistAgentId },
       });
-      return { companyId, sourceId, jobId };
+      return { companyId, sourceId, jobId, specialistAgentId };
     }
 
     it("claims and executes external_db_onboarding job through DataSourceIngestionWorker", async () => {
@@ -365,6 +388,97 @@ describe("Package P2: Durable External Onboarding, Index Discovery & Relation Ve
       expect(job.stage).toBe("completed");
       expect(job.attempt).toBe(1);
       expect(source.status).toBe("ready");
+    });
+
+    it("supersedes an open Database Ingestion Agent run when a job lease is reclaimed", async () => {
+      const { companyId, jobId, specialistAgentId } = await seed();
+      const previousRunId = randomUUID();
+      const startedAt = new Date(Date.now() - 60_000);
+      await db.update(dataSourceJobs).set({
+        status: "running",
+        attempt: 1,
+        leaseOwner: "expired-worker",
+        leaseExpiresAt: new Date(Date.now() - 1_000),
+      }).where(eq(dataSourceJobs.id, jobId));
+      await db.insert(heartbeatRuns).values({
+        id: previousRunId,
+        companyId,
+        agentId: specialistAgentId,
+        status: "running",
+        runtimeMode: "builtin_ingestion",
+        startedAt,
+        resultJson: {
+          jobId,
+          attempt: 1,
+          builtInAgentKey: "database-ingestion",
+          stage: "table_mapping",
+        },
+      });
+      pipelineMock.mockResolvedValueOnce(undefined);
+
+      await new DataSourceIngestionWorker(db, "external_db_onboarding").tick();
+
+      const [previousRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, previousRunId));
+      expect(previousRun).toMatchObject({
+        status: "interrupted",
+        errorCode: "datasource_worker_lease_expired",
+        resultJson: {
+          stage: "interrupted",
+          stopReason: "datasource_worker_lease_expired",
+        },
+      });
+      const currentRuns = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
+      expect(currentRuns).toHaveLength(2);
+      expect(currentRuns.filter((run) => run.status === "succeeded")).toHaveLength(1);
+    });
+
+    it("restores a false process_lost run while its datasource job lease is still live", async () => {
+      const { companyId, jobId, specialistAgentId } = await seed();
+      const runId = randomUUID();
+      await db.update(dataSourceJobs).set({
+        status: "running",
+        attempt: 1,
+        leaseOwner: "active-worker",
+        leaseExpiresAt: new Date(Date.now() + 5 * 60_000),
+        progress: { specialistAgentId, stage: "table_mapping", currentTable: "core.entity" },
+      }).where(eq(dataSourceJobs.id, jobId));
+      await db.insert(heartbeatRuns).values({
+        id: runId,
+        companyId,
+        agentId: specialistAgentId,
+        status: "failed",
+        runtimeMode: "builtin_ingestion",
+        error: "Process lost -- server may have restarted",
+        errorCode: "process_lost",
+        livenessState: "failed",
+        livenessReason: "process_lost",
+        startedAt: new Date(Date.now() - 6 * 60_000),
+        finishedAt: new Date(),
+        resultJson: {
+          jobId,
+          attempt: 1,
+          builtInAgentKey: "database-ingestion",
+          stage: "starting",
+          stopReason: "process_lost",
+          processLossDiagnostic: { pidRecorded: false, groupRecorded: false, localCheck: "no_identifiers" },
+        },
+      });
+
+      await new DataSourceIngestionWorker(db, "external_db_onboarding").tick();
+
+      const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+      expect(pipelineMock).not.toHaveBeenCalled();
+      expect(run).toMatchObject({
+        status: "running",
+        error: null,
+        errorCode: null,
+        finishedAt: null,
+        livenessState: "running",
+        livenessReason: null,
+      });
+      expect(run.resultJson).toMatchObject({ stage: "table_mapping", recoveredAfterDatasourceLeaseCheck: true });
+      expect(run.resultJson).not.toHaveProperty("processLossDiagnostic");
+      expect(run.resultJson).not.toHaveProperty("stopReason");
     });
 
     it("handles cancellation gracefully when cancel_requested is set on the job", async () => {

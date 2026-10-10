@@ -16,11 +16,14 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useCompany } from "@/context/CompanyContext";
-import { useMeetingRecorder } from "@/context/MeetingRecorderContext";
+import { useOptionalMeetingRecorder } from "@/context/MeetingRecorderContext";
 
 export function MeetingRecorderDrawer() {
   const navigate = useNavigate();
   const { selectedCompany } = useCompany();
+  const recorder = useOptionalMeetingRecorder();
+  if (!recorder || !recorder.isOpen) return null;
+
   const {
     isOpen,
     isMinimized,
@@ -38,7 +41,7 @@ export function MeetingRecorderDrawer() {
     setIsMinimized,
     startRecording,
     stopRecording,
-  } = useMeetingRecorder();
+  } = recorder;
 
   const formatTimer = (secs: number) => {
     const mins = Math.floor(secs / 60);

@@ -3727,6 +3727,7 @@ export function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType
   const [loading, setLoading] = useState(true);
   const [logLoading, setLogLoading] = useState(!!run.logRef);
   const [logError, setLogError] = useState<string | null>(null);
+  const [logSourceUnavailable, setLogSourceUnavailable] = useState(false);
   const [logOffset, setLogOffsetState] = useState(0);
   const logOffsetRef = useRef(0);
   const setLogOffset = useCallback((next: number | ((previous: number) => number)) => {
@@ -3896,6 +3897,7 @@ export function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType
 
   // Reset only when the log source changes, never when visibility changes.
   useEffect(() => {
+    setLogSourceUnavailable(false);
     pendingLogLineRef.current = "";
     logMergeRefs.current = { seenChunkKeys: new Set(), trimmedSeqFloorByRun: new Map() };
     seenProgressLogLineKeysRef.current = new Set();
@@ -3909,6 +3911,10 @@ export function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType
   // Fetch persisted shell log, retaining partial rows and offsets across hides.
   useEffect(() => {
     if (!visible) return;
+    if (logSourceUnavailable) {
+      setLogLoading(false);
+      return;
+    }
     let cancelled = false;
     const offset = logOffsetRef.current;
     if (!run.logRef && !shouldPollShellLog) {
@@ -3929,7 +3935,8 @@ export function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType
         setHasMoreLog(!shouldPollShellLog && result.nextOffset !== undefined);
       } catch (err) {
         if (!cancelled) {
-          if (shouldPollShellLog && isRunLogUnavailable(err)) {
+          if (isRunLogUnavailable(err)) {
+            setLogSourceUnavailable(true);
             setLogLoading(false);
             return;
           }
@@ -3944,7 +3951,7 @@ export function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType
     return () => {
       cancelled = true;
     };
-  }, [visible, run.id, run.logRef, run.logBytes, shouldPollShellLog]);
+  }, [visible, run.id, run.logRef, run.logBytes, shouldPollShellLog, logSourceUnavailable]);
 
   async function loadMorePersistedLog() {
     if (loadingMoreLog || !hasMoreLog) return;
@@ -3957,6 +3964,10 @@ export function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType
       setLogOffset(next);
       setHasMoreLog(result.nextOffset !== undefined);
     } catch (err) {
+      if (isRunLogUnavailable(err)) {
+        setLogSourceUnavailable(true);
+        return;
+      }
       setLogError(err instanceof Error ? err.message : "Failed to load more run log");
     } finally {
       setLoadingMoreLog(false);
@@ -3992,7 +4003,7 @@ export function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType
 
   // Poll shell log for running runs
   useEffect(() => {
-    if (!visible || !shouldPollShellLog || isStreamingConnected) return;
+    if (!visible || !shouldPollShellLog || isStreamingConnected || logSourceUnavailable) return;
     let pending = false;
     let cancelled = false;
     const interval = setInterval(async () => {
@@ -4010,7 +4021,10 @@ export function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType
           setLogOffset((prev) => prev + result.content.length);
         }
       } catch (err) {
-        if (isRunLogUnavailable(err)) return;
+        if (isRunLogUnavailable(err)) {
+          setLogSourceUnavailable(true);
+          return;
+        }
         // ignore polling errors
       } finally {
         pending = false;
@@ -4020,7 +4034,7 @@ export function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType
       cancelled = true;
       clearInterval(interval);
     };
-  }, [visible, run.id, shouldPollShellLog, isStreamingConnected, logOffset]);
+  }, [visible, run.id, shouldPollShellLog, isStreamingConnected, logOffset, logSourceUnavailable]);
 
   // Stream live updates from websocket (primary path for running runs).
   useEffect(() => {

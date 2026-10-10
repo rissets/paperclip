@@ -69,10 +69,36 @@ function sameDatasourceScope(left: string[], right: string[]): boolean {
   return JSON.stringify(normalize(left)) === JSON.stringify(normalize(right));
 }
 
+function containsExactTableIdentifier(query: string, identifier: string): boolean {
+  const normalizedQuery = query.replace(/["`\[\]]/g, "").toLowerCase();
+  const normalizedIdentifier = identifier.toLowerCase();
+  if (!normalizedIdentifier) return false;
+  let offset = normalizedQuery.indexOf(normalizedIdentifier);
+  while (offset >= 0) {
+    const before = normalizedQuery[offset - 1];
+    const after = normalizedQuery[offset + normalizedIdentifier.length];
+    const isIdentifierPart = (value: string | undefined) => Boolean(value && /[a-z0-9_]/i.test(value));
+    if (!isIdentifierPart(before) && !isIdentifierPart(after)) return true;
+    offset = normalizedQuery.indexOf(normalizedIdentifier, offset + normalizedIdentifier.length);
+  }
+  return false;
+}
+
+/** Ignore a caller timestamp from an older agent run; its reasoning time is not coordinator execution time. */
+export function coordinatorDeadlineSubmittedAt(value: string | number | undefined, now = Date.now()): number | undefined {
+  if (value === undefined) return undefined;
+  const submittedAt = typeof value === "number" ? value : new Date(value).getTime();
+  if (!Number.isFinite(submittedAt)) return undefined;
+  const ageMs = now - submittedAt;
+  return ageMs >= -1_000 && ageMs <= 10_000 ? submittedAt : undefined;
+}
+
 export interface SchemaRetrievalCandidate {
   id: string;
   dataSourceId: string;
   tableName: string;
+  schemaName?: string;
+  qualifiedTableName?: string;
   metrics: string[];
   dimensions: string[];
   relevanceScore?: number;
@@ -219,6 +245,7 @@ export class EnterpriseOrchestratorService {
       .select({
         dataSourceId: dataSourceTables.dataSourceId,
         tableName: dataSourceTables.tableName,
+        semanticModel: dataSourceTables.semanticModel,
       })
       .from(dataSourceTables)
       .where(eq(dataSourceTables.companyId, companyId));
@@ -235,7 +262,12 @@ export class EnterpriseOrchestratorService {
       id: s.id,
       name: s.name,
       type: s.type,
-      tables: tables.filter((t) => t.dataSourceId === s.id).map((t) => t.tableName),
+      tables: tables.filter((t) => t.dataSourceId === s.id).map((t) => {
+        const sourceSchema = (t.semanticModel as any)?.sourceSchema;
+        return typeof sourceSchema === "string" && sourceSchema.length > 0
+          ? `${sourceSchema}.${t.tableName}`
+          : t.tableName;
+      }),
       semanticProfile: ((s.metadata as any)?.semanticProfile || null) as DataSourceSemanticProfile | null,
     }));
 
@@ -694,6 +726,8 @@ Seluruh keputusan query diarahkan secara dinamis oleh **TypeSafe AI Jev System O
       .map((t) => {
         const sem = (t.semanticModel as any) || {};
         const source = sourcesById.get(t.dataSourceId);
+        const schemaName = typeof sem.sourceSchema === "string" ? sem.sourceSchema : undefined;
+        const qualifiedTableName = schemaName ? `${schemaName}.${t.tableName}` : t.tableName;
         const metrics = (sem.metrics || []).map((m: any) => String(m?.name || m || ""));
         const dimensions = (sem.dimensions || []).map((d: any) => String(d?.name || d || ""));
         const rawColumns = Array.isArray(t.schemaDefinition) ? t.schemaDefinition : [];
@@ -715,6 +749,7 @@ Seluruh keputusan query diarahkan secara dinamis oleh **TypeSafe AI Jev System O
           id: t.id,
           dataSourceId: t.dataSourceId,
           tableName: t.tableName,
+          ...(schemaName ? { schemaName, qualifiedTableName } : {}),
           sourceName: source?.name,
           sourceType: source?.sourceType,
           clickhouseTable: storedClickhouseTable || (supportsClickhouseSnapshot
@@ -733,6 +768,7 @@ Seluruh keputusan query diarahkan secara dinamis oleh **TypeSafe AI Jev System O
       id: table.id,
       dataSourceId: table.dataSourceId,
       tableName: table.tableName,
+      ...(table.schemaName ? { schemaName: table.schemaName, qualifiedTableName: table.qualifiedTableName } : {}),
       ...(table.sourceName ? { sourceName: table.sourceName } : {}),
       ...(table.sourceType ? { sourceType: table.sourceType } : {}),
       ...(table.clickhouseTable ? { clickhouseTable: table.clickhouseTable } : {}),
@@ -816,6 +852,11 @@ Seluruh keputusan query diarahkan secara dinamis oleh **TypeSafe AI Jev System O
     const candidateById = new Map(contextTables.map((table) => [table.id, table]));
     const selectedCandidateIds = new Set(retrieval.candidates.map((candidate) => candidate.id));
     const selectedLogicalNames = new Set(retrieval.candidates.map((candidate) => candidate.tableName.toLowerCase()));
+    const hasQualifiedTableMention = contextTables.some((table) =>
+      table.qualifiedTableName
+      && table.qualifiedTableName !== table.tableName
+      && containsExactTableIdentifier(qTrimmed, table.qualifiedTableName),
+    );
     const enrichedCandidates = retrieval.candidates.flatMap((candidate) => {
       const metadata = candidateById.get(candidate.id);
       return metadata ? [{ ...metadata, relevanceScore: candidate.relevanceScore, matchedBy: candidate.matchedBy }] : [];
@@ -823,7 +864,9 @@ Seluruh keputusan query diarahkan secara dinamis oleh **TypeSafe AI Jev System O
     // A logical table-name collision must remain visible even when retrieval's
     // top-K ranking would otherwise retain only one physical source.
     const sameNameCandidates = contextTables
-      .filter((candidate) => selectedLogicalNames.has(candidate.tableName.toLowerCase()) && !selectedCandidateIds.has(candidate.id))
+      .filter((candidate) => !hasQualifiedTableMention
+        && selectedLogicalNames.has(candidate.tableName.toLowerCase())
+        && !selectedCandidateIds.has(candidate.id))
       .map((candidate) => ({ ...candidate, relevanceScore: 1, matchedBy: "exact_match" as const }));
     const candidateTableIds = new Set([...selectedCandidateIds, ...sameNameCandidates.map((candidate) => candidate.id)]);
     const relatedTables: Array<(typeof contextTables)[number] & { relevanceScore: number; matchedBy: "hybrid" }> = [];
@@ -831,9 +874,20 @@ Seluruh keputusan query diarahkan secara dinamis oleh **TypeSafe AI Jev System O
       const tbl = tables.find((t) => t.id === cand.id);
       const relations = (tbl?.semanticModel as any)?.relationships || [];
       for (const rel of relations) {
-        const targetName = (rel.targetTable || "").toLowerCase();
+        let targetName = String(rel.targetTable || "").toLowerCase();
+        let targetSchema = typeof rel.targetSchema === "string" ? rel.targetSchema.toLowerCase() : undefined;
+        if (!targetSchema && targetName.includes(".")) {
+          targetSchema = targetName.slice(0, targetName.lastIndexOf("."));
+          targetName = targetName.slice(targetName.lastIndexOf(".") + 1);
+        }
         if (!targetName) continue;
-        for (const targetTable of contextTables.filter((table) => table.tableName.toLowerCase() === targetName)) {
+        const sameSchema = targetSchema
+          ? contextTables.filter((table) => table.tableName.toLowerCase() === targetName && table.schemaName?.toLowerCase() === targetSchema)
+          : cand.schemaName
+            ? contextTables.filter((table) => table.tableName.toLowerCase() === targetName && table.schemaName?.toLowerCase() === cand.schemaName!.toLowerCase())
+            : contextTables.filter((table) => table.tableName.toLowerCase() === targetName);
+        const targetCandidates = sameSchema.length === 1 ? sameSchema : [];
+        for (const targetTable of targetCandidates) {
           if (candidateTableIds.has(targetTable.id)) continue;
           candidateTableIds.add(targetTable.id);
           relatedTables.push({
@@ -870,7 +924,12 @@ Seluruh keputusan query diarahkan secara dinamis oleh **TypeSafe AI Jev System O
     companyId: string,
     userQuery: string,
     allowedDataSourceIds: string[],
-    options?: { limit?: number; vectorQuery?: number[]; embeddingSpace?: "bge-m3" | "openrouter-text-embedding-3-small" },
+    options?: {
+      limit?: number;
+      vectorQuery?: number[];
+      embeddingSpace?: "bge-m3" | "openrouter-text-embedding-3-small";
+      signal?: AbortSignal;
+    },
   ): Promise<HybridRetrievalResult> {
     const limit = options?.limit ?? 5;
     const allowedSet = new Set(allowedDataSourceIds);
@@ -890,6 +949,7 @@ Seluruh keputusan query diarahkan secara dinamis oleh **TypeSafe AI Jev System O
       .filter((t) => allowedSet.has(t.dataSourceId))
       .map((t) => {
         const sem = (t.semanticModel as any) || {};
+        const schemaName = typeof sem.sourceSchema === "string" ? sem.sourceSchema : undefined;
         const metrics: string[] = (sem.metrics || []).map((m: any) => String(m?.name || m || ""));
         const dimensions: string[] = (sem.dimensions || []).map((d: any) => String(d?.name || d || ""));
         const columns: string[] = (Array.isArray(t.schemaDefinition) ? t.schemaDefinition : [])
@@ -899,6 +959,7 @@ Seluruh keputusan query diarahkan secara dinamis oleh **TypeSafe AI Jev System O
           id: t.id,
           dataSourceId: t.dataSourceId,
           tableName: t.tableName,
+          ...(schemaName ? { schemaName, qualifiedTableName: `${schemaName}.${t.tableName}` } : {}),
           metrics,
           dimensions,
           columns,
@@ -921,18 +982,15 @@ Seluruh keputusan query diarahkan secara dinamis oleh **TypeSafe AI Jev System O
     // column/metric matches. A question that names one table and groups by a
     // common column such as `domain` must not lose that table when many other
     // tables also expose the same column.
-    const exactTableNameMatches = candidateTables.filter((table) => {
-      const identity = table.tableName.toLowerCase();
-      let offset = qLower.indexOf(identity);
-      while (offset >= 0) {
-        const before = qLower[offset - 1];
-        const after = qLower[offset + identity.length];
-        const isIdentifierPart = (value: string | undefined) => Boolean(value && /[a-z0-9_]/i.test(value));
-        if (!isIdentifierPart(before) && !isIdentifierPart(after)) return true;
-        offset = qLower.indexOf(identity, offset + identity.length);
-      }
-      return queryTokens.includes(identity);
-    });
+    const qualifiedTableNameMatches = candidateTables.filter((table) =>
+      table.qualifiedTableName
+      && table.qualifiedTableName !== table.tableName
+      && containsExactTableIdentifier(userQuery, table.qualifiedTableName),
+    );
+    const exactTableNameMatches = qualifiedTableNameMatches.length > 0
+      ? qualifiedTableNameMatches
+      : candidateTables.filter((table) => containsExactTableIdentifier(userQuery, table.tableName)
+        || queryTokens.includes(table.tableName.toLowerCase()));
     if (exactTableNameMatches.length > 0) {
       const namedCandidates = exactTableNameMatches.slice(0, limit).map((table) => ({
         ...table,
@@ -943,7 +1001,7 @@ Seluruh keputusan query diarahkan secara dinamis oleh **TypeSafe AI Jev System O
         candidates: namedCandidates,
         skippedVectorRerank: true,
         exactMatchFound: true,
-        reasoning: `Exact table-name match found for ${exactTableNameMatches.map((table) => table.tableName).join(", ")}; skipped vector reranker to preserve latency`,
+        reasoning: `Exact table-name match found for ${exactTableNameMatches.map((table) => table.qualifiedTableName || table.tableName).join(", ")}; skipped vector reranker to preserve latency`,
       };
     }
 
@@ -969,7 +1027,7 @@ Seluruh keputusan query diarahkan secara dinamis oleh **TypeSafe AI Jev System O
         candidates: exactMatches.slice(0, limit),
         skippedVectorRerank: true,
         exactMatchFound: true,
-        reasoning: `Exact match found for ${exactMatches.map((m) => m.tableName).join(", ")}; skipped vector reranker to preserve latency`,
+        reasoning: `Exact match found for ${exactMatches.map((m) => m.qualifiedTableName || m.tableName).join(", ")}; skipped vector reranker to preserve latency`,
       };
     }
 
@@ -1000,10 +1058,19 @@ Seluruh keputusan query diarahkan secara dinamis oleh **TypeSafe AI Jev System O
     let embeddingSpace = options?.embeddingSpace;
     let embeddingGeneration = (options as any)?.embeddingGeneration;
     const ragModelService = new RagModelService();
+    const embeddingRequestOptions = {
+      signal: options?.signal,
+      localTimeoutMs: 2_500,
+      gatewayTimeoutMs: 4_500,
+    };
 
-    if (!vectorQuery) {
+    scoredCandidates.sort((a, b) => (b.score || 0) - (a.score || 0));
+    const lexicalCandidatesAreDecisive = scoredCandidates.length === 1
+      || (scoredCandidates.length > 1
+        && (scoredCandidates[0].score || 0) - (scoredCandidates[1].score || 0) >= 0.25);
+    if (!vectorQuery && !lexicalCandidatesAreDecisive) {
       try {
-        const generated = await ragModelService.embed([userQuery]);
+        const generated = await ragModelService.embed([userQuery], undefined, embeddingRequestOptions);
         if (generated.vectors?.[0] && generated.space) {
           vectorQuery = generated.vectors[0];
           embeddingSpace = generated.space;
@@ -1067,9 +1134,13 @@ Seluruh keputusan query diarahkan secara dinamis oleh **TypeSafe AI Jev System O
         try {
           const rerankDocs = scoredCandidates.slice(0, 5).map((c) => ({
             id: c.id,
-            text: `Table: ${c.tableName}. Metrics: ${c.metrics.join(", ")}. Dimensions: ${c.dimensions.join(", ")}`,
+            text: `Table: ${c.qualifiedTableName || c.tableName}. Metrics: ${c.metrics.join(", ")}. Dimensions: ${c.dimensions.join(", ")}`,
           }));
-          const reranked = await ragModelService.rerank(userQuery, rerankDocs);
+          const reranked = await ragModelService.rerank(userQuery, rerankDocs, {
+            signal: options?.signal,
+            localTimeoutMs: 1_500,
+            gatewayTimeoutMs: 2_500,
+          });
           if (reranked && reranked.length > 0) {
             skippedVectorRerank = false;
             const rankMap = new Map(reranked.map((r) => [r.id, r.score]));
@@ -1203,7 +1274,7 @@ Seluruh keputusan query diarahkan secara dinamis oleh **TypeSafe AI Jev System O
     const executionId = `exec-${randomUUID()}`;
     const budget = new QuestionDeadlineBudget({
       totalBudgetMs: Math.min(request.deadlineMs || 55_000, 60_000),
-      submittedAt: request.submittedAt ? (typeof request.submittedAt === "number" ? request.submittedAt : new Date(request.submittedAt).getTime()) : undefined,
+      submittedAt: coordinatorDeadlineSubmittedAt(request.submittedAt),
     });
 
     const record: QueryExecutionRecord = {
@@ -1389,7 +1460,10 @@ Seluruh keputusan query diarahkan secara dinamis oleh **TypeSafe AI Jev System O
           (table) => authorizedSourceIds.has(table.dataSourceId) && readySourceIds.has(table.dataSourceId),
         );
         totalRowCount = tableRows.reduce((acc, t) => acc + (t.rowCount || 0), 0);
-        referencedTables = tableRows.map((t) => t.tableName);
+        referencedTables = tableRows.map((t) => {
+          const sourceSchema = (t.semanticModel as any)?.sourceSchema;
+          return typeof sourceSchema === "string" ? `${sourceSchema}.${t.tableName}` : t.tableName;
+        });
         referencedColumns = tableRows.flatMap((t) => ((t.schemaDefinition as any[]) || []).map((c: any) => c.name || ""));
       } catch {
         // Safe fallback in test mocks
@@ -1415,7 +1489,10 @@ Seluruh keputusan query diarahkan secara dinamis oleh **TypeSafe AI Jev System O
         reasoning: "Schema retrieval not available",
       };
       try {
-        schemaRetrieval = await this.hybridRetrieveSchema(companyId, request.query, effectiveDataSourceIds, { limit: 5 });
+        schemaRetrieval = await this.hybridRetrieveSchema(companyId, request.query, effectiveDataSourceIds, {
+          limit: 5,
+          signal: budget.signal,
+        });
       } catch {
         // Physical references can still be validated without semantic retrieval.
       }
@@ -1512,7 +1589,10 @@ Seluruh keputusan query diarahkan secara dinamis oleh **TypeSafe AI Jev System O
       }
 
       totalRowCount = executionTableRows.reduce((total, table) => total + Number(table.rowCount || 0), 0);
-      referencedTables = executionTableRows.map((table) => table.tableName);
+      referencedTables = executionTableRows.map((table) => {
+        const sourceSchema = (table.semanticModel as any)?.sourceSchema;
+        return typeof sourceSchema === "string" ? `${sourceSchema}.${table.tableName}` : table.tableName;
+      });
       referencedColumns = executionTableRows.flatMap((table) => ((table.schemaDefinition as any[]) || []).map((column: any) => column.name || ""));
 
       const freshnessSensitive = /\b(latest|current|live|real[ -]?time|sekarang|terkini|hari ini|saat ini|terbaru)\b/i.test(request.query);
@@ -1736,12 +1816,24 @@ Seluruh keputusan query diarahkan secara dinamis oleh **TypeSafe AI Jev System O
         const executedSql = (result?.query && /^\s*(?:select|with)\b/i.test(result.query)) ? result.query : null;
         if (executedSql) {
           try {
-            const actualTables = Array.from(executedSql.matchAll(/\b(?:from|join)\s+([a-zA-Z0-9_."]+)/gi))
-              .map((m) => m[1].replace(/["`]/g, "").split(".").pop() || "")
+            const actualTables = Array.from(executedSql.matchAll(/\b(?:from|join)\s+([a-zA-Z0-9_."`]+)/gi))
+              .map((m) => m[1].replace(/["`]/g, ""))
               .filter(Boolean);
             const distinctTables = Array.from(new Set(actualTables));
+            const tableIdentity = (t: any) => {
+              const schemaName = (t.semanticModel as any)?.sourceSchema;
+              return typeof schemaName === "string" ? `${schemaName}.${t.tableName}` : t.tableName;
+            };
+            const distinctBareNames = new Set(distinctTables.map((name) => name.split(".").at(-1)?.toLowerCase()));
+            const tableNameCounts = new Map<string, number>();
+            for (const table of tableRows) {
+              const key = table.tableName.toLowerCase();
+              tableNameCounts.set(key, (tableNameCounts.get(key) || 0) + 1);
+            }
             const referencedSources = tableRows
-              .filter((t) => distinctTables.includes(t.tableName))
+              .filter((t) => distinctTables.some((name) => name.toLowerCase() === tableIdentity(t).toLowerCase())
+                || (tableNameCounts.get(t.tableName.toLowerCase()) === 1
+                  && distinctBareNames.has(t.tableName.toLowerCase())))
               .map((t) => t.dataSourceId);
 
             await this.experienceService.recordCandidateExperience({
