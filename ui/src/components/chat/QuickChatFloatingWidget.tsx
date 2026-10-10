@@ -41,6 +41,12 @@ interface QuickChatFloatingWidgetProps {
   className?: string;
 }
 
+const EMPTY_AGENTS: Agent[] = [];
+const EMPTY_RECENT_CHATS: Array<Issue & { lastCommentAt?: string }> = [];
+const EMPTY_RAW_COMMENTS: IssueComment[] = [];
+const DUMMY_COMMENTS_QUERY_KEY = ["quick-chat", "dummy-comments"] as const;
+const DUMMY_RUN_QUERY_KEY = ["quick-chat", "dummy-run"] as const;
+
 export function QuickChatFloatingWidget({ className }: QuickChatFloatingWidgetProps) {
   const { selectedCompanyId, selectedCompany } = useCompany();
   const { showWorkingActivityAndReasoning } = useGeneralSettings();
@@ -61,7 +67,7 @@ export function QuickChatFloatingWidget({ className }: QuickChatFloatingWidgetPr
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // 1. Fetch available agents in the company
-  const { data: agents = [] } = useQuery({
+  const { data: agents = EMPTY_AGENTS } = useQuery({
     queryKey: queryKeys.agents.list(selectedCompanyId ?? ""),
     queryFn: () => agentsApi.list(selectedCompanyId!),
     enabled: !!selectedCompanyId,
@@ -104,7 +110,7 @@ export function QuickChatFloatingWidget({ className }: QuickChatFloatingWidgetPr
         setSelectedAgentId(meetingAgent.id);
       }
     }
-  }, [isMeetingSection, agents]);
+  }, [isMeetingSection, agents, selectedAgentId]);
 
   // Listen to open-meeting-chat event
   useEffect(() => {
@@ -143,7 +149,7 @@ export function QuickChatFloatingWidget({ className }: QuickChatFloatingWidgetPr
     [selectedCompanyId, activeAgent?.id],
   );
 
-  const { data: recentChats = [] } = useQuery({
+  const { data: recentChats = EMPTY_RECENT_CHATS } = useQuery({
     queryKey: recentsQueryKey,
     queryFn: () => agentChatsApi.listRecents(selectedCompanyId!, activeAgent!.id),
     enabled: !!selectedCompanyId && !!activeAgent && isOpen,
@@ -155,8 +161,8 @@ export function QuickChatFloatingWidget({ className }: QuickChatFloatingWidgetPr
     [activeIssue?.id],
   );
 
-  const { data: rawComments = [], isLoading: isCommentsLoading } = useQuery({
-    queryKey: commentsQueryKey ?? ["dummy-comments"],
+  const { data: rawComments = EMPTY_RAW_COMMENTS, isLoading: isCommentsLoading } = useQuery({
+    queryKey: commentsQueryKey ?? DUMMY_COMMENTS_QUERY_KEY,
     queryFn: () => (activeIssue?.id ? issuesApi.listComments(activeIssue.id, { order: "asc" }) : Promise.resolve([])),
     enabled: !!activeIssue?.id && isOpen,
     refetchInterval: isOpen ? 2500 : false,
@@ -164,7 +170,7 @@ export function QuickChatFloatingWidget({ className }: QuickChatFloatingWidgetPr
 
   // 5. Active run check (to show thinking animation)
   const { data: activeRun } = useQuery({
-    queryKey: activeIssue?.id ? queryKeys.issues.activeRun(activeIssue.id) : ["dummy-run"],
+    queryKey: activeIssue?.id ? queryKeys.issues.activeRun(activeIssue.id) : DUMMY_RUN_QUERY_KEY,
     queryFn: () => heartbeatsApi.activeRunForIssue(activeIssue!.id),
     enabled: !!activeIssue?.id && isOpen,
     refetchInterval: isOpen ? 2000 : false,

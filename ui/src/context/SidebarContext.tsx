@@ -41,7 +41,6 @@ export function SidebarProvider({ children }: { children: ReactNode }) {
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth >= MOBILE_BREAKPOINT);
 
   const [routeRequestsCollapsed, setRouteRequestsCollapsed] = useState(false);
-  const [forceCollapsed, setForceCollapsed] = useState(false);
 
   useEffect(() => {
     const mql = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT - 1}px)`);
@@ -58,9 +57,11 @@ export function SidebarProvider({ children }: { children: ReactNode }) {
   const collapsed = false;
   const collapseLocked = false;
   const peeking = false;
+  const forceCollapsed = false;
   const setCollapsed = useCallback((_next: boolean) => {}, []);
   const toggleCollapsed = useCallback(() => {}, []);
   const setPeeking = useCallback((_next: boolean) => {}, []);
+  const setForceCollapsed = useCallback((_next: boolean) => {}, []);
 
   const toggleSidebar = useCallback(() => setSidebarOpen((v) => !v), []);
 

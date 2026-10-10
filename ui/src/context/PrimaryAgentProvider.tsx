@@ -1,4 +1,4 @@
-import { useRef, type ReactNode } from "react";
+import { useMemo, useRef, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { PrimaryAgentPreference } from "@paperclipai/shared";
 import { agentsApi } from "@/api/agents";
@@ -43,12 +43,27 @@ export function PrimaryAgentProvider({ children }: { children: ReactNode }) {
   });
   const primaryAgent = roster.data?.find(agent => agent.id === preference.data?.primaryAgentId && agent.status !== "terminated") ?? null;
   const error = preference.error ?? roster.error;
-  return <PrimaryAgentPresentationProvider value={companyId ? {
-    companyId, primaryAgentId: primaryAgent?.id ?? null, primaryAgent,
-    loading: preference.loading || roster.isPending,
-    error: error?.message,
-    onRetry: () => { void preference.retry(); void roster.refetch(); },
-    pendingAgentId: mutation.isPending && isCurrentScope(mutation.variables) ? mutation.variables.agentId : null,
-    onChange: agentId => mutation.mutate({ companyId, userId: preference.userId, agentId }),
-  } : null}>{children}</PrimaryAgentPresentationProvider>;
+  const value = useMemo(() => {
+    if (!companyId) return null;
+    return {
+      companyId,
+      primaryAgentId: primaryAgent?.id ?? null,
+      primaryAgent,
+      loading: preference.loading || roster.isPending,
+      error: error?.message,
+      onRetry: () => { void preference.retry(); void roster.refetch(); },
+      pendingAgentId: mutation.isPending && isCurrentScope(mutation.variables) ? mutation.variables.agentId : null,
+      onChange: (agentId: string) => mutation.mutate({ companyId, userId: preference.userId, agentId }),
+    };
+  }, [
+    companyId,
+    primaryAgent,
+    preference.loading,
+    preference.userId,
+    roster.isPending,
+    error?.message,
+    mutation.isPending,
+    mutation.variables,
+  ]);
+  return <PrimaryAgentPresentationProvider value={value}>{children}</PrimaryAgentPresentationProvider>;
 }

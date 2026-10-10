@@ -66,42 +66,33 @@ export function TaskChatReasoningTimeline({
   const isTest =
     typeof process !== "undefined" &&
     (process.env.NODE_ENV === "test" || process.env.VITEST === "true");
-  const effectiveDelay = isTest || isHistorical ? 0 : Math.max(0, delaySeconds);
+  const shouldDelay = !isTest && !isHistorical && delaySeconds > 0;
 
-  const [countdown, setCountdown] = useState(effectiveDelay);
-  const [isRevealed, setIsRevealed] = useState(effectiveDelay === 0);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [userRevealed, setUserRevealed] = useState(false);
+  const [countdown, setCountdown] = useState(() => (shouldDelay ? Math.max(0, delaySeconds) : 0));
+
+  const isRevealed = !shouldDelay || userRevealed || countdown <= 0;
 
   useEffect(() => {
-    if (isRevealed || effectiveDelay === 0) {
+    if (!shouldDelay || userRevealed || countdown <= 0) {
       return;
     }
 
-    setCountdown(effectiveDelay);
-    timerRef.current = setInterval(() => {
+    const timer = setInterval(() => {
       setCountdown((prev) => {
         if (prev <= 1) {
-          if (timerRef.current) clearInterval(timerRef.current);
-          setIsRevealed(true);
           return 0;
         }
         return prev - 1;
       });
     }, 1000);
 
-    return () => {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-      }
-    };
-  }, [effectiveDelay, isRevealed]);
+    return () => clearInterval(timer);
+  }, [shouldDelay, userRevealed, countdown <= 0]);
 
   const handleRevealNow = () => {
-    if (timerRef.current) {
-      clearInterval(timerRef.current);
-    }
+    setUserRevealed(true);
     setCountdown(0);
-    setIsRevealed(true);
   };
 
   const toggleStepExpand = (id: string) => {
@@ -218,7 +209,7 @@ export function TaskChatReasoningTimeline({
                       )}
                     </div>
                     {renderStepChild ? (
-                      <div className="sr-only" aria-hidden="true">
+                      <div>
                         {renderStepChild(idx, step)}
                       </div>
                     ) : null}
@@ -231,7 +222,7 @@ export function TaskChatReasoningTimeline({
       )}
 
       {/* Delay status banner: active while answer is being formulated (10-30s delay) */}
-      {!isRevealed && effectiveDelay > 0 && (
+      {!isRevealed && shouldDelay && (
         <div className="my-2.5 flex items-center justify-between rounded-lg border border-border/60 bg-muted/30 px-3.5 py-2 text-xs text-muted-foreground">
           <div className="flex items-center gap-2">
             <Loader2 className="size-3.5 animate-spin text-primary" />
