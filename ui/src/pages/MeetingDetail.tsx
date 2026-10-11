@@ -10,7 +10,6 @@ import {
   RotateCcw,
   Database,
   CheckCircle2,
-  Circle,
   Plus,
   Sparkles,
   Bot,
@@ -20,13 +19,9 @@ import {
   Clock,
   Trash2,
   Loader2,
-  FileText,
-  ListTodo,
-  ExternalLink,
   AlertCircle,
   MessageSquare,
   Layers,
-  TrendingUp,
   X,
   Copy,
   ChevronDown,
@@ -39,13 +34,17 @@ import {
   ListOrdered,
   Bold,
   Italic,
+  Edit2,
+  Eye,
+  PanelRightClose,
+  PanelRightOpen,
+  Volume2,
 } from "lucide-react";
 import { useCompany } from "@/context/CompanyContext";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -64,6 +63,7 @@ import {
 import { Label } from "@/components/ui/label";
 import { meetingsApi, type ExtractedTicket } from "@/api/meetings";
 import { agentsApi } from "@/api/agents";
+import { MarkdownEditor, type MarkdownEditorRef } from "@/components/MarkdownEditor";
 
 interface CopilotMessage {
   id: string;
@@ -96,10 +96,12 @@ export function MeetingDetail() {
   // Notes & Live Enhancing state
   const [notesContent, setNotesContent] = useState("");
   const [enhancedNotes, setEnhancedNotes] = useState("");
+  const [notesViewMode, setNotesViewMode] = useState<"edit" | "preview">("edit");
   const [isNotesSaving, setIsNotesSaving] = useState(false);
   const [isEnhancing, setIsEnhancing] = useState(false);
   const [liveEnhanceEnabled, setLiveEnhanceEnabled] = useState(true);
   const [selectedStyle, setSelectedStyle] = useState("Standard Executive");
+  const [isEnhancedPanelOpen, setIsEnhancedPanelOpen] = useState(true);
   const [isEnhancedCollapsed, setIsEnhancedCollapsed] = useState(false);
   const [copiedEnhanced, setCopiedEnhanced] = useState(false);
 
@@ -146,7 +148,7 @@ export function MeetingDetail() {
 
   // References
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const notesTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const editorRef = useRef<MarkdownEditorRef | null>(null);
   const transcriptContainerRef = useRef<HTMLDivElement | null>(null);
   const activeSegmentRef = useRef<HTMLDivElement | null>(null);
   const saveTimeoutRef = useRef<any>(null);
@@ -379,20 +381,13 @@ export function MeetingDetail() {
     }
   };
 
-  // Formatting helpers for Toolbar
-  const handleInsertMarkdown = (prefix: string, suffix: string = "") => {
-    const textarea = notesTextareaRef.current;
-    if (!textarea) return;
-    const start = textarea.selectionStart;
-    const end = textarea.selectionEnd;
-    const selectedText = notesContent.substring(start, end);
-    const replacement = `${prefix}${selectedText || "teks"}${suffix}`;
-    const nextContent = notesContent.substring(0, start) + replacement + notesContent.substring(end);
-    handleNotesChange(nextContent);
-    setTimeout(() => {
-      textarea.focus();
-      textarea.setSelectionRange(start + prefix.length, start + prefix.length + (selectedText.length || 4));
-    }, 50);
+  // Toolbar Action Helpers
+  const handleInsertMarkdownBlock = (prefix: string, suffix: string = "") => {
+    if (editorRef.current) {
+      editorRef.current.insertMarkdown(`${prefix}teks${suffix}`);
+    } else {
+      handleNotesChange(`${notesContent}\n${prefix}teks${suffix}`);
+    }
   };
 
   // Copy helpers
@@ -593,24 +588,24 @@ export function MeetingDetail() {
 
   return (
     <div className="flex flex-col gap-4 p-4 sm:p-6 max-w-7xl mx-auto w-full min-h-screen">
-      {/* 1. Header Bar matching Gambar 2 */}
+      {/* 1. Header Bar matching Gambar 2 (Professional & Clean) */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-border/60 pb-3">
         <div className="flex items-center gap-3 flex-wrap">
           <Button
             variant="ghost"
             size="icon"
             onClick={() => navigate("/meetings")}
-            className="h-9 w-9 rounded-full bg-muted/50 hover:bg-muted shrink-0"
+            className="h-9 w-9 rounded-full bg-muted/40 hover:bg-muted shrink-0 text-muted-foreground hover:text-foreground"
             title="Kembali ke Daftar Meeting"
           >
             <ArrowLeft className="h-4 w-4" />
           </Button>
 
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-muted/60 text-muted-foreground shrink-0">
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-muted/60 text-muted-foreground shrink-0 border border-border/40">
             <Calendar className="h-4 w-4" />
           </div>
 
-          <div className="flex flex-col sm:flex-row sm:items-center gap-1.5 sm:gap-3">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2">
             {isEditingTitle ? (
               <div className="flex items-center gap-2">
                 <Input
@@ -620,29 +615,39 @@ export function MeetingDetail() {
                   className="h-8 text-base font-semibold max-w-sm"
                   autoFocus
                 />
-                <Button size="sm" variant="ghost" onClick={handleUpdateTitle} className="h-8 text-xs">
+                <Button size="sm" variant="secondary" onClick={handleUpdateTitle} className="h-8 text-xs px-3">
                   Simpan
                 </Button>
               </div>
             ) : (
-              <h1
+              <div
                 onClick={() => setIsEditingTitle(true)}
-                className="text-lg font-bold tracking-tight cursor-pointer hover:underline text-foreground"
+                className="group flex items-center gap-2 cursor-pointer"
                 title="Klik untuk mengubah judul rapat"
               >
-                {meeting.title ? `[${meeting.title}]` : "[New Meeting]"}
-              </h1>
+                <h1 className="text-lg font-bold tracking-tight text-foreground group-hover:text-primary transition-colors">
+                  {meeting.title || "Untitled Meeting"}
+                </h1>
+                <Edit2 className="h-3.5 w-3.5 opacity-0 group-hover:opacity-70 text-muted-foreground transition-opacity" />
+              </div>
             )}
 
-            <div className="inline-flex items-center gap-2 rounded-lg bg-muted/50 px-2.5 py-1 text-xs text-muted-foreground font-medium">
+            <div className="inline-flex items-center gap-2 rounded-lg bg-muted/40 border border-border/40 px-2.5 py-1 text-xs text-muted-foreground font-medium">
               <span>{formattedDateTime.date}</span>
               <span className="text-muted-foreground/40">•</span>
               <span>{formattedDateTime.timeRange}</span>
             </div>
 
-            <Badge variant="outline" className="capitalize text-xs font-normal">
-              {meeting.status}
-            </Badge>
+            {meeting.status === "recording" ? (
+              <Badge variant="outline" className="text-xs font-medium border-rose-500/30 bg-rose-500/10 text-rose-500 flex items-center gap-1.5">
+                <span className="h-1.5 w-1.5 rounded-full bg-rose-500 animate-pulse" />
+                Merekam Live
+              </Badge>
+            ) : (
+              <Badge variant="outline" className="capitalize text-xs font-normal bg-muted/30 border-border/50">
+                {meeting.status}
+              </Badge>
+            )}
           </div>
         </div>
 
@@ -653,7 +658,7 @@ export function MeetingDetail() {
             size="sm"
             onClick={handleSyncDatasource}
             disabled={isSyncingDatasource}
-            className="gap-2 text-xs h-8"
+            className="gap-2 text-xs h-8 bg-card hover:bg-muted/50 border-border/70"
           >
             {isSyncingDatasource ? (
               <>
@@ -678,7 +683,7 @@ export function MeetingDetail() {
             variant="default"
             size="sm"
             onClick={handleOpenExtractModal}
-            className="gap-2 text-xs h-8 bg-primary text-primary-foreground font-medium shadow-xs"
+            className="gap-2 text-xs h-8 bg-primary text-primary-foreground font-medium shadow-xs hover:bg-primary/90"
           >
             <Sparkles className="h-3.5 w-3.5" />
             Ekstrak Tiket
@@ -687,7 +692,7 @@ export function MeetingDetail() {
           <Button
             variant="ghost"
             size="icon"
-            className="h-8 w-8 text-muted-foreground hover:text-destructive"
+            className="h-8 w-8 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
             onClick={() => {
               if (confirm("Hapus meeting ini secara permanen?")) {
                 meetingsApi.delete(selectedCompanyId!, id!).then(() => navigate("/meetings"));
@@ -702,12 +707,12 @@ export function MeetingDetail() {
 
       {/* Ticket Creation Banner Feedback */}
       {ticketCreationNotice && (
-        <div className="rounded-lg border border-emerald-500/50 bg-emerald-500/10 p-3 text-xs sm:text-sm text-emerald-700 dark:text-emerald-400 flex items-center justify-between animate-in fade-in">
+        <div className="rounded-xl border border-emerald-500/50 bg-emerald-500/10 p-3 text-xs sm:text-sm text-emerald-700 dark:text-emerald-400 flex items-center justify-between animate-in fade-in">
           <span className="flex items-center gap-2 font-medium">
             <CheckCircle2 className="h-4 w-4" />
             {ticketCreationNotice}
           </span>
-          <Link to="/issues" className="underline font-semibold text-xs ml-2">
+          <Link to="/issues" className="underline font-semibold text-xs ml-2 hover:text-emerald-800 dark:hover:text-emerald-300">
             Lihat Tiket di Board
           </Link>
         </div>
@@ -715,18 +720,19 @@ export function MeetingDetail() {
 
       {/* 2. Main Two-Column Layout matching Gambar 2 & Gambar 3 */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start flex-1">
-        {/* Left Card: Notes & Live Enhanced Notes (Gambar 2) */}
+        {/* Left Column: Notes & Live Enhanced Notes (Gambar 2) */}
         <div className={`${isRightPaneOpen ? "lg:col-span-7" : "lg:col-span-12"} flex flex-col transition-all duration-200`}>
-          <div className="rounded-2xl border border-border bg-card shadow-xs flex flex-col overflow-hidden">
-            {/* Toolbar Row */}
-            <div className="flex items-center justify-between border-b border-border/60 px-3 py-2 bg-card/60 flex-wrap gap-2">
-              <div className="flex items-center gap-0.5">
+          <div className="rounded-2xl border border-border/80 bg-card shadow-xs flex flex-col overflow-hidden">
+            {/* Toolbar Row matching Gambar 2 */}
+            <div className="flex items-center justify-between border-b border-border/60 px-3 py-2 bg-card/70 flex-wrap gap-2">
+              <div className="flex items-center gap-1">
+                {/* Format buttons */}
                 <Button
                   variant="ghost"
                   size="icon"
                   className="h-7 w-7 rounded-md font-bold text-xs"
-                  onClick={() => handleInsertMarkdown("**", "**")}
-                  title="Bold (Ctrl+B)"
+                  onClick={() => handleInsertMarkdownBlock("**", "**")}
+                  title="Tebalkan Teks (Bold)"
                 >
                   <Bold className="h-3.5 w-3.5" />
                 </Button>
@@ -734,8 +740,8 @@ export function MeetingDetail() {
                   variant="ghost"
                   size="icon"
                   className="h-7 w-7 rounded-md italic text-xs"
-                  onClick={() => handleInsertMarkdown("*", "*")}
-                  title="Italic (Ctrl+I)"
+                  onClick={() => handleInsertMarkdownBlock("*", "*")}
+                  title="Miringkan Teks (Italic)"
                 >
                   <Italic className="h-3.5 w-3.5" />
                 </Button>
@@ -743,8 +749,8 @@ export function MeetingDetail() {
                   variant="ghost"
                   size="icon"
                   className="h-7 w-7 rounded-md"
-                  onClick={() => handleInsertMarkdown("\n• ", "")}
-                  title="Bullet List"
+                  onClick={() => handleInsertMarkdownBlock("- ")}
+                  title="Daftar Poin (Bullet List)"
                 >
                   <List className="h-3.5 w-3.5" />
                 </Button>
@@ -752,8 +758,8 @@ export function MeetingDetail() {
                   variant="ghost"
                   size="icon"
                   className="h-7 w-7 rounded-md"
-                  onClick={() => handleInsertMarkdown("\n1. ", "")}
-                  title="Numbered List"
+                  onClick={() => handleInsertMarkdownBlock("1. ")}
+                  title="Daftar Nomor (Numbered List)"
                 >
                   <ListOrdered className="h-3.5 w-3.5" />
                 </Button>
@@ -761,14 +767,36 @@ export function MeetingDetail() {
                   variant="ghost"
                   size="icon"
                   className="h-7 w-7 rounded-md font-semibold text-xs"
-                  onClick={() => handleInsertMarkdown("\n# ", "")}
-                  title="Heading"
+                  onClick={() => handleInsertMarkdownBlock("## ")}
+                  title="Judul Bab (Heading)"
                 >
                   T
                 </Button>
+
+                {/* View Mode Toggle: Edit vs Preview */}
+                <div className="flex items-center ml-2 border-l border-border/60 pl-2 gap-0.5">
+                  <Button
+                    size="sm"
+                    variant={notesViewMode === "edit" ? "secondary" : "ghost"}
+                    onClick={() => setNotesViewMode("edit")}
+                    className="h-6 text-xs px-2 rounded-md font-medium"
+                  >
+                    Tulis
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant={notesViewMode === "preview" ? "secondary" : "ghost"}
+                    onClick={() => setNotesViewMode("preview")}
+                    className="h-6 text-xs px-2 rounded-md font-medium gap-1"
+                  >
+                    <Eye className="h-3 w-3" />
+                    Pratinjau
+                  </Button>
+                </div>
               </div>
 
               <div className="flex items-center gap-2">
+                {/* Style Dropdown matching Gambar 2 */}
                 <Select
                   value={selectedStyle}
                   onValueChange={(val) => {
@@ -788,7 +816,7 @@ export function MeetingDetail() {
                   </SelectContent>
                 </Select>
 
-                {/* Live Enhance ON / OFF Toggle */}
+                {/* Live Enhance ON / OFF Toggle matching Gambar 2 */}
                 <Button
                   size="sm"
                   variant={liveEnhanceEnabled ? "secondary" : "outline"}
@@ -802,117 +830,158 @@ export function MeetingDetail() {
                   <Sparkles className="h-3 w-3" />
                   {liveEnhanceEnabled ? "Live Enhance ON" : "Live Enhance OFF"}
                 </Button>
+
+                {/* Toggle Enhanced Notes Panel */}
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 text-muted-foreground hover:text-foreground rounded-md"
+                  onClick={() => setIsEnhancedPanelOpen(!isEnhancedPanelOpen)}
+                  title={isEnhancedPanelOpen ? "Tutup panel enhanced notes" : "Buka panel enhanced notes"}
+                >
+                  {isEnhancedPanelOpen ? <PanelRightClose className="h-3.5 w-3.5" /> : <PanelRightOpen className="h-3.5 w-3.5" />}
+                </Button>
               </div>
             </div>
 
-            {/* Split Content: Notes (Left) & Live Enhanced Notes (Right) */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 min-h-128 items-stretch">
-              {/* Left Column: Raw Notes Editor */}
-              <div className="flex flex-col justify-between">
-                <Textarea
-                  ref={notesTextareaRef}
-                  value={notesContent}
-                  onChange={(e) => handleNotesChange(e.target.value)}
-                  placeholder={`Enter your notes here. Markdown formatting is supported.\n\nMarkdown guide:\n• # Heading\n• **bold**\n• *italics*\n• - Bullet list\n• 1. Numbered list`}
-                  className="w-full h-full min-h-112 resize-none border-0 shadow-none focus-visible:ring-0 p-2 text-sm leading-relaxed font-sans placeholder:text-muted-foreground/60"
-                />
+            {/* Split Content: Notes (Rich Markdown) & Live Enhanced Notes */}
+            <div className={`p-4 gap-4 min-h-128 items-stretch ${isEnhancedPanelOpen ? "grid grid-cols-1 md:grid-cols-12" : "flex flex-col"}`}>
+              {/* Column 1: Live Rich Markdown Editor (WYSIWYG format langsung) */}
+              <div className={`flex flex-col justify-between ${isEnhancedPanelOpen ? "md:col-span-7" : "w-full"}`}>
+                {notesViewMode === "edit" ? (
+                  <div className="flex-1 min-h-112 border border-border/40 rounded-xl p-3 bg-background/50 focus-within:border-primary/50 transition-colors">
+                    <MarkdownEditor
+                      ref={editorRef}
+                      value={notesContent}
+                      onChange={handleNotesChange}
+                      placeholder="Tulis notulen rapat di sini. Format teks (heading, tebal, daftar poin/nomor) langsung dirender otomatis..."
+                      bordered={false}
+                      className="bg-transparent h-full"
+                      contentClassName="min-h-96 text-sm leading-relaxed"
+                    />
+                  </div>
+                ) : (
+                  <div className="flex-1 min-h-112 border border-border/40 rounded-xl p-4 bg-background/50 overflow-y-auto max-h-128 prose prose-sm dark:prose-invert text-sm leading-relaxed">
+                    {notesContent.trim() ? (
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {notesContent}
+                      </ReactMarkdown>
+                    ) : (
+                      <p className="text-muted-foreground text-xs italic">Belum ada catatan yang ditulis.</p>
+                    )}
+                  </div>
+                )}
 
-                <div className="pt-2 flex items-center justify-between text-xs text-muted-foreground/70 border-t border-border/40">
-                  <span>{isNotesSaving ? "Menyimpan notulen..." : "Tersimpan otomatis"}</span>
+                <div className="pt-2 flex items-center justify-between text-xs text-muted-foreground/70">
+                  <span className="flex items-center gap-1.5">
+                    {isNotesSaving ? (
+                      <>
+                        <Loader2 className="h-3 w-3 animate-spin text-primary" />
+                        Menyimpan notulen...
+                      </>
+                    ) : (
+                      <>
+                        <Check className="h-3 w-3 text-emerald-500" />
+                        Tersimpan otomatis
+                      </>
+                    )}
+                  </span>
                   <span>{notesContent.length} karakter</span>
                 </div>
               </div>
 
-              {/* Right Column: Live Enhanced Notes Card */}
-              <div className="rounded-xl bg-muted/30 border border-border/50 p-4 flex flex-col justify-between min-h-112">
-                <div className="flex items-center justify-between border-b border-border/40 pb-2.5 mb-3">
-                  <div className="flex items-center gap-1.5 font-medium text-xs text-foreground">
-                    <Sparkles className="h-3.5 w-3.5 text-primary" />
-                    <span>Live enhanced notes</span>
+              {/* Column 2: Live Enhanced Notes Card matching Gambar 2 */}
+              {isEnhancedPanelOpen && (
+                <div className="md:col-span-5 rounded-xl bg-muted/20 border border-border/60 p-4 flex flex-col justify-between min-h-112 shadow-2xs">
+                  <div className="flex items-center justify-between border-b border-border/40 pb-2.5 mb-3">
+                    <div className="flex items-center gap-1.5 font-medium text-xs text-foreground">
+                      <Sparkles className="h-3.5 w-3.5 text-primary" />
+                      <span>Live enhanced notes</span>
+                    </div>
+
+                    <div className="flex items-center gap-1">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6 text-muted-foreground hover:text-foreground rounded-md"
+                        onClick={() => triggerEnhance(notesContent, selectedStyle)}
+                        disabled={isEnhancing || !notesContent.trim()}
+                        title="Perbarui ringkasan sekarang"
+                      >
+                        <RefreshCw className={`h-3 w-3 ${isEnhancing ? "animate-spin" : ""}`} />
+                      </Button>
+
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6 text-muted-foreground hover:text-foreground rounded-md"
+                        onClick={handleCopyEnhanced}
+                        disabled={!enhancedNotes}
+                        title="Salin hasil enhanced notes"
+                      >
+                        {copiedEnhanced ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
+                      </Button>
+
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6 text-muted-foreground hover:text-foreground rounded-md"
+                        onClick={() => setIsEnhancedCollapsed(!isEnhancedCollapsed)}
+                      >
+                        {isEnhancedCollapsed ? <ChevronDown className="h-3 w-3" /> : <ChevronUp className="h-3 w-3" />}
+                      </Button>
+                    </div>
                   </div>
 
-                  <div className="flex items-center gap-1">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-6 w-6 text-muted-foreground hover:text-foreground"
-                      onClick={() => triggerEnhance(notesContent, selectedStyle)}
-                      disabled={isEnhancing || !notesContent.trim()}
-                      title="Perbarui Enhancement"
-                    >
-                      <RefreshCw className={`h-3 w-3 ${isEnhancing ? "animate-spin" : ""}`} />
-                    </Button>
-
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-6 w-6 text-muted-foreground hover:text-foreground"
-                      onClick={handleCopyEnhanced}
-                      disabled={!enhancedNotes}
-                      title="Salin hasil enhanced notes"
-                    >
-                      {copiedEnhanced ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
-                    </Button>
-
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-6 w-6 text-muted-foreground hover:text-foreground"
-                      onClick={() => setIsEnhancedCollapsed(!isEnhancedCollapsed)}
-                    >
-                      {isEnhancedCollapsed ? <ChevronDown className="h-3 w-3" /> : <ChevronUp className="h-3 w-3" />}
-                    </Button>
-                  </div>
-                </div>
-
-                {/* Enhanced Content or Empty State matching Gambar 2 */}
-                {!isEnhancedCollapsed && (
-                  <div className="flex-1 flex flex-col overflow-y-auto max-h-112">
-                    {isEnhancing ? (
-                      <div className="flex-1 flex flex-col items-center justify-center gap-2.5 py-12 text-center text-muted-foreground">
-                        <Loader2 className="h-6 w-6 animate-spin text-primary" />
-                        <p className="text-xs">Merangkum catatan ke format eksekutif...</p>
-                      </div>
-                    ) : !enhancedNotes ? (
-                      <div className="flex-1 flex flex-col items-center justify-center gap-3 py-16 text-center text-muted-foreground/70">
-                        <div className="p-3 rounded-full bg-muted/60 text-muted-foreground/60">
-                          <Sparkles className="h-6 w-6" />
+                  {/* Enhanced Content or Empty State matching Gambar 2 */}
+                  {!isEnhancedCollapsed && (
+                    <div className="flex-1 flex flex-col overflow-y-auto max-h-112">
+                      {isEnhancing ? (
+                        <div className="flex-1 flex flex-col items-center justify-center gap-2.5 py-16 text-center text-muted-foreground">
+                          <Loader2 className="h-6 w-6 animate-spin text-primary" />
+                          <p className="text-xs font-medium">Merangkum catatan ke format eksekutif...</p>
                         </div>
-                        <p className="text-xs max-w-xs leading-relaxed text-muted-foreground">
-                          Live enhanced notes will appear here as shorthand notes are written.
-                        </p>
-                        {notesContent.trim().length > 0 && (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => triggerEnhance(notesContent, selectedStyle)}
-                            className="text-xs h-7 gap-1.5 mt-2"
-                          >
-                            <Sparkles className="h-3 w-3" />
-                            Enhance Notes Sekarang
-                          </Button>
-                        )}
-                      </div>
-                    ) : (
-                      <div className="flex-1 pr-1 text-xs leading-relaxed text-foreground/90 space-y-2">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                          {enhancedNotes}
-                        </ReactMarkdown>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
+                      ) : !enhancedNotes ? (
+                        <div className="flex-1 flex flex-col items-center justify-center gap-3 py-16 text-center text-muted-foreground/70">
+                          <div className="p-3 rounded-full bg-muted/60 text-muted-foreground/60">
+                            <Sparkles className="h-6 w-6" />
+                          </div>
+                          <p className="text-xs max-w-xs leading-relaxed text-muted-foreground">
+                            Live enhanced notes will appear here as shorthand notes are written.
+                          </p>
+                          {notesContent.trim().length > 0 && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => triggerEnhance(notesContent, selectedStyle)}
+                              className="text-xs h-7 gap-1.5 mt-2 bg-card hover:bg-muted"
+                            >
+                              <Sparkles className="h-3 w-3" />
+                              Enhance Notes Sekarang
+                            </Button>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="flex-1 pr-1 text-xs leading-relaxed text-foreground/90 space-y-2 prose prose-sm dark:prose-invert">
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                            {enhancedNotes}
+                          </ReactMarkdown>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         </div>
 
-        {/* Right Card: Multi-Tab Assistant Pane (Gambar 2 & Gambar 3) */}
+        {/* Right Column: Multi-Tab Assistant & Transcript Pane (Gambar 2 & Gambar 3) */}
         {isRightPaneOpen && (
           <div className="lg:col-span-5 flex flex-col transition-all duration-200">
-            <div className="rounded-2xl border border-border bg-card shadow-xs flex flex-col overflow-hidden min-h-128">
+            <div className="rounded-2xl border border-border/80 bg-card shadow-xs flex flex-col overflow-hidden min-h-128">
               {/* Tab Bar matching Gambar 2 & Gambar 3 */}
-              <div className="flex items-center justify-between border-b border-border/60 px-3 py-2 bg-card/60">
+              <div className="flex items-center justify-between border-b border-border/60 px-3 py-2 bg-card/70">
                 <div className="flex items-center gap-1">
                   {(["chat", "qa", "summary", "transcript"] as const).map((tab) => (
                     <button
@@ -1051,16 +1120,16 @@ export function MeetingDetail() {
                   <div className="flex flex-col gap-3">
                     <div className="p-3 rounded-xl border border-border/50 bg-muted/20 flex flex-col gap-1.5 text-xs">
                       <p className="font-semibold text-foreground">
-                        Q: Bagaimana jadwal rilis dan arsitektur integrasi terbaru?
+                        Q: Bagaimana arsitektur dan timeline implementasi yang disepakati?
                       </p>
                       <p className="text-muted-foreground leading-relaxed">
-                        A: Dibahas bahwa sinkronisasi service mengadopsi kontrol terisolasi tenant dan data otomatis diindeks ke knowledge base.
+                        A: Seluruh perubahan modul diintegrasikan bertahap dengan pengujian kontrak, dan notulen rapat otomatis disinkronkan ke basis pengetahuan.
                       </p>
                     </div>
 
                     <div className="p-3 rounded-xl border border-border/50 bg-muted/20 flex flex-col gap-1.5 text-xs">
                       <p className="font-semibold text-foreground">
-                        Q: Siapa yang bertanggung jawab untuk eksekusi action items?
+                        Q: Bagaimana pembagian penugasan tugas antar agen?
                       </p>
                       <p className="text-muted-foreground leading-relaxed">
                         A: Agen spesialis dari roster perusahaan akan dipilih secara otomatis menggunakan rekomendasi AI saat tombol Ekstrak Tiket ditekan.
@@ -1092,7 +1161,7 @@ export function MeetingDetail() {
                     </span>
                     <div className="flex flex-wrap gap-1.5">
                       {analyticalData.topics.map((t, idx) => (
-                        <Badge key={idx} variant="outline" className="text-xs bg-card">
+                        <Badge key={idx} variant="outline" className="text-xs bg-card border-border/60">
                           {t}
                         </Badge>
                       ))}
@@ -1107,7 +1176,7 @@ export function MeetingDetail() {
                     </span>
                     <div className="flex flex-col gap-1.5">
                       {analyticalData.insights.map((ins, idx) => (
-                        <div key={idx} className="p-2 rounded-lg bg-card border border-border/40 text-xs">
+                        <div key={idx} className="p-2.5 rounded-lg bg-card border border-border/40 text-xs">
                           {ins}
                         </div>
                       ))}
@@ -1180,7 +1249,7 @@ export function MeetingDetail() {
                   {/* Segments Stream with Font Size scale */}
                   <div
                     ref={transcriptContainerRef}
-                    className="flex-1 p-3 overflow-y-auto max-h-96 flex flex-col gap-2.5"
+                    className="flex-1 p-3 overflow-y-auto max-h-96 flex flex-col gap-2"
                   >
                     {filteredSegments.length === 0 ? (
                       <div className="py-16 text-center text-xs text-muted-foreground">
@@ -1203,7 +1272,8 @@ export function MeetingDetail() {
                             }`}
                           >
                             <div className="flex items-center justify-between gap-2 mb-1">
-                              <span className="text-xs font-semibold text-primary/80">
+                              <span className="text-xs font-semibold text-primary/80 flex items-center gap-1.5">
+                                {isActive && <Volume2 className="h-3 w-3 text-primary animate-pulse" />}
                                 {seg.speaker}
                               </span>
                               <span className="text-xs font-mono text-muted-foreground">
@@ -1240,8 +1310,8 @@ export function MeetingDetail() {
         </button>
       )}
 
-      {/* 3. Bottom Sticky Audio Player Bar */}
-      <div className="sticky bottom-0 z-20 rounded-2xl border border-border bg-card/95 backdrop-blur-md p-3 shadow-lg flex flex-col gap-2">
+      {/* 3. Bottom Sticky Audio Player Bar (Glassmorphism & Integrated) */}
+      <div className="sticky bottom-3 z-20 rounded-2xl border border-border/80 bg-card/90 backdrop-blur-md p-3 shadow-lg flex flex-col gap-2">
         <audio
           ref={audioRef}
           src={audioUrl}
@@ -1276,7 +1346,7 @@ export function MeetingDetail() {
               size="icon"
               variant="default"
               onClick={handlePlayPause}
-              className="h-8 w-8 rounded-full bg-primary text-primary-foreground shrink-0"
+              className="h-8 w-8 rounded-full bg-primary text-primary-foreground shrink-0 shadow-xs"
             >
               {isPlaying ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5 ml-0.5" />}
             </Button>
@@ -1285,7 +1355,7 @@ export function MeetingDetail() {
               size="icon"
               variant="ghost"
               onClick={() => seekTo(Math.max(0, currentTime - 10))}
-              className="h-7 w-7 text-muted-foreground"
+              className="h-7 w-7 text-muted-foreground hover:text-foreground"
               title="Mundur 10 detik"
             >
               <RotateCcw className="h-3 w-3" />
@@ -1316,7 +1386,7 @@ export function MeetingDetail() {
               variant="outline"
               size="sm"
               onClick={() => handleOpenSingleTaskModal(`Tindak lanjut: ${meeting.title}`)}
-              className="h-7 text-xs gap-1.5"
+              className="h-7 text-xs gap-1.5 bg-card hover:bg-muted"
             >
               <Plus className="h-3 w-3" />
               Buat Task
@@ -1373,7 +1443,7 @@ export function MeetingDetail() {
                         prev.map((t) => ({ ...t, selected: !allSelected }))
                       );
                     }}
-                    className="underline hover:text-foreground"
+                    className="underline hover:text-foreground cursor-pointer"
                   >
                     {extractedTickets.every((t) => t.selected) ? "Batal Pilih Semua" : "Pilih Semua"}
                   </button>
