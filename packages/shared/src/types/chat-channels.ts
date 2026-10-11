@@ -7,6 +7,7 @@ export const CHAT_PROVIDERS = [
   "telegram",
   "agentmail",
   "imessage-photon",
+  "whatsapp",
 ] as const;
 export type ChatProvider = (typeof CHAT_PROVIDERS)[number];
 
@@ -200,6 +201,13 @@ export interface ChatEndpointSetupState {
     installationUrl?: string;
     managementUrl?: string;
     registrationStatus?: "pending" | "completed" | "failed";
+  };
+  whatsapp?: {
+    status?: "idle" | "qr_ready" | "connecting" | "connected" | "failed";
+    qrCodeDataUrl?: string | null;
+    phoneNumber?: string | null;
+    pushName?: string | null;
+    lastError?: string | null;
   };
   step: "choose_agent" | "provider_setup" | "test" | "complete";
   /** Server-generated boundary; only provider events at or after this time can complete setup. */

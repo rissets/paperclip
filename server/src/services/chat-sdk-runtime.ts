@@ -4,6 +4,8 @@ import { PhotonState } from "./photon/state.js";
 import { PhotonReceiver } from "./photon/receiver.js";
 import { photonAttachmentLocator, photonAttachmentLocatorSchema, downloadPhotonAttachment, type PhotonAttachmentLocator } from "./photon/attachments.js";
 import type { LiveEvent as PhotonEvent } from "@photon-ai/advanced-imessage";
+import { WhatsAppChatAdapter } from "./whatsapp/adapter.js";
+import { whatsAppConnectionManager } from "./whatsapp/manager.js";
 import {
   createGitHubAdapter,
   type GitHubAdapter,
@@ -136,8 +138,8 @@ const DISCORD_GATEWAY_HEALTHY_SESSION_MS = 60_000;
 
 /** Public Paperclip provider ids. The Teams SDK name remains an internal detail. */
 export type ChatSdkProvider =
-  "slack" | "github" | "discord" | "microsoft-teams" | "telegram" | "imessage-photon";
-type ChatSdkAdapterKey = "slack" | "github" | "discord" | "teams" | "telegram" | "imessage-photon";
+  "slack" | "github" | "discord" | "microsoft-teams" | "telegram" | "imessage-photon" | "whatsapp";
+type ChatSdkAdapterKey = "slack" | "github" | "discord" | "teams" | "telegram" | "imessage-photon" | "whatsapp";
 
 interface ProviderConfigBase {
   /** Agent-derived native bot display/mention name. */
@@ -211,8 +213,13 @@ export interface ResolvedPhotonChatConfig extends ProviderConfigBase {
   intakeAfter: number;
   credentials: { allocation?: "dedicated" | "shared"; projectId: string; projectSecret: string; lineId: string; phoneNumber: string };
 }
+export interface ResolvedWhatsAppChatConfig extends ProviderConfigBase {
+  provider: "whatsapp";
+  credentials: { phoneNumber: string };
+}
 export type ResolvedChatSdkProviderConfig =
   | ResolvedPhotonChatConfig
+  | ResolvedWhatsAppChatConfig
   | ResolvedSlackChatConfig
   | ResolvedGitHubChatConfig
   | ResolvedDiscordChatConfig
@@ -1357,6 +1364,7 @@ function createProviderAdapter(
   const resolvedLogger = adapterLogger(logger);
   switch (config.provider) {
     case "imessage-photon": throw new Error("Photon adapter requires scoped persistence");
+    case "whatsapp": throw new Error("WhatsApp adapter uses direct Baileys connection");
     case "slack": {
       const adapterConfig: SlackAdapterConfig = {
         ...config.credentials,
@@ -2101,6 +2109,12 @@ export class ChatSdkEndpointRuntime {
       ? new PhotonChatAdapter(options.providerConfig.userName,
           new PhotonLineAuthentication(options.providerConfig.credentials, options.providerConfig.credentials.projectSecret),
           new PhotonState({ companyId: options.companyId, endpointId: options.endpointId }, options.persistence))
+      : options.providerConfig.provider === "whatsapp"
+      ? whatsAppConnectionManager.getAdapter(
+          options.endpointId,
+          options.providerConfig.credentials.phoneNumber,
+          options.providerConfig.userName,
+        )
       : createProviderAdapter(
       options.providerConfig,
       options.logger,
@@ -2295,6 +2309,15 @@ export class ChatSdkEndpointRuntime {
     }
     if (this.provider === "discord" && this.discordGatewayEnabled) {
       this.startDiscordGateway();
+    }
+    if (this.provider === "whatsapp") {
+      whatsAppConnectionManager.registerMessageHandler(this.endpointId, async (msg) => {
+        this.assertNotRetired();
+        const remoteJid = msg.key.remoteJid ?? "";
+        const threadId = `whatsapp:${remoteJid}`;
+        const parsed = (this.adapter as WhatsAppChatAdapter).parseMessage(msg);
+        await this.chat.processMessage(this.adapter, threadId, parsed);
+      });
     }
   }
 
@@ -3139,6 +3162,9 @@ export class ChatSdkEndpointRuntime {
       await this.discordGatewayTask?.catch(() => undefined);
       this.discordGatewayAbort = null;
       await this.photonReceiver?.close();
+      if (this.provider === "whatsapp") {
+        whatsAppConnectionManager.unregisterMessageHandler(this.endpointId);
+      }
       await this.chat.shutdown();
       this.shutdownCompleted = true;
     })();

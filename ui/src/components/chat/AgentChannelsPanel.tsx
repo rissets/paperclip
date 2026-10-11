@@ -15,6 +15,7 @@ const providerNames: Record<ChatProvider, string> = {
   telegram: "Telegram",
   "imessage-photon": "iMessage Photon",
   agentmail: "AgentMail",
+  whatsapp: "WhatsApp",
 };
 
 export function AgentChannelsPanel({

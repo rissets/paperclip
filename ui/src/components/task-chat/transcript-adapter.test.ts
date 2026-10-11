@@ -12,6 +12,7 @@ import {
   deriveRunStatusLabel,
   embedPlanDocumentAtWriteBoundary,
   flattenSelfTalk,
+  isCommandOutputOrRawData,
   isNestableLiveChild,
   ISSUE_BRIEF_ITEM_ID,
   omitProgressRepeatedByResponseAcrossSegments,
@@ -2836,3 +2837,105 @@ describe("prependIssueBrief (PAP-375)", () => {
     expect(prependIssueBrief(items, false)).toBe(items);
   });
 });
+
+describe("isCommandOutputOrRawData and command output routing", () => {
+  it("correctly classifies raw query execution errors and exit codes", () => {
+    const errorJson = '{"error":{"code":"query_execution_failed","message":"External query exceeded its execution deadline."}}\n\nCommand exited with code 1';
+    expect(isCommandOutputOrRawData(errorJson)).toBe(true);
+
+    const rowsJson = '{"rows":[{"id":123,"nama":"TEST"}],"columns":["id","nama"],"rowCount":1,"executionTimeMs":100}';
+    expect(isCommandOutputOrRawData(rowsJson)).toBe(true);
+
+    expect(isCommandOutputOrRawData("Command exited with code 1")).toBe(true);
+    expect(
+      isCommandOutputOrRawData(
+        'exit=0\n{"rows":[],"columns":["tipe_perubahan","jenis_perubahan"],"rowCount":0,"executionTimeMs":560}',
+      ),
+    ).toBe(true);
+    expect(
+      isCommandOutputOrRawData(
+        "'Kompleks Majapahit Permai Blok B 113, Jl Majapahit No 18,20,22 ' 63",
+      ),
+    ).toBe(true);
+    expect(isCommandOutputOrRawData("Looking into the failing test.")).toBe(false);
+    expect(isCommandOutputOrRawData("Entitas ditemukan: id=123")).toBe(false);
+  });
+
+  it("routes raw command output from assistant text into previous tool detail rather than splitting into new interstitial phase", () => {
+    const entries: TranscriptEntry[] = [
+      {
+        kind: "tool_call",
+        ts: "2026-10-10T00:00:00Z",
+        name: "Bash",
+        toolUseId: "t1",
+        input: { command: "python3 query.py" },
+      },
+      {
+        kind: "assistant",
+        ts: "2026-10-10T00:00:01Z",
+        text: '{"error":{"code":"query_execution_failed"}}\n\nCommand exited with code 1',
+      },
+    ];
+
+    const items = transcriptToTaskChatItems(entries, {
+      runId: "run-1",
+      running: false,
+    });
+
+    // Should NOT create an assistant message
+    expect(items.some((i) => i.kind === "message")).toBe(false);
+    // Should attach to tool detail and mark tool failed
+    const tool = items.find((i) => i.kind === "tool");
+    expect(tool).toBeDefined();
+    expect(tool?.status).toBe("failed");
+    expect(tool?.detail).toContain("query_execution_failed");
+
+    const timeline = buildTurnTimelineRows(items, false);
+    // Timeline should have only 1 phase, not 2
+    expect(timeline.filter((r) => r.kind === "activity_phase")).toHaveLength(1);
+    const phase = timeline.find((r) => r.kind === "activity_phase") as any;
+    expect(phase?.interstitial).toBeUndefined();
+  });
+
+  it("suppresses identical assistant commentary replayed after a tool call in timeline", () => {
+    const commentary = "Lanjut dari handoff: profiling PT Digital Inovasi Pertiwi";
+    const entries: TranscriptEntry[] = [
+      {
+        kind: "assistant",
+        ts: "2026-10-10T00:00:00Z",
+        text: commentary,
+        delta: true,
+      },
+      {
+        kind: "tool_call",
+        ts: "2026-10-10T00:00:01Z",
+        name: "bash",
+        toolUseId: "call-1",
+        input: { command: "curl http://example.com" },
+      },
+      {
+        kind: "tool_result",
+        ts: "2026-10-10T00:00:02Z",
+        toolUseId: "call-1",
+        content: "ok",
+        isError: false,
+      },
+      {
+        kind: "assistant",
+        ts: "2026-10-10T00:00:03Z",
+        text: commentary,
+      },
+    ];
+
+    const items = transcriptToTaskChatItems(entries, {
+      runId: "run-dup",
+      running: false,
+    });
+
+    const timeline = buildTurnTimelineRows(items, false);
+    const phases = timeline.filter((r) => r.kind === "activity_phase");
+    expect(phases).toHaveLength(1);
+    expect((phases[0] as any).interstitial?.text).toBe(commentary);
+  });
+});
+

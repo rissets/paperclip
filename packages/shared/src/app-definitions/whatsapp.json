@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "slug": "whatsapp",
+  "name": "WhatsApp",
+  "description": "Connect WhatsApp via QR code to chat with Paperclip agents and create tasks directly from WhatsApp.",
+  "categories": [
+    "communication"
+  ],
+  "featured": true,
+  "branding": {
+    "logoUrl": "/brands/apps/whatsapp.svg"
+  },
+  "urlPatterns": [
+    "https://web.whatsapp.com/*"
+  ],
+  "methods": [
+    {
+      "key": "chat-agent",
+      "label": "Chat with an agent",
+      "purpose": "channel",
+      "provider": "whatsapp",
+      "transport": "chat_sdk",
+      "auth": "none",
+      "ownershipModes": [
+        "customer"
+      ],
+      "whenToUse": "Connect WhatsApp to let users interact and assign tasks to an agent directly from WhatsApp.",
+      "guidanceMd": "Scan the QR code with WhatsApp on your phone (Settings > Linked Devices) to connect.",
+      "riskTier": "S2",
+      "requiredResourceFilters": [
+        "direct_message",
+        "group_chat"
+      ]
+    }
+  ]
+}

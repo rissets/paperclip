@@ -776,7 +776,7 @@ type PaperclipWakeRecovery = {
 };
 
 export type PaperclipExternalChatProvider =
-  "slack" | "github" | "discord" | "microsoft-teams" | "telegram" | "imessage-photon";
+  "slack" | "github" | "discord" | "microsoft-teams" | "telegram" | "imessage-photon" | "whatsapp";
 
 type PaperclipWakePayload = {
   executionContinuation: ExecutionContinuationEnvelope | null;
@@ -1646,6 +1646,7 @@ const PAPERCLIP_EXTERNAL_CHAT_PROVIDERS =
     "microsoft-teams",
     "telegram",
     "imessage-photon",
+    "whatsapp",
   ]);
 
 function normalizePaperclipExternalChatProvider(

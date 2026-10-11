@@ -1033,7 +1033,7 @@ export const issueCommentMetadataSectionSchema = z
 export const issueCommentMetadataSchema = z
   .object({
     version: z.literal(1),
-    sourceChannel: z.literal("imessage-photon").optional(),
+    sourceChannel: z.enum(["imessage-photon", "whatsapp"]).optional(),
     sourceRunId: z.string().guid().nullable().optional(),
     authorizationReason: z
       .string()

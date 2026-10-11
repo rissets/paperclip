@@ -1,4 +1,4 @@
-import { Brain, CirclePause, Gauge, Layers3 } from "lucide-react";
+import { Clock, CirclePause, Gauge, Layers3 } from "lucide-react";
 import type { TaskChatActivityPhaseItem } from "./task-chat-model";
 import {
   toolActivityPresentation,
@@ -110,7 +110,7 @@ export function completedActivitySummary(items: Activity[]) {
   }
   if (!categories.size) {
     if (items.some((item) => item.kind === "thinking"))
-      add("Thought through the task", Brain);
+      add("Thought through the task", Clock);
     else if (items.some((item) => item.kind === "marker"))
       add("Activity stopped", CirclePause);
     else add("Recorded usage", Gauge);

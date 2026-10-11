@@ -95,10 +95,40 @@ export function createPiJsonlParser() {
         result.sawAgentEnd = true;
         const messages = event.messages as Array<Record<string, unknown>> | undefined;
         if (messages && messages.length > 0) {
-          const lastMessage = messages[messages.length - 1];
-          if (lastMessage?.role === "assistant") {
-            const content = lastMessage.content as string | Array<{ type: string; text?: string }>;
-            result.finalMessage = extractTextContent(content);
+          for (let i = messages.length - 1; i >= 0; i--) {
+            const msg = messages[i];
+            if (msg?.role === "assistant") {
+              const content = msg.content as string | Array<{ type: string; text?: string }>;
+              const text = extractTextContent(content);
+              if (text) {
+                result.finalMessage = text;
+                break;
+              }
+            }
+          }
+        }
+        continue;
+      }
+
+      if (eventType === "message_end") {
+        const message = asRecord(event.message);
+        if (message && message.role === "assistant") {
+          const content = message.content as string | Array<{ type: string; text?: string }>;
+          const text = extractTextContent(content);
+          if (text) {
+            result.finalMessage = text;
+            if (!result.messages.includes(text)) {
+              result.messages.push(text);
+            }
+          }
+
+          const usage = asRecord(message.usage);
+          if (usage) {
+            result.usage.inputTokens += asNumber(usage.input ?? usage.inputTokens, 0) + asNumber(usage.cacheWrite, 0);
+            result.usage.outputTokens += asNumber(usage.output ?? usage.outputTokens, 0);
+            result.usage.cachedInputTokens += asNumber(usage.cachedInputTokens ?? usage.cacheRead, 0);
+            const cost = asRecord(usage.cost);
+            addCost(cost?.total ?? usage.costUsd);
           }
         }
         continue;

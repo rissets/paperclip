@@ -74,6 +74,7 @@ const providerNames: Record<ChatProvider, string> = {
   "microsoft-teams": "Microsoft Teams",
   telegram: "Telegram",
   "imessage-photon": "iMessage Photon",
+  whatsapp: "WhatsApp",
 };
 
 const providerLifecycleGuidance: Record<
@@ -81,6 +82,10 @@ const providerLifecycleGuidance: Record<
   { reconnect: string; remove: string }
 > = {
   agentmail: { reconnect: "Reconnect the same email inbox.", remove: "Disconnect email and retain task history." },
+  whatsapp: {
+    reconnect: "Reconnect to WhatsApp by scanning a new QR code.",
+    remove: "Paperclip disconnects the WhatsApp session and stops message delivery. Saved conversations and task history remain.",
+  },
   slack: {
     reconnect:
       "Reconnect verifies or replaces credentials for this same Slack app. It does not reinstall the app or change its workspace or channel membership.",

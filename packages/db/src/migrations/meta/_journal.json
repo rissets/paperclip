@@ -2346,6 +2346,13 @@
       "when": 1791456875854,
       "tag": "0336_unique_captain_universe",
       "breakpoints": true
+    },
+    {
+      "idx": 337,
+      "version": "7",
+      "when": 1791659709597,
+      "tag": "0337_clumsy_pyro",
+      "breakpoints": true
     }
   ]
 }

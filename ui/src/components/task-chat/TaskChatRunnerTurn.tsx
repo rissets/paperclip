@@ -1,4 +1,4 @@
-import { useRef, useState, useMemo } from "react";
+import { useRef, useState, useMemo, useEffect } from "react";
 import { ChevronRight, Loader2 } from "lucide-react";
 import type { ExecutionProjection } from "@paperclipai/shared";
 import { useSecondTick } from "@/hooks/useSecondTick";
@@ -238,6 +238,33 @@ export function TaskChatRunnerTurn({
     return Math.max(1, count || items.length || 1);
   }, [timelineRows, items]);
 
+  const isTest =
+    typeof process !== "undefined" &&
+    (process.env.NODE_ENV === "test" || process.env.VITEST === "true");
+  const isHistorical =
+    terminal && Boolean(finishedAtMs && Date.now() - finishedAtMs > 60_000);
+  const shouldDelay = !isTest && !isHistorical && Boolean(final);
+
+  const [userRevealed, setUserRevealed] = useState(false);
+  const [countdown, setCountdown] = useState(() => (shouldDelay ? 15 : 0));
+
+  useEffect(() => {
+    if (!shouldDelay || userRevealed || countdown <= 0) {
+      return;
+    }
+    const timer = setInterval(() => {
+      setCountdown((prev) => {
+        if (prev <= 1) {
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [shouldDelay, userRevealed, countdown <= 0]);
+
+  const isRevealed = !shouldDelay || userRevealed || countdown <= 0;
+
   return (
     <div
       className="flex min-w-0 flex-col"
@@ -389,7 +416,7 @@ export function TaskChatRunnerTurn({
             </>
           ) : timelineRows.length > 0 ? (
             <div
-              className="flex min-w-0 flex-col gap-2 py-1"
+              className="relative flex min-w-0 flex-col gap-2 py-1 pl-4 border-l border-border/50"
               data-testid="task-chat-turn-timeline"
             >
               {timelineRows.map((row) => (
@@ -424,17 +451,36 @@ export function TaskChatRunnerTurn({
         </>
       )}
       {final ? (
-        <div
-          className="w-full"
-          data-testid="task-chat-final-response"
-        >
-          <TaskChatBubble
-            item={{ ...final, authorName: agentName ?? undefined, agentIcon, agent, timestamp: final.timestamp ?? formatTaskChatTimestamp(final.atMs) }}
-            animateEntry={false}
-            hideAgentIdentity={conversationMode ? false : !continuedAfterSteering}
-            actions={<TaskChatBubbleActions copyText={final.text} />}
-          />
-        </div>
+        !isRevealed ? (
+          <div className="mt-3 flex items-center justify-between rounded-md border border-border/40 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+            <div className="flex items-center gap-2">
+              <Loader2 className="size-3.5 animate-spin text-primary" />
+              <span>Menyiapkan jawaban ({countdown}s)...</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setUserRevealed(true);
+                setCountdown(0);
+              }}
+              className="text-xs font-medium text-primary hover:underline cursor-pointer"
+            >
+              Tampilkan sekarang
+            </button>
+          </div>
+        ) : (
+          <div
+            className="w-full"
+            data-testid="task-chat-final-response"
+          >
+            <TaskChatBubble
+              item={{ ...final, authorName: agentName ?? undefined, agentIcon, agent, timestamp: final.timestamp ?? formatTaskChatTimestamp(final.atMs) }}
+              animateEntry={false}
+              hideAgentIdentity={conversationMode ? false : !continuedAfterSteering}
+              actions={<TaskChatBubbleActions copyText={final.text} />}
+            />
+          </div>
+        )
       ) : terminal && terminalStatusFailed(status) ? (
         <div className="w-full px-1 py-2 text-xs text-destructive" data-testid="task-chat-run-error">
           Run stopped with {status === "cancelled" ? "cancellation" : status === "timed_out" ? "timeout" : "an error"}

@@ -459,7 +459,7 @@ export function Browse({ renderAccountDetails = (connection) => connection.conne
         title: "Connection removed",
         body:
           target.pool ? "The connections in the pool are kept." : target.kind === "chat"
-            ? `${target.providerName} is disconnected. Existing Paperclip tasks remain available.`
+            ? `${target.providerName} is disconnected. Existing Primbon tasks remain available.`
             : target.remainingConnectionCount > 0
             ? `${target.providerName} still has ${target.remainingConnectionCount} active ${target.remainingConnectionCount === 1 ? "connection" : "connections"} available to agents.`
             : `${target.providerName} is no longer available to agents through this connection. Its saved credentials were deleted.`,
@@ -588,6 +588,12 @@ export function Browse({ renderAccountDetails = (connection) => connection.conne
         description:
           "Chat with agents from Telegram direct messages, groups, and topics.",
       },
+      {
+        slug: "whatsapp",
+        name: "WhatsApp",
+        description:
+          "Connect WhatsApp via QR code to chat with agents and create tasks directly from WhatsApp.",
+      },
     ] as const;
     for (const item of nativeChatApps.filter(item => item.slug === "agentmail" || chatConnectorsEnabled)) {
       if (rowsBySlug.has(item.slug)) continue;
@@ -699,7 +705,8 @@ export function Browse({ renderAccountDetails = (connection) => connection.conne
           "microsoft-teams": "Microsoft Teams",
           telegram: "Telegram",
           "imessage-photon": "iMessage Photon",
-  agentmail: "AgentMail",
+          whatsapp: "WhatsApp",
+          agentmail: "AgentMail",
         } as const;
         target = {
           key: `chat:${endpoint.provider}`,
@@ -989,7 +996,7 @@ export function Browse({ renderAccountDetails = (connection) => connection.conne
               {connectionToRemove?.pool ? "The connections in this pool are kept." : connectionToRemove && Object.values(AGGREGATOR_NAMES).includes(connectionToRemove.providerName as "Composio")
                 ? `This removes the saved ${connectionToRemove.providerName} connection from Paperclip and agents lose access through it. Your apps and accounts remain connected in ${connectionToRemove.providerName}.`
                 : connectionToRemove?.kind === "chat"
-                ? `This connection will stop receiving new work from ${connectionToRemove.providerName}. Existing Paperclip tasks and conversation history remain available. This does not delete the app, bot, or account in ${connectionToRemove.providerName}.`
+                ? `This connection will stop receiving new work from ${connectionToRemove.providerName}. Existing Primbon tasks and conversation history remain available. This does not delete the app, bot, or account in ${connectionToRemove.providerName}.`
                 : connectionToRemove &&
                     connectionToRemove.remainingConnectionCount > 0
                   ? `This connection's saved credentials are deleted and agents lose access through it immediately. They can still use ${connectionToRemove.providerName} through ${connectionToRemove.remainingConnectionCount} other active ${connectionToRemove.remainingConnectionCount === 1 ? "connection" : "connections"}.`

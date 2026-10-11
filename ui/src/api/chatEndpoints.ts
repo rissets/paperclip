@@ -21,7 +21,7 @@ export type {
 } from "@paperclipai/shared";
 
 export type ChatProvider =
-  "slack" | "github" | "discord" | "microsoft-teams" | "telegram" | "agentmail" | "imessage-photon";
+  "slack" | "github" | "discord" | "microsoft-teams" | "telegram" | "agentmail" | "imessage-photon" | "whatsapp";
 export type ChatEndpointStatus =
   | "draft"
   | "verifying"
@@ -360,4 +360,27 @@ export const chatEndpointsApi = {
         ...(attachmentIds.length ? { attachmentIds } : {}),
       },
     ),
+  pairWhatsApp: (endpointId: string) =>
+    api.post<WhatsAppSessionState>(
+      `/chat-endpoints/${endpointId}/whatsapp/pair`,
+      {},
+    ),
+  getWhatsAppStatus: (endpointId: string) =>
+    api.get<WhatsAppSessionState>(
+      `/chat-endpoints/${endpointId}/whatsapp/status`,
+    ),
+  disconnectWhatsApp: (endpointId: string) =>
+    api.post<{ success: boolean }>(
+      `/chat-endpoints/${endpointId}/whatsapp/disconnect`,
+      {},
+    ),
 };
+
+export interface WhatsAppSessionState {
+  status: "idle" | "qr_ready" | "connecting" | "connected" | "failed";
+  qrCodeDataUrl?: string | null;
+  phoneNumber?: string | null;
+  pushName?: string | null;
+  lastError?: string | null;
+}
+

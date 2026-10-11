@@ -1080,6 +1080,7 @@ describe("Connectors landing page", () => {
       "notion",
       "slack",
       "telegram",
+      "whatsapp",
       "custom-mcp",
     ]);
     expect(
@@ -1291,7 +1292,7 @@ describe("Connectors landing page", () => {
     expect(navigateMock.mock.lastCall![0]).not.toBe(first.pathname + first.search);
   });
 
-  it.each(["slack", "discord", "telegram", "github", "microsoft-teams", "agentmail", "imessage-photon"])(
+  it.each(["slack", "discord", "telegram", "github", "microsoft-teams", "agentmail", "imessage-photon", "whatsapp"])(
     "puts Manage and removal in the %s chat menu while keeping draft setup visible",
     async (provider) => {
       chatListMock.mockResolvedValue([

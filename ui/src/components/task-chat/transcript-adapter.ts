@@ -563,6 +563,81 @@ function formatToolResultDetail(content: unknown): string | undefined {
     : trimmed;
 }
 
+/** Identifies raw command exit codes, CLI query results, or JSON payload dumps that should stay inside tool details rather than leaking as assistant commentary. */
+export function isCommandOutputOrRawData(text: string | null | undefined): boolean {
+  if (!text) return false;
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+
+  // 1. Exit code indicators from CLI / shell / process runners
+  if (
+    /command exited with (?:code|status) \d+/i.test(trimmed) ||
+    /process exited with (?:code|status) \d+/i.test(trimmed) ||
+    /\bexit code:\s*\d+/i.test(trimmed) ||
+    /\bexited with code \d+/i.test(trimmed) ||
+    /^\s*exit=\d+/i.test(trimmed) ||
+    /\bexit=\d+\b/i.test(trimmed) ||
+    /^\s*status=\w+\s+exit=\d+/i.test(trimmed) ||
+    /^\s*tool_result\b.*?\bexit=\d+/i.test(trimmed)
+  ) {
+    return true;
+  }
+
+  // 2. Query execution errors or database CLI payloads
+  if (
+    trimmed.includes("query_execution_failed") ||
+    /^{"error"\s*:/i.test(trimmed) ||
+    /^{"rows"\s*:/i.test(trimmed) ||
+    /^{"columns"\s*:/i.test(trimmed) ||
+    /^{"rowCount"\s*:/i.test(trimmed) ||
+    /^{"executionTimeMs"\s*:/i.test(trimmed) ||
+    /^{"data"\s*:/i.test(trimmed) ||
+    /^{"result"\s*:/i.test(trimmed) ||
+    (trimmed.includes('"rows":') && trimmed.includes('"columns":')) ||
+    (trimmed.includes('"rowCount":') && trimmed.includes('"executionTimeMs":')) ||
+    /exit=\d+\s*[\r\n]+\s*\{/i.test(trimmed)
+  ) {
+    return true;
+  }
+
+  // 3. Raw JSON object or array (starts with { or [ and parses as JSON)
+  if (
+    (trimmed.startsWith("{") && (trimmed.endsWith("}") || trimmed.includes("}\n\nCommand exited"))) ||
+    (trimmed.startsWith("[") && trimmed.endsWith("]"))
+  ) {
+    try {
+      const jsonCandidate = trimmed.includes("}\n\nCommand exited")
+        ? trimmed.split("\n\nCommand exited")[0]!.trim()
+        : trimmed;
+      const parsed = JSON.parse(jsonCandidate);
+      if (typeof parsed === "object" && parsed !== null) {
+        return true;
+      }
+    } catch {
+      if (/^\{[\s\S]*\}$/.test(trimmed) && (trimmed.includes('":') || trimmed.includes("':"))) {
+        return true;
+      }
+    }
+  }
+
+  // 4. Markdown code blocks containing purely JSON or query results
+  if (/^```(?:json)?\s*\{[\s\S]*\}\s*```$/i.test(trimmed)) {
+    return true;
+  }
+
+  // 5. Raw stdout / CLI single-value prints (e.g. `'Kompleks Majapahit Permai Blok B 113, Jl Majapahit No 18,20,22 ' 63`)
+  if (/^'[^']+'\s+\d+$/m.test(trimmed) || /^"[^"]+"\s+\d+$/m.test(trimmed)) {
+    return true;
+  }
+
+  // 6. SQL tabular dumps (+---+---+ or | col | col |)
+  if (/^\+[-+]+\+\s*$/m.test(trimmed) && /\|.*\|/m.test(trimmed)) {
+    return true;
+  }
+
+  return false;
+}
+
 interface TranscriptAdapterOptions {
   runId: string;
   agentName?: string;
@@ -676,6 +751,36 @@ export function transcriptToTaskChatItems(
       case "assistant": {
         if (!entry.text) break;
         finishThinking();
+        if (!entry.delta && isCommandOutputOrRawData(entry.text)) {
+          const detail = formatToolResultDetail(entry.text);
+          if (lastToolIndex >= 0 && items[lastToolIndex]?.kind === "tool") {
+            const tool = items[lastToolIndex] as TaskChatToolItem;
+            if (detail) {
+              tool.detail = tool.detail ? `${tool.detail}\n${detail}` : detail;
+            }
+            if (
+              entry.text.includes("Command exited with code") &&
+              !entry.text.includes("Command exited with code 0")
+            ) {
+              tool.status = "failed";
+            }
+          } else {
+            items.push({
+              id: `${runId}:tool:${i}`,
+              kind: "tool",
+              name: "Command",
+              status:
+                entry.text.includes("Command exited with code") &&
+                !entry.text.includes("Command exited with code 0")
+                  ? "failed"
+                  : "completed",
+              detail,
+            });
+            lastToolIndex = items.length - 1;
+          }
+          resetInline();
+          break;
+        }
         const channel = entry.channel;
         const sameMessage =
           messageIndex >= 0 &&
@@ -692,6 +797,13 @@ export function transcriptToTaskChatItems(
           }
         } else {
           finishThinking();
+          // Suppress non-delta duplicate assistant messages (e.g. turn_end replaying message_end)
+          const lastMsg = [...items].reverse().find(
+            (it): it is TaskChatMessageItem => it.kind === "message" && it.author === "agent",
+          );
+          if (!entry.delta && lastMsg && lastMsg.text.trim() === entry.text.trim()) {
+            break;
+          }
           const atMs = Date.parse(entry.ts);
           items.push({
             id: `${runId}:msg:${i}`,
@@ -1700,6 +1812,48 @@ export function buildTurnTimelineRows(
         (item.channel == null || item.channel === "unknown") &&
         item === legacyReplyBoundary;
       if (!running && (explicitFinal || legacyTrailingReply)) continue;
+
+      if (isCommandOutputOrRawData(item.text)) {
+        const opening = ensureOpening(item.id);
+        const lastTool = [...opening.items]
+          .reverse()
+          .find((it) => it.kind === "tool") as TaskChatToolItem | undefined;
+        if (lastTool) {
+          lastTool.detail = lastTool.detail
+            ? `${lastTool.detail}\n${item.text}`
+            : item.text;
+          if (
+            item.text.includes("Command exited with code") &&
+            !item.text.includes("Command exited with code 0")
+          ) {
+            lastTool.status = "failed";
+          }
+        } else {
+          opening.items.push({
+            id: `${item.id}:tool`,
+            kind: "tool",
+            name: "Command",
+            status:
+              item.text.includes("Command exited with code") &&
+              !item.text.includes("Command exited with code 0")
+                ? "failed"
+                : "completed",
+            detail: item.text,
+          });
+        }
+        continue;
+      }
+
+      // Defense-in-depth: If a previous phase in this turn already had the exact same commentary
+      // (e.g. from an engine snapshot replay or re-emission after tool execution),
+      // suppress the duplicate.
+      const prevPhase = [...rows].reverse().find(
+        (r): r is TaskChatActivityPhaseItem => r.kind === "activity_phase" && !!r.interstitial,
+      );
+      if (prevPhase && prevPhase.interstitial?.text.trim() === item.text.trim()) {
+        continue;
+      }
+
       current = {
         id: `${item.id}:phase`,
         kind: "activity_phase",

@@ -1634,7 +1634,9 @@ describe("TaskChatRunnerTurn", () => {
       true,
     );
 
-    expect(container.querySelector('[data-testid="task-chat-turn-timeline"]')).not.toBeNull();
+    const timeline = container.querySelector('[data-testid="task-chat-turn-timeline"]');
+    expect(timeline).not.toBeNull();
+    expect(timeline?.className).toContain("border-l");
     expect(container.querySelector('[data-testid="task-chat-simple-loading"]')).toBeNull();
   });
 });

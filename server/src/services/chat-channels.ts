@@ -44,6 +44,7 @@ import { PhotonChatAdapter, photonThreadId, photonReplyReference } from "./photo
 import { photonChannelConfigurationSchema, type PhotonChannelConfiguration } from "@paperclipai/shared";
 import type { LiveEvent as PhotonEvent } from "@photon-ai/advanced-imessage";
 import { defaultSlackAppConfiguration } from "@paperclipai/shared";
+import { whatsAppConnectionManager } from "./whatsapp/manager.js";
 import {
   createHash,
   createHmac,
@@ -437,6 +438,7 @@ const PROVIDER_LABELS: Record<ChatProvider, string> = {
   discord: "Discord",
   "microsoft-teams": "Microsoft Teams",
   telegram: "Telegram",
+  whatsapp: "WhatsApp",
 };
 
 type PublicationOrderTable = {
@@ -755,6 +757,21 @@ const CAPABILITIES: Record<ChatProvider, ChatAdapterCapabilities> = {
     ephemeralMessages: false,
     proactiveDirectMessages: false,
   },
+  whatsapp: {
+    threads: false,
+    directMessages: true,
+    nativeStreaming: false,
+    messageEdits: false,
+    messageDeletes: false,
+    reactions: true,
+    files: true,
+    cards: false,
+    actions: false,
+    modals: false,
+    slashCommands: false,
+    ephemeralMessages: false,
+    proactiveDirectMessages: true,
+  },
 };
 
 const REQUIRED_CREDENTIALS: Record<
@@ -767,6 +784,7 @@ const REQUIRED_CREDENTIALS: Record<
   discord: ["botToken", "applicationId", "guildId"],
   "microsoft-teams": ["clientId", "tenantId", "clientSecret"],
   telegram: ["botToken"],
+  whatsapp: [],
 };
 
 const REQUIRED_SLACK_BOT_SCOPES = SLACK_CHAT_BOT_SCOPES;
@@ -810,6 +828,7 @@ const SUPPLIED_CREDENTIAL_KEYS: Record<ChatProvider, readonly string[]> = {
   discord: ["botToken", "applicationId", "guildId"],
   "microsoft-teams": ["clientId", "tenantId", "clientSecret"],
   telegram: ["botToken"],
+  whatsapp: [],
 };
 
 const MAX_INBOUND_TEXT = 100_000;
@@ -2639,6 +2658,7 @@ function providerSetupState(
   const step = endpoint.status === "active" ? "complete" : endpoint.setup.step;
   switch (endpoint.provider) {
     case "imessage-photon": return { step, providerUrl: "https://photon.codes/", testStartedAt: endpoint.setup.testStartedAt } as const;
+    case "whatsapp": return { ...endpoint.setup, step, testStartedAt: endpoint.setup.testStartedAt } as const;
     case "agentmail": return endpoint.setup;
     case "slack": {
       const observations = (endpoint.setup as InternalSetupState)
@@ -6181,6 +6201,15 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
       if (!line || !inspection.eligible) throw unprocessable("Select an eligible dedicated Photon line");
       return { providerAccountId: inspection.projectId, providerAccountLabel: inspection.projectName, botExternalId: line.phoneNumber, botUsername: line.phoneNumber, botLabel: line.phoneNumber };
     }
+    if (provider === "whatsapp") {
+      return {
+        providerAccountId: "whatsapp",
+        providerAccountLabel: "WhatsApp",
+        botExternalId: "whatsapp",
+        botUsername: null,
+        botLabel: "WhatsApp",
+      };
+    }
     if (provider === "slack") {
       const response = await fetchImpl("https://slack.com/api/auth.test", {
         method: "POST",
@@ -7474,6 +7503,14 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
           appType: "SingleTenant",
         },
       };
+    if (endpoint.provider === "whatsapp")
+      return {
+        provider: "whatsapp",
+        userName,
+        credentials: {
+          phoneNumber: endpoint.botExternalId ?? "",
+        },
+      };
     return {
       provider: "github",
       userName,
@@ -7931,7 +7968,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
       )
       .where(
         and(
-          inArray(chatEndpoints.provider, ["discord", "imessage-photon"]),
+          inArray(chatEndpoints.provider, ["discord", "imessage-photon", "whatsapp"]),
           inArray(chatEndpoints.status, ["verifying", "active", "attention"]),
           eq(toolConnections.status, "active"),
           eq(toolConnections.enabled, true),
@@ -7951,6 +7988,9 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
       const record = await endpointRecord(row.endpointId);
       if (!record) continue;
       try {
+        if (record.endpoint.provider === "whatsapp") {
+          await whatsAppConnectionManager.ensureConnected(record.endpoint.id, record.endpoint.companyId, db);
+        }
         let instance = await runtimeFor(record.endpoint, {
           requireDiscordOwnership: true,
         });
@@ -9358,7 +9398,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
     ) {
       throw unprocessable("Unsupported chat endpoint setup action");
     }
-    if (!getWebhookPublicBaseUrl() && endpoint.provider !== "discord" && endpoint.provider !== "imessage-photon") {
+    if (!getWebhookPublicBaseUrl() && endpoint.provider !== "discord" && endpoint.provider !== "imessage-photon" && endpoint.provider !== "whatsapp") {
       throw unprocessable(
         `A public HTTPS Paperclip URL is required before connecting ${PROVIDER_LABELS[endpoint.provider]}`,
       );
@@ -15997,6 +16037,8 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
               version: 1,
               ...(endpoint.provider === "imessage-photon"
                 ? { sourceChannel: "imessage-photon" as const }
+                : endpoint.provider === "whatsapp"
+                ? { sourceChannel: "whatsapp" as const }
                 : {}),
               sections: [
                 {
@@ -28024,9 +28066,16 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
           eq(chatExternalPrincipals.companyId, record.endpoint.companyId),
           eq(chatExternalPrincipals.id, principalId),
           eq(chatExternalPrincipals.provider, record.endpoint.provider),
-          eq(
-            chatExternalPrincipals.providerAccountId,
-            record.endpoint.providerAccountId ?? "",
+          or(
+            eq(
+              chatExternalPrincipals.providerAccountId,
+              record.endpoint.providerAccountId ?? "unknown",
+            ),
+            eq(
+              chatExternalPrincipals.providerAccountId,
+              record.endpoint.providerAccountId ?? "",
+            ),
+            eq(chatExternalPrincipals.providerAccountId, "unknown"),
           ),
         ),
       )

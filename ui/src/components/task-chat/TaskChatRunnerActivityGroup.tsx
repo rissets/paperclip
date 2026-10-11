@@ -1,10 +1,10 @@
 import { useId, useState } from "react";
 import { completedActivitySummary } from "./completed-activity-summary";
 import {
-  Brain,
   ChevronDown,
   ChevronRight,
   CirclePause,
+  Clock,
   Gauge,
 } from "lucide-react";
 import { useReducedMotion } from "motion/react";
@@ -23,6 +23,7 @@ import {
 } from "./TaskChatProtocolActivityRow";
 import { TaskChatUsageReadout } from "./TaskChatUsageReadout";
 import { toolActivityPresentation } from "./tool-taxonomy";
+import { isCommandOutputOrRawData } from "./transcript-adapter";
 
 type Activity = TaskChatActivityPhaseItem["items"][number];
 
@@ -52,7 +53,7 @@ function presentation(item: Activity, active: boolean) {
   if (item.kind === "thinking") {
     const running = active && Boolean(item.streaming);
     return {
-      icon: Brain,
+      icon: Clock,
       label: running ? "Thinking" : "Thought",
       target: item.lines
         .filter((line) => line.trim())
@@ -329,14 +330,32 @@ export function TaskChatRunnerActivityGroup({
     ? `${activities.length} ${activities.length === 1 ? "step" : "steps"}`
     : `${activities.length} ${activities.length === 1 ? "activity" : "activities"}`;
 
+  const isCommandOutput = Boolean(
+    item.interstitial?.text && (
+      isCommandOutputOrRawData(item.interstitial.text) ||
+      item.interstitial.text.includes("exit=0") ||
+      item.interstitial.text.includes("rowCount") ||
+      item.interstitial.text.includes("executionTimeMs")
+    ),
+  );
+
   const isInternalPrompt = Boolean(
     item.interstitial?.text && (
+      isCommandOutput ||
       item.interstitial.text.includes("Paperclip Resume Delta") ||
       item.interstitial.text.includes("Paperclip Wake Payload") ||
       item.interstitial.text.includes("You are resuming an existing Paperclip session") ||
       item.interstitial.text.includes("This heartbeat is scoped to the issue below")
     ),
   );
+
+  // If the interstitial actually contained command output/result, make sure the last tool's detail has it
+  if (isCommandOutput && item.interstitial?.text) {
+    const lastTool = [...activities].reverse().find((a) => a.kind === "tool");
+    if (lastTool && !lastTool.detail) {
+      lastTool.detail = item.interstitial.text;
+    }
+  }
 
   return (
     <section

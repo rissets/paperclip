@@ -33,6 +33,7 @@ import {
 import { accessService } from "../services/access.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { recordChatWebhookStage } from "../services/chat-webhook-diagnostics.js";
+import { whatsAppConnectionManager } from "../services/whatsapp/manager.js";
 import {
   createInviteRateLimiter,
   type InviteRateLimiter,
@@ -271,6 +272,28 @@ export function chatChannelRoutes(db: Db, options: ChatChannelRouteOptions) {
     if (!(await assertEndpointManagementAccess(req, res))) return;
     res.set("Cache-Control", "no-store");
     res.json(await service.inspectPhoton(endpointId(req), req.body));
+  });
+
+  router.post("/chat-endpoints/:endpointId/whatsapp/pair", async (req, res) => {
+    if (!(await assertEndpointManagementAccess(req, res))) return;
+    const endpoint = await service.get(endpointId(req));
+    const result = await whatsAppConnectionManager.pair(endpoint.id, endpoint.companyId, db);
+    res.set("Cache-Control", "no-store");
+    res.json(result);
+  });
+
+  router.get("/chat-endpoints/:endpointId/whatsapp/status", async (req, res) => {
+    if (!(await assertEndpointAccess(req, res, service))) return;
+    const result = whatsAppConnectionManager.getStatus(endpointId(req));
+    res.set("Cache-Control", "no-store");
+    res.json(result);
+  });
+
+  router.post("/chat-endpoints/:endpointId/whatsapp/disconnect", async (req, res) => {
+    if (!(await assertEndpointManagementAccess(req, res))) return;
+    const endpoint = await service.get(endpointId(req));
+    await whatsAppConnectionManager.disconnect(endpoint.id, endpoint.companyId, db);
+    res.json({ success: true });
   });
 
   router.post(

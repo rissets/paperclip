@@ -38,16 +38,23 @@ function extractTextContent(content: string | Array<{ type: string; text?: strin
 
 type PiStdoutParserState = {
   pendingToolCalls: Map<string, { toolName: string; args: unknown }>;
+  completedToolCalls: Set<string>;
   thinkingText: string;
   assistantText: string;
 };
 
 function createParserState(): PiStdoutParserState {
-  return { pendingToolCalls: new Map(), thinkingText: "", assistantText: "" };
+  return {
+    pendingToolCalls: new Map(),
+    completedToolCalls: new Set(),
+    thinkingText: "",
+    assistantText: "",
+  };
 }
 
 function resetParserStateForRun(state: PiStdoutParserState): void {
   state.pendingToolCalls.clear();
+  state.completedToolCalls.clear();
   state.thinkingText = "";
   state.assistantText = "";
 }
@@ -166,6 +173,7 @@ function parsePiStdoutLineWithState(line: string, ts: string, state: PiStdoutPar
 
   // Turn lifecycle
   if (type === "turn_start") {
+    state.completedToolCalls.clear();
     state.thinkingText = "";
     state.assistantText = "";
     return []; // Skip noisy lifecycle events
@@ -177,7 +185,7 @@ function parsePiStdoutLineWithState(line: string, ts: string, state: PiStdoutPar
     
     const entries: TranscriptEntry[] = [];
     
-    if (message) {
+    if (message && (!message.role || message.role === "assistant")) {
       const content = message.content as string | Array<{ type: string; text?: string; thinking?: string }>;
       const { text, thinking } = extractTextContent(content);
       
@@ -189,6 +197,10 @@ function parsePiStdoutLineWithState(line: string, ts: string, state: PiStdoutPar
     if (toolResults) {
       for (const tr of toolResults) {
         const toolCallId = asString(tr.toolCallId, `tool-${Date.now()}`);
+        if (state.completedToolCalls.has(toolCallId)) {
+          continue;
+        }
+        state.completedToolCalls.add(toolCallId);
         const content = tr.content;
         const isError = tr.isError === true;
         
@@ -263,19 +275,19 @@ function parsePiStdoutLineWithState(line: string, ts: string, state: PiStdoutPar
 
   if (type === "message_end") {
     const message = asRecord(parsed.message);
-    if (message) {
-      const content = message.content as string | Array<{ type: string; text?: string; thinking?: string }>;
-      const { text, thinking } = extractTextContent(content);
-      
-      const entries: TranscriptEntry[] = [];
-      
-      // Emit final thinking block if present
-      entries.push(...appendSnapshot("thinking", thinking, ts, state));
-      entries.push(...appendSnapshot("assistant", text, ts, state));
-      
-      return entries;
+    if (!message || (message.role && message.role !== "assistant")) {
+      return [];
     }
-    return [];
+    const content = message.content as string | Array<{ type: string; text?: string; thinking?: string }>;
+    const { text, thinking } = extractTextContent(content);
+    
+    const entries: TranscriptEntry[] = [];
+    
+    // Emit final thinking block if present
+    entries.push(...appendSnapshot("thinking", thinking, ts, state));
+    entries.push(...appendSnapshot("assistant", text, ts, state));
+    
+    return entries;
   }
 
   // Tool execution
@@ -302,6 +314,7 @@ function parsePiStdoutLineWithState(line: string, ts: string, state: PiStdoutPar
 
   if (type === "tool_execution_end") {
     const toolCallId = asString(parsed.toolCallId, `tool-${Date.now()}`);
+    state.completedToolCalls.add(toolCallId);
     const toolName = asString(parsed.toolName, "tool");
     const result = parsed.result;
     const isError = parsed.isError === true;

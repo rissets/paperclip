@@ -6,6 +6,7 @@ import { MarkdownBody } from "@/components/MarkdownBody";
 import type { TaskChatActivityPhaseItem } from "./task-chat-model";
 import { protocolActivityPresentation } from "./task-chat-activity-presentation";
 import { toolTaxonomy, type ToolIcon } from "./tool-taxonomy";
+import { isCommandOutputOrRawData } from "./transcript-adapter";
 
 function representativeIcon(item: TaskChatActivityPhaseItem): ToolIcon {
   // Prefer a concrete operation over bookkeeping/reasoning. A phase can own
@@ -79,7 +80,7 @@ export function TaskChatActivityPhase({
       )}
       data-testid="task-chat-activity-phase"
     >
-      {item.interstitial ? (
+      {item.interstitial && !isCommandOutputOrRawData(item.interstitial.text) ? (
         <div
           className="min-w-0 px-1 text-sm text-foreground/90"
           data-testid="task-chat-phase-interstitial"

@@ -2829,8 +2829,8 @@ function ReadinessAndEvidenceView({
               <tbody className="divide-y divide-border">
                 {experiences.map((exp: any) => (
                   <tr key={exp.id} className="hover:bg-muted/50 transition-colors">
-                    <td className="p-3 font-medium text-foreground max-w-xs truncate" title={exp.normalizedQuery}>
-                      {exp.normalizedQuery}
+                    <td className="p-3 font-medium text-foreground max-w-xs truncate" title={exp.intent || exp.normalizedQuery || exp.parameterizedSql}>
+                      {exp.intent || exp.normalizedQuery || exp.parameterizedSql || "—"}
                     </td>
                     <td className="p-3 text-muted-foreground font-mono">
                       {exp.executionRoute || "orchestrated"}
