@@ -324,10 +324,12 @@ export class StructuredIngestionService {
     return fs.createReadStream(filePath, startByteOffset > 0 ? { start: startByteOffset } : undefined).pipe(parse({
       bom: startByteOffset === 0,
       delimiter,
+      record_delimiter: ["\r\n", "\n", "\r"],
       skip_empty_lines: true,
       // Preserve ragged records so the row-level quality pass can quarantine
       // them instead of aborting an otherwise usable large file.
       relax_column_count: true,
+      relax_quotes: true,
       ...(options.includeInfo ? { info: true } : {}),
     }));
   }
@@ -938,8 +940,9 @@ export class StructuredIngestionService {
    */
   static parseCsv(content: string, tableName = "Sheet1", options?: ParseStructuredOptions): ParsedTableData {
     this.assertInMemoryCompatibilityBytes(Buffer.byteLength(content, "utf8"));
-    // Strip UTF-8 BOM if present
-    const cleanContent = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+    // Strip UTF-8 BOM if present and normalize line endings
+    const rawClean = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+    const cleanContent = rawClean.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
     const workbook = XLSX.read(cleanContent, { type: "string" });
     const sheetName = tableName && tableName !== "Sheet1" ? tableName : (workbook.SheetNames[0] || tableName);
     const worksheet = workbook.Sheets[workbook.SheetNames[0] || "Sheet1"];

@@ -421,4 +421,19 @@ describe("streaming structured ingestion", () => {
     expect(publishedRows).toHaveLength(2_001);
   });
 
+  it("handles mixed line endings and relaxed quotes in streaming CSV parser", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-csv-mixed-test-"));
+    temporaryDirectories.push(directory);
+    const filePath = path.join(directory, "mixed.csv");
+    // Header with \r\n, data rows with \n, unescaped quotes in field
+    const content = 'id,title,value\r\n1,"Unescaped "quote" test",100\n2,Normal row,200\n';
+    await fs.writeFile(filePath, content, "utf8");
+
+    const profile = await StructuredIngestionService.profileCsvFile(filePath, "mixed");
+    expect(profile.rowCount).toBe(2);
+    expect(profile.semanticModel.qualityCounters?.totalRows).toBe(2);
+    expect(profile.semanticModel.publicationGateStatus).toBe("verified");
+  });
+
 });
+
