@@ -127,12 +127,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS "chat_voice_tool_calls_tool_uq" ON "chat_voice
 CREATE UNIQUE INDEX IF NOT EXISTS "chat_voice_tool_calls_webhook_uq" ON "chat_voice_tool_calls" USING btree ("company_id","webhook_id");--> statement-breakpoint
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chat_endpoints_provider_check' AND conrelid = 'chat_endpoints'::regclass) THEN
-    ALTER TABLE "chat_endpoints" ADD CONSTRAINT "chat_endpoints_provider_check" CHECK ("chat_endpoints"."provider" in ('slack', 'github', 'discord', 'microsoft-teams', 'telegram', 'speko', 'agentmail', 'imessage-photon'));
+    ALTER TABLE "chat_endpoints" ADD CONSTRAINT "chat_endpoints_provider_check" CHECK ("chat_endpoints"."provider" in ('slack', 'github', 'discord', 'microsoft-teams', 'telegram', 'speko', 'agentmail', 'imessage-photon', 'whatsapp'));
   END IF;
 END $$;--> statement-breakpoint
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chat_external_principals_provider_check' AND conrelid = 'chat_external_principals'::regclass) THEN
-    ALTER TABLE "chat_external_principals" ADD CONSTRAINT "chat_external_principals_provider_check" CHECK ("chat_external_principals"."provider" in ('slack', 'github', 'discord', 'microsoft-teams', 'telegram', 'speko', 'agentmail', 'imessage-photon'));
+    ALTER TABLE "chat_external_principals" ADD CONSTRAINT "chat_external_principals_provider_check" CHECK ("chat_external_principals"."provider" in ('slack', 'github', 'discord', 'microsoft-teams', 'telegram', 'speko', 'agentmail', 'imessage-photon', 'whatsapp'));
   END IF;
 END $$;--> statement-breakpoint
 DO $$ BEGIN

@@ -6,7 +6,7 @@ import { EXTERNAL_SCHEMA_MAPPING_CHECKPOINT_TYPE } from "./external-database-map
 import { DataSourceDatabaseConfigService } from "./data-source-database-config.js";
 import { DataSourceUploadSessionsService } from "./data-source-upload-sessions.js";
 import { DataSourceLeaseLostError } from "./data-source-job-lease.js";
-import { readBuiltInAgentMarker } from "./built-in-agent-metadata.js";
+import { readBuiltInAgentMarker } from "../lib/built-in-agent-metadata.js";
 import { appendHeartbeatRunEvent } from "./heartbeat-run-events.js";
 
 type ClaimedDataSourceJob = {

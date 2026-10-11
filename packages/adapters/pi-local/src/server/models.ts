@@ -38,9 +38,6 @@ function parseModelsOutput(stdout: string): AdapterModel[] {
 
     const id = `${provider}/${model}`;
     parsed.push({ id, label: id });
-    if (model !== id) {
-      parsed.push({ id: model, label: `${model} (${provider})` });
-    }
   }
 
   return parsed;
@@ -219,7 +216,12 @@ export async function discoverPiModels(input: {
     const stderrModels = parseModelsOutput(result.stderr || "");
     const parsedCli = [...stdoutModels, ...stderrModels];
 
-    return sortModels(dedupeModels([defaultModelEntry, ...fallbackModels, ...parsedCli]));
+    if (parsedCli.length === 0 && fallbackModels.length > 0) {
+      return sortModels(fallbackModels);
+    }
+
+    const customModels = extractCustomProviderModels(runtimeEnv.PAPERCLIP_PI_PROVIDERS);
+    return sortModels(dedupeModels([...customModels, ...parsedCli]));
   } catch (err) {
     if (fallbackModels.length > 0) return sortModels(fallbackModels);
     throw err;

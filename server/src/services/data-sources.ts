@@ -40,7 +40,7 @@ import {
   rewriteClickhouseCreateTableName,
   rewriteClickhouseTableReferences,
 } from "./clickhouse.js";
-import { readBuiltInAgentMarker } from "./built-in-agent-metadata.js";
+import { readBuiltInAgentMarker } from "../lib/built-in-agent-metadata.js";
 import { DataSourceCollectionsService } from "./data-source-collections.js";
 import { deleteDataSourceFile, downloadDataSourceFileToPath, readDataSourceFile } from "./data-source-object-storage.js";
 import { RagModelService, type EmbeddingSpace } from "./rag-models.js";
