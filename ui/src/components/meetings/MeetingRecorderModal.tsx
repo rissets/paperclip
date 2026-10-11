@@ -145,7 +145,9 @@ export function MeetingRecorderModal({ open, onOpenChange, onMeetingCreated }: M
       // 3. Connect live WebSocket if available
       try {
         const wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
-        const wsUrl = `${wsProto}//${window.location.hostname}:5001/ws/meetings/${meeting.id}/stream`;
+        const wsUrl = window.location.protocol === "https:"
+          ? `${wsProto}//${window.location.host}/ws/meetings/${meeting.id}/stream`
+          : `${wsProto}//${window.location.hostname}:5001/ws/meetings/${meeting.id}/stream`;
         const ws = new WebSocket(wsUrl);
         socketRef.current = ws;
       } catch {

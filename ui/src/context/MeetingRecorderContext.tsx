@@ -183,7 +183,9 @@ export function MeetingRecorderProvider({ children }: { children: ReactNode }) {
 
       try {
         const wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
-        const wsUrl = `${wsProto}//${window.location.hostname}:5001/ws/meetings/${meeting.id}/stream`;
+        const wsUrl = window.location.protocol === "https:"
+          ? `${wsProto}//${window.location.host}/ws/meetings/${meeting.id}/stream`
+          : `${wsProto}//${window.location.hostname}:5001/ws/meetings/${meeting.id}/stream`;
         const ws = new WebSocket(wsUrl);
 
         ws.onopen = () => {
