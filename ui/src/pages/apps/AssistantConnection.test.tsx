@@ -51,6 +51,13 @@ describe("assistant setup from Connections", () => {
     expect(container.querySelector('[aria-label="Manage Assistant Connection (MCP)"]')).not.toBeNull();
     expect(container.querySelector('[role="alert"]')).toBeNull();
   });
+  it("treats 404 from unconfigured public MCP as empty connections without showing error", async () => {
+    const { ApiError } = await import("@/api/client");
+    mocks.connections.mockRejectedValue(new ApiError("API route not found", 404, { error: "API route not found" }));
+    await render(<AssistantConnectionCard onNavigate={vi.fn()} />);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Set up Assistant Connection (MCP)"]')).not.toBeNull();
+  });
   it("uses the canonical URL and explains how OpenCode opens consent without granting access", async () => {
     await render();
     const config = Array.from(container.querySelectorAll("pre")).map(p => p.textContent!).find(p => p.startsWith("{"))!;

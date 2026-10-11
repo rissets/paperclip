@@ -209,9 +209,20 @@ export function publicMcpManagementRoutes(oauth: PublicMcpOAuth, agentOAuth?: Pu
     }
     next();
   };
+  const isLoopbackOrigin = (urlStr: string) => {
+    try {
+      const u = new URL(urlStr);
+      return ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
+    } catch { return false; }
+  };
   const sameOrigin: RequestHandler = (req, _res, next) => {
     const origin = req.headers.origin ?? (req.headers.referer ? new URL(req.headers.referer).origin : "");
-    if (origin !== oauth.config.origin && origin !== oauth.config.authorizationOrigin) throw new McpOAuthError("access_denied", "Connection changes require the Paperclip browser origin.", 403);
+    if (origin !== oauth.config.origin && origin !== oauth.config.authorizationOrigin) {
+      const isLoopbackMatch = isLoopbackOrigin(origin) && isLoopbackOrigin(oauth.config.origin);
+      if (!isLoopbackMatch) {
+        throw new McpOAuthError("access_denied", "Connection changes require the Paperclip browser origin.", 403);
+      }
+    }
     next();
   };
   router.use(["/mcp", "/dot-mcp"], (_req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); });

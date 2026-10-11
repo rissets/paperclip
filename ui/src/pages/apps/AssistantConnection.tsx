@@ -31,8 +31,20 @@ function AssistantIcon({ assistant }: { assistant: Assistant }) {
 export function useAssistantConnections(poll = false) {
   const { selectedCompanyId } = useCompany();
   const query = useQuery({
-    queryKey: connectionsKey, queryFn: publicMcpApi.connections, retry: false,
-    enabled: Boolean(selectedCompanyId), refetchInterval: poll ? 5000 : false,
+    queryKey: connectionsKey,
+    queryFn: async () => {
+      try {
+        return await publicMcpApi.connections();
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 404) {
+          return [];
+        }
+        throw err;
+      }
+    },
+    retry: false,
+    enabled: Boolean(selectedCompanyId),
+    refetchInterval: poll ? 5000 : false,
   });
   return { ...query, rows: (query.data ?? []).filter(row => row.companyId === selectedCompanyId && !row.revokedAt && !row.scopes.includes("paperclip:agent")) };
 }

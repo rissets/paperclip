@@ -602,8 +602,14 @@ export async function createApp(
       bindHost: opts.bindHost,
     }),
   );
+  const loopbackMcpOrigin = (
+    !process.env.PAPERCLIP_PUBLIC_URL &&
+    !opts.authPublicBaseUrl &&
+    opts.deploymentExposure !== "public" &&
+    (["127.0.0.1", "localhost", "::1", "0.0.0.0"].includes(opts.bindHost ?? "") || process.env.NODE_ENV !== "production")
+  ) ? `http://localhost:${opts.serverPort ?? 3100}` : undefined;
   let mcpConfig: ReturnType<typeof publicMcpConfig> = null;
-  try { mcpConfig = publicMcpConfig(process.env, opts.authPublicBaseUrl); }
+  try { mcpConfig = publicMcpConfig(process.env, opts.authPublicBaseUrl || loopbackMcpOrigin); }
   catch { logger.warn("Assistant connections require an HTTPS public URL (HTTP loopback is allowed for development)."); }
   const publicMcpOAuth = mcpConfig ? createPublicMcpOAuth(db, mcpConfig) : null;
   const publicMcpIngress = Router();
@@ -1073,6 +1079,18 @@ export async function createApp(
     publicMcpIngress.use(publicMcpIngressRoutes(dotOAuth, createPublicMcpExecutor(db, dotOAuth, dispatch), dotMcpEvents, createDotRunnerMcpTools(db, connectionIntentHeartbeat)));
     api.use(publicMcpManagementRoutes(publicMcpOAuth, dotOAuth));
     api.use(dotRunnerRoutes(db, publicMcpOAuth.config.origin + "/mcp/runner"));
+  } else {
+    api.get("/mcp/connections", (_req, res) => {
+      res.setHeader("Cache-Control", "no-store");
+      res.json([]);
+    });
+    api.get("/mcp/setup", (_req, res) => {
+      res.setHeader("Cache-Control", "no-store");
+      res.status(404).json({
+        error: "not_configured",
+        message: "Assistant connections require an HTTPS public URL (HTTP loopback is allowed for development).",
+      });
+    });
   }
   app.use("/api", api);
   app.use("/api", (_req, res) => {
