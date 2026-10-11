@@ -9,6 +9,7 @@ import type { DeploymentMode, LiveEvent } from "@paperclipai/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { extractSessionTokenFromCookieHeader } from "../middleware/auth.js";
 import { logger } from "../middleware/logger.js";
+import { activityToastIdentity } from "./activity-toast-identity.js";
 import { subscribeCompanyLiveEvents } from "../services/live-events.js";
 import { trackIdleWork } from "../services/task-admission.js";
 
@@ -314,7 +315,13 @@ export function setupLiveEventsWebSocketServer(
 
     const access = authorizationService(db);
     async function visibleEvent(event: LiveEvent): Promise<LiveEvent | null> {
-      if (context!.actor.source === "local_implicit") return event;
+      if (context!.actor.source === "local_implicit") {
+        if (event.type === "activity.logged" && event.payload.entityType === "issue") {
+          return { ...event, payload: { ...event.payload,
+            ...await activityToastIdentity(db, event.companyId, event.payload) } };
+        }
+        return event;
+      }
       if (context!.apiKeyId) {
         const active = await db.select({ id: agentApiKeys.id }).from(agentApiKeys)
           .where(and(eq(agentApiKeys.id, context!.apiKeyId), isNull(agentApiKeys.revokedAt))).limit(1);
@@ -354,6 +361,8 @@ export function setupLiveEventsWebSocketServer(
       // clients obtain details through viewer-filtered HTTP reads.
       if (event.type === "activity.logged") return { ...event, payload: {
         action: payload.action, entityType: payload.entityType, entityId: payload.entityId,
+        // The task read check above authorizes attribution, but not arbitrary details.
+        ...(issueId ? await activityToastIdentity(db, event.companyId, payload) : {}),
       } };
       if (event.type === "agent.status") return { ...event, payload: { agentId: payload.agentId, status: payload.status } };
       if (event.type === "external_object.updated") return { ...event, payload: { externalObjectId: payload.externalObjectId } };

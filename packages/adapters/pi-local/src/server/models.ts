@@ -316,11 +316,9 @@ export async function ensurePiModelConfiguredAndAvailable(input: {
   }
 
   const model = normalizePiModelId(rawModel, models);
-
   if (!models.some((entry) => entry.id === model)) {
-    const sample = models.slice(0, 12).map((entry) => entry.id).join(", ");
     throw new Error(
-      `Configured Pi model is unavailable: ${rawModel}. Available models: ${sample}${models.length > 12 ? ", ..." : ""}`,
+      `Configured Pi model is unavailable: ${rawModel}. ${models.length} models are available; list them with \`pi --list-models\`.`,
     );
   }
 

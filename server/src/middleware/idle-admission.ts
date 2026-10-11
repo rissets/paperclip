@@ -62,8 +62,10 @@ export function trackIdleRequestHandlers(app: Application): void {
       if (!layer || typeof layer !== "object") continue;
       if (seen.has(layer)) continue;
       seen.add(layer);
-      if (layer.route && typeof layer.route === "object" && Array.isArray(layer.route.stack)) {
-        visit(layer.route.stack, true);
+      // Connect/Vite layers use a mount-path string for route; only Express
+      // Route objects contain a nested handler stack.
+      if (layer.route && typeof layer.route !== "string" && Array.isArray((layer.route as any).stack)) {
+        visit((layer.route as any).stack, true);
         continue;
       }
       if (layer.handle && typeof layer.handle === "function" && Array.isArray((layer.handle as any).stack)) {

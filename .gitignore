@@ -89,3 +89,6 @@ graphify-out/
 services/meeting-notes/storage/
 __pycache__/
 *.pyc
+
+# Local native Runner test/session state
+.paperclip-runner-prp/

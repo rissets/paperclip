@@ -35,6 +35,7 @@ const EXTERNAL_CHAT_PROVIDERS = new Set([
   "telegram",
   "imessage-photon",
   "whatsapp",
+  "speko",
 ]);
 const ATTACHMENT_OMISSION_REASONS = new Set([
   "attachment_limit",

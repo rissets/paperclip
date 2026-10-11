@@ -8,6 +8,7 @@ const BOUND_EXTERNAL_CHAT_PROVIDERS = [
   "telegram",
   "imessage-photon",
   "whatsapp",
+  "speko",
 ] as const;
 
 export function boundExternalChatProvider(source: unknown) {

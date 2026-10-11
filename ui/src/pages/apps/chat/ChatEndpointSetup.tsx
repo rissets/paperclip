@@ -52,6 +52,7 @@ import {
 } from "./github-private-key-file";
 
 const providerNames: Record<ChatProvider, string> = {
+  speko: "Speko",
   agentmail: "AgentMail",
   slack: "Slack",
   github: "GitHub",
