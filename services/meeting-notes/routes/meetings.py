@@ -60,7 +60,7 @@ def patch_meeting(meeting_id: str):
     if not meeting:
         return jsonify({"error": "Meeting not found"}), 404
     data = request.get_json() or {}
-    allowed = ["title", "status", "summary"]
+    allowed = ["title", "status", "summary", "notes", "enhanced_notes"]
     updates = {k: v for k, v in data.items() if k in allowed}
     updated = update_meeting(meeting_id, **updates)
     return jsonify(updated)

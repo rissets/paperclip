@@ -2,6 +2,9 @@ import subprocess
 import os
 import json
 import logging
+import wave
+import struct
+import math
 from pathlib import Path
 from typing import Optional, List
 from config import Config
@@ -140,5 +143,28 @@ class AudioProcessor:
                 except Exception:
                     pass
         return 0.0
+
+    def calculate_wav_rms(self, wav_path: Path) -> float:
+        """Calculates RMS audio level for a 16-bit mono WAV file."""
+        try:
+            with wave.open(str(wav_path), "rb") as wf:
+                n_frames = wf.getnframes()
+                if n_frames == 0:
+                    return 0.0
+                raw = wf.readframes(n_frames)
+                count = len(raw) // 2
+                if count == 0:
+                    return 0.0
+                samples = struct.unpack(f"<{count}h", raw[:count * 2])
+                sum_sq = sum(s * s for s in samples)
+                return math.sqrt(sum_sq / count)
+        except Exception as e:
+            logger.warning(f"Error calculating WAV RMS for {wav_path}: {e}")
+            return 999.0
+
+    def is_silent(self, wav_path: Path, threshold_rms: float = 300.0) -> bool:
+        """Checks if a WAV file contains only silence/ambient room noise."""
+        rms = self.calculate_wav_rms(wav_path)
+        return rms < threshold_rms
 
 audio_processor = AudioProcessor()

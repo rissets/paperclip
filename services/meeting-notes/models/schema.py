@@ -44,6 +44,16 @@ def init_db():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_meetings_company ON meetings(company_id);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_transcripts_meeting ON transcript_segments(meeting_id);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_transcripts_start ON transcript_segments(meeting_id, start_seconds);")
+    
+    try:
+        cursor.execute("ALTER TABLE meetings ADD COLUMN notes TEXT DEFAULT '';")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE meetings ADD COLUMN enhanced_notes TEXT DEFAULT '';")
+    except Exception:
+        pass
+        
     conn.commit()
     conn.close()
 

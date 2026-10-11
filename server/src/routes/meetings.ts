@@ -3,12 +3,14 @@ import multer from "multer";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
-import type { Db } from "@paperclipai/db";
+import { agents, type Db } from "@paperclipai/db";
+import { eq, and, ne } from "drizzle-orm";
 import { assertCompanyAccess } from "./authz.js";
 import { badRequest, notFound, HttpError } from "../errors.js";
 import { OnboardingOrchestratorService } from "../services/onboarding-orchestrator.js";
 import { issueService } from "../services/issues.js";
 import { logActivity } from "../services/activity-log.js";
+import { meetingIntelligence } from "../services/meeting-intelligence.js";
 
 const upload = multer({
   dest: path.join(os.tmpdir(), "paperclip-meeting-uploads"),
@@ -400,6 +402,129 @@ export function meetingRoutes(db: Db) {
     res.status(201).json({
       success: true,
       issue,
+    });
+  });
+
+  // 14. Extract Action Items / Tickets via Company AI Agent
+  router.post("/companies/:companyId/meetings/:id/extract-tickets", async (req: Request, res: Response) => {
+    const companyId = req.params.companyId as string;
+    await assertCompanyAccess(req, companyId);
+    const meetingId = req.params.id as string;
+
+    const checkRes = await callMeetingService(`/api/meetings/${encodeURIComponent(meetingId)}`);
+    if (checkRes.status === 404) throw notFound("Meeting not found");
+    const meeting = await checkRes.json();
+    if (meeting.company_id && meeting.company_id !== companyId) {
+      throw notFound("Meeting not found in this company");
+    }
+
+    const transcriptRes = await callMeetingService(`/api/meetings/${encodeURIComponent(meetingId)}/transcript`);
+    const transcriptData = await transcriptRes.json();
+    const segments = transcriptData.segments || [];
+
+    const availableAgents = await db
+      .select({
+        id: agents.id,
+        name: agents.name,
+        role: agents.role,
+        title: agents.title,
+        capabilities: agents.capabilities,
+      })
+      .from(agents)
+      .where(and(eq(agents.companyId, companyId), ne(agents.status, "terminated")));
+
+    const tickets = await meetingIntelligence.extractTickets({
+      meetingTitle: meeting.title || "Meeting",
+      notes: req.body?.notes || meeting.notes || "",
+      enhancedNotes: meeting.enhanced_notes || "",
+      segments,
+      availableAgents,
+    });
+
+    res.status(200).json({
+      success: true,
+      tickets,
+    });
+  });
+
+  // 15. Live Enhance Notes with Agent
+  router.post("/companies/:companyId/meetings/:id/enhance-notes", async (req: Request, res: Response) => {
+    const companyId = req.params.companyId as string;
+    await assertCompanyAccess(req, companyId);
+    const meetingId = req.params.id as string;
+
+    const checkRes = await callMeetingService(`/api/meetings/${encodeURIComponent(meetingId)}`);
+    if (checkRes.status === 404) throw notFound("Meeting not found");
+    const meeting = await checkRes.json();
+    if (meeting.company_id && meeting.company_id !== companyId) {
+      throw notFound("Meeting not found in this company");
+    }
+
+    const { notes, style } = req.body || {};
+    const rawNotes = typeof notes === "string" ? notes : (meeting.notes || "");
+
+    const transcriptRes = await callMeetingService(`/api/meetings/${encodeURIComponent(meetingId)}/transcript`);
+    const transcriptData = await transcriptRes.json();
+    const segments = transcriptData.segments || [];
+    const transcriptSummary = segments.slice(-20).map((s: any) => `[${s.speaker}]: ${s.text}`).join("\n");
+
+    const enhanced = await meetingIntelligence.enhanceNotes({
+      meetingTitle: meeting.title || "Meeting",
+      notes: rawNotes,
+      transcriptSummary,
+      style: typeof style === "string" ? style : "Standard Executive",
+    });
+
+    // Save back to meeting service
+    await callMeetingService(`/api/meetings/${encodeURIComponent(meetingId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        notes: rawNotes,
+        enhanced_notes: enhanced,
+      }),
+    });
+
+    res.status(200).json({
+      success: true,
+      enhanced_notes: enhanced,
+    });
+  });
+
+  // 16. Copilot Chat for Meeting
+  router.post("/companies/:companyId/meetings/:id/chat", async (req: Request, res: Response) => {
+    const companyId = req.params.companyId as string;
+    await assertCompanyAccess(req, companyId);
+    const meetingId = req.params.id as string;
+
+    const checkRes = await callMeetingService(`/api/meetings/${encodeURIComponent(meetingId)}`);
+    if (checkRes.status === 404) throw notFound("Meeting not found");
+    const meeting = await checkRes.json();
+    if (meeting.company_id && meeting.company_id !== companyId) {
+      throw notFound("Meeting not found in this company");
+    }
+
+    const { message } = req.body || {};
+    if (!message || typeof message !== "string") {
+      throw badRequest("Message is required");
+    }
+
+    const transcriptRes = await callMeetingService(`/api/meetings/${encodeURIComponent(meetingId)}/transcript`);
+    const transcriptData = await transcriptRes.json();
+    const segments = transcriptData.segments || [];
+    const transcriptText = segments.map((s: any) => `[${s.speaker}]: ${s.text}`).join("\n");
+
+    const reply = await meetingIntelligence.askCopilot({
+      meetingTitle: meeting.title || "Meeting",
+      notes: meeting.notes || "",
+      transcriptText,
+      query: message.trim(),
+    });
+
+    res.status(200).json({
+      success: true,
+      reply,
+      timestamp: new Date().toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" }),
     });
   });
 

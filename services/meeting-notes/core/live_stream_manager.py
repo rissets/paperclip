@@ -15,6 +15,7 @@ from models.schema import (
     add_transcript_segment
 )
 
+import re
 logger = logging.getLogger("live_stream_manager")
 
 DEFAULT_WEBM_OPUS_HEADER = (
@@ -24,6 +25,33 @@ DEFAULT_WEBM_OPUS_HEADER = (
     b's\xc5\x86\xbb\xed\x10\xee\xac\xe6\x83\x81\x02\x86\x86A_OPUSc\xa2\x93OpusHead\x01\x01'
     b'\x00\x00\x80\xbb\x00\x00\x00\x00\x00\xe1\x8d\xb5\x84G;\x80\x00\x9f\x81\x01bd\x81 '
 )
+
+WHISPER_HALLUCINATION_PATTERNS = [
+    re.compile(r"sampai jumpa di video (selanjutnya|berikutnya|nanti|lagi)", re.I),
+    re.compile(r"sampai jumpa lagi", re.I),
+    re.compile(r"terima kasih (sudah|telah) (menonton|menyaksikan)", re.I),
+    re.compile(r"jangan lupa (untuk )?(like|komen|comment|share|subscribe)", re.I),
+    re.compile(r"like,? (comment|komen),? dan subscribe", re.I),
+    re.compile(r"selamat menonton", re.I),
+    re.compile(r"transkrip oleh", re.I),
+    re.compile(r"subtitle(s)? by", re.I),
+    re.compile(r"ditranskripsi oleh", re.I),
+    re.compile(r"see you in the next video", re.I),
+    re.compile(r"thank you for watching", re.I),
+    re.compile(r"thanks for watching", re.I),
+    re.compile(r"please like and subscribe", re.I),
+    re.compile(r"don't forget to like and subscribe", re.I),
+    re.compile(r"subtitles made by", re.I),
+]
+
+def is_hallucination_or_noise(text: str) -> bool:
+    clean = text.strip().lower()
+    if not clean or clean in [".", "..", "...", "terima kasih.", "terima kasih", "thank you.", "thank you", "bye", "bye bye"]:
+        return True
+    for pat in WHISPER_HALLUCINATION_PATTERNS:
+        if pat.search(clean):
+            return True
+    return False
 
 def deduplicate_overlap(prev_text: Optional[str], current_text: str) -> str:
     """Removes overlapping boundary words at the start of current_text matching the end of prev_text."""
@@ -152,11 +180,22 @@ class LiveMeetingSession:
                 pass
             return None
             
+        # Silence / Energy Check: Skip STT on quiet/ambient audio to prevent Whisper hallucination
+        if audio_processor.is_silent(wav_chunk_path, threshold_rms=300.0):
+            try:
+                wav_chunk_path.unlink()
+            except Exception:
+                pass
+            start_sec = round(self.current_time_offset, 2)
+            end_sec = round(self.current_time_offset + new_audio_duration, 2)
+            self.current_time_offset = end_sec
+            return None
+            
         start_sec = round(self.current_time_offset, 2)
         end_sec = round(self.current_time_offset + new_audio_duration, 2)
         self.current_time_offset = end_sec
         
-        # 3. Transcribe slice with previous segment text as context prompt
+        # 3. Transcribe slice with previous clean segment text as context prompt
         prev_prompt = self.segments[-1]["text"] if self.segments else None
         stt_result = transcriber.transcribe(wav_chunk_path, language="id", prompt=prev_prompt)
         
@@ -172,8 +211,13 @@ class LiveMeetingSession:
             # Deduplicate boundary overlap words
             text = deduplicate_overlap(prev_prompt, raw_text)
             
-            # Filter out empty or hallucinated noise tokens
-            if text and text not in [".", "...", "Terima kasih.", "Terima kasih", "Thank you.", "Thank you"]:
+            # Filter out empty, repetitive, or hallucinated noise tokens
+            if text and not is_hallucination_or_noise(text):
+                # Check consecutive identical segment
+                if self.segments and text.strip().lower() == self.segments[-1]["text"].strip().lower():
+                    logger.info(f"Skipping consecutive duplicate segment in meeting {self.meeting_id}: {text}")
+                    return None
+
                 segment = add_transcript_segment(
                     meeting_id=self.meeting_id,
                     text=text,

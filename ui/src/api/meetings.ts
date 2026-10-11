@@ -19,8 +19,20 @@ export interface Meeting {
   audio_path?: string | null;
   duration_seconds: number;
   summary?: string | null;
+  notes?: string | null;
+  enhanced_notes?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface ExtractedTicket {
+  title: string;
+  description: string;
+  priority: "low" | "medium" | "high" | "urgent";
+  suggestedAgentId?: string | null;
+  suggestedAgentName?: string | null;
+  rationale?: string;
+  status?: string;
 }
 
 export interface MeetingDetail extends Meeting {
@@ -38,7 +50,11 @@ export const meetingsApi = {
   create: (companyId: string, input: { title?: string; id?: string }) =>
     api.post<Meeting>(`/companies/${encodeURIComponent(companyId)}/meetings`, input),
 
-  update: (companyId: string, id: string, input: Partial<Pick<Meeting, "title" | "status" | "summary">>) =>
+  update: (
+    companyId: string,
+    id: string,
+    input: Partial<Pick<Meeting, "title" | "status" | "summary" | "notes" | "enhanced_notes">>
+  ) =>
     api.patch<Meeting>(`/companies/${encodeURIComponent(companyId)}/meetings/${encodeURIComponent(id)}`, input),
 
   delete: (companyId: string, id: string) =>
@@ -94,5 +110,23 @@ export const meetingsApi = {
     api.post<{ success: boolean; issue: any }>(
       `/companies/${encodeURIComponent(companyId)}/meetings/${encodeURIComponent(id)}/create-issue`,
       input
+    ),
+
+  extractTickets: (companyId: string, id: string, body?: { notes?: string }) =>
+    api.post<{ success: boolean; tickets: ExtractedTicket[] }>(
+      `/companies/${encodeURIComponent(companyId)}/meetings/${encodeURIComponent(id)}/extract-tickets`,
+      body || {}
+    ),
+
+  enhanceNotes: (companyId: string, id: string, body?: { notes?: string; style?: string }) =>
+    api.post<{ success: boolean; enhanced_notes: string }>(
+      `/companies/${encodeURIComponent(companyId)}/meetings/${encodeURIComponent(id)}/enhance-notes`,
+      body || {}
+    ),
+
+  chat: (companyId: string, id: string, body: { message: string }) =>
+    api.post<{ success: boolean; reply: string; sources?: string[] }>(
+      `/companies/${encodeURIComponent(companyId)}/meetings/${encodeURIComponent(id)}/chat`,
+      body
     ),
 };

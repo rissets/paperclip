@@ -1,21 +1,19 @@
-import { useState, useRef, useEffect, useMemo } from "react";
+import { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   ArrowLeft,
   Play,
   Pause,
   RotateCcw,
-  Volume2,
-  Share2,
   Database,
   CheckCircle2,
   Circle,
   Plus,
-  Send,
   Sparkles,
   Bot,
-  User,
   Search,
   Check,
   Calendar,
@@ -25,11 +23,22 @@ import {
   FileText,
   ListTodo,
   ExternalLink,
-  Minus,
   AlertCircle,
   MessageSquare,
   Layers,
   TrendingUp,
+  X,
+  Copy,
+  ChevronDown,
+  ChevronUp,
+  RefreshCw,
+  Globe,
+  ArrowUp,
+  HelpCircle,
+  List,
+  ListOrdered,
+  Bold,
+  Italic,
 } from "lucide-react";
 import { useCompany } from "@/context/CompanyContext";
 import { Button } from "@/components/ui/button";
@@ -53,7 +62,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
-import { meetingsApi, type MeetingDetail, type TranscriptSegment } from "@/api/meetings";
+import { meetingsApi, type ExtractedTicket } from "@/api/meetings";
 import { agentsApi } from "@/api/agents";
 
 interface CopilotMessage {
@@ -61,7 +70,11 @@ interface CopilotMessage {
   sender: "user" | "copilot";
   text: string;
   timestamp: string;
-  references?: string[];
+  sources?: string[];
+}
+
+interface EditableExtractedTicket extends ExtractedTicket {
+  selected: boolean;
 }
 
 export function MeetingDetail() {
@@ -70,50 +83,74 @@ export function MeetingDetail() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
 
+  // Audio Playback state
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [audioDuration, setAudioDuration] = useState(0);
-  const [transcriptSearch, setTranscriptSearch] = useState("");
-  const [isEditingTitle, setIsEditingTitle] = useState(false);
-  const [titleInput, setTitleInput] = useState("");
-  const [autoScroll, setAutoScroll] = useState(true);
-  const [isCopilotOpen, setIsCopilotOpen] = useState(true);
   const [audioError, setAudioError] = useState<string | null>(null);
 
-  // Dynamic Action Items state (no dummy items)
-  const [actionItems, setActionItems] = useState<
-    Array<{ id: string; title: string; desc: string; agent?: string }>
-  >([]);
-  const [isExtractingActionItems, setIsExtractingActionItems] = useState(false);
+  // Title edit state
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [titleInput, setTitleInput] = useState("");
+
+  // Notes & Live Enhancing state
+  const [notesContent, setNotesContent] = useState("");
+  const [enhancedNotes, setEnhancedNotes] = useState("");
+  const [isNotesSaving, setIsNotesSaving] = useState(false);
+  const [isEnhancing, setIsEnhancing] = useState(false);
+  const [liveEnhanceEnabled, setLiveEnhanceEnabled] = useState(true);
+  const [selectedStyle, setSelectedStyle] = useState("Standard Executive");
+  const [isEnhancedCollapsed, setIsEnhancedCollapsed] = useState(false);
+  const [copiedEnhanced, setCopiedEnhanced] = useState(false);
+
+  // Right Pane state
+  const [activeTab, setActiveTab] = useState<"chat" | "qa" | "summary" | "transcript">("transcript");
+  const [fontSize, setFontSize] = useState<"sm" | "base" | "lg">("sm");
+  const [isRightPaneOpen, setIsRightPaneOpen] = useState(true);
+
+  // Transcript state
+  const [transcriptSearch, setTranscriptSearch] = useState("");
+  const [autoScroll, setAutoScroll] = useState(true);
+  const [copiedTranscript, setCopiedTranscript] = useState(false);
 
   // Sync to Data Source state
   const [isSyncingDatasource, setIsSyncingDatasource] = useState(false);
   const [syncSuccess, setSyncSuccess] = useState(false);
 
-  // Task creation modal state
-  const [isTaskModalOpen, setIsTaskModalOpen] = useState(false);
-  const [taskTitle, setTaskTitle] = useState("");
-  const [taskDescription, setTaskDescription] = useState("");
-  const [taskAssignee, setTaskAssignee] = useState<string | null>(null);
-  const [taskPriority, setTaskPriority] = useState<string>("medium");
-  const [isCreatingTask, setIsCreatingTask] = useState(false);
-  const [createdTaskNotice, setCreatedTaskNotice] = useState<string | null>(null);
+  // AI Agent Ticket Extraction modal state
+  const [isExtractModalOpen, setIsExtractModalOpen] = useState(false);
+  const [isExtractingTickets, setIsExtractingTickets] = useState(false);
+  const [extractedTickets, setExtractedTickets] = useState<EditableExtractedTicket[]>([]);
+  const [isCreatingExtractedTickets, setIsCreatingExtractedTickets] = useState(false);
+  const [ticketCreationNotice, setTicketCreationNotice] = useState<string | null>(null);
+
+  // Single task modal state
+  const [isSingleTaskModalOpen, setIsSingleTaskModalOpen] = useState(false);
+  const [singleTaskTitle, setSingleTaskTitle] = useState("");
+  const [singleTaskDesc, setSingleTaskDesc] = useState("");
+  const [singleTaskAssignee, setSingleTaskAssignee] = useState<string | null>(null);
+  const [singleTaskPriority, setSingleTaskPriority] = useState("medium");
+  const [isCreatingSingleTask, setIsCreatingSingleTask] = useState(false);
 
   // Copilot Chat state
-  const [copilotInput, setCopilotInput] = useState("");
-  const [copilotMessages, setCopilotMessages] = useState<CopilotMessage[]>([
+  const [chatInput, setChatInput] = useState("");
+  const [chatMessages, setChatMessages] = useState<CopilotMessage[]>([
     {
       id: "init-1",
       sender: "copilot",
-      text: "Halo! Saya Meeting Copilot Agent. Saya telah memproses transkrip rapat ini dan dapat menjawab pertanyaan, mengekstrak kesimpulan, atau mengecek data perusahaan via Enterprise Orchestrator.",
+      text: "Halo! Saya Meeting Intelligence Agent. Saya memantau catatan dan transkrip pertemuan ini. Silakan tanyakan poin diskusi, klarifikasi keputusan, atau minta bantuan analisis.",
       timestamp: new Date().toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" }),
     },
   ]);
-  const [isCopilotThinking, setIsCopilotThinking] = useState(false);
+  const [isChatSending, setIsChatSending] = useState(false);
 
+  // References
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const notesTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const transcriptContainerRef = useRef<HTMLDivElement | null>(null);
   const activeSegmentRef = useRef<HTMLDivElement | null>(null);
+  const saveTimeoutRef = useRef<any>(null);
+  const enhanceTimeoutRef = useRef<any>(null);
 
   // 1. Fetch Meeting Detail
   const {
@@ -137,12 +174,21 @@ export function MeetingDetail() {
     enabled: !!selectedCompanyId,
   });
 
+  // Sync meeting data into local states on first load or changes
   useEffect(() => {
-    if (meeting?.title) {
-      setTitleInput(meeting.title);
-    }
-    if (meeting?.duration_seconds) {
-      setAudioDuration(meeting.duration_seconds);
+    if (meeting) {
+      if (meeting.title && !titleInput) {
+        setTitleInput(meeting.title);
+      }
+      if (meeting.duration_seconds) {
+        setAudioDuration(meeting.duration_seconds);
+      }
+      if (meeting.notes !== undefined && meeting.notes !== null && !notesContent) {
+        setNotesContent(meeting.notes);
+      }
+      if (meeting.enhanced_notes) {
+        setEnhancedNotes(meeting.enhanced_notes);
+      }
     }
   }, [meeting]);
 
@@ -180,6 +226,37 @@ export function MeetingDetail() {
     return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
   };
 
+  // Date & Time formatting matching Gambar 2
+  const formattedDateTime = useMemo(() => {
+    const d = meeting?.created_at ? new Date(meeting.created_at) : new Date();
+    const dateFormatted = d.toLocaleDateString("en-US", {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+
+    const startTimeFormatted = d.toLocaleTimeString("en-US", {
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+    });
+
+    const durationSecs = meeting?.duration_seconds && meeting.duration_seconds > 0 ? meeting.duration_seconds : 1800;
+    const endDate = new Date(d.getTime() + durationSecs * 1000);
+    const endTimeFormatted = endDate.toLocaleTimeString("en-US", {
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+    });
+
+    return {
+      date: dateFormatted,
+      timeRange: `${startTimeFormatted} - ${endTimeFormatted}`,
+    };
+  }, [meeting]);
+
+  // Analytical summary synthesis
   const analyticalData = useMemo(() => {
     let summaryText = "";
     let topics: string[] = [];
@@ -204,8 +281,8 @@ export function MeetingDetail() {
 
     if (!summaryText) {
       if (segments.length > 0) {
-        summaryText = `Rapat membahas ${segments.length} poin percakapan. Topik utama mencakup koordinasi teknis, evaluasi alur kerja, dan pembagian tugas tim.`;
-        topics = ["Koordinasi Rapat", "Tinjauan Progres", "Tindak Lanjut"];
+        summaryText = `Rapat membahas ${segments.length} poin percakapan. Topik utama mencakup koordinasi teknis, evaluasi alur kerja, dan pembagian peran tugas antar agen.`;
+        topics = ["Koordinasi Tim", "Evaluasi Alur Kerja", "Tindak Lanjut"];
         insights = [
           `Terdeteksi ${segments.length} segmen pembicaraan aktif selama ${formatTime(meeting?.duration_seconds || 0)}.`,
           `Pembicara mendiskusikan integrasi sistem dan validasi data notulen rapat.`,
@@ -226,6 +303,7 @@ export function MeetingDetail() {
     };
   }, [meeting, segments]);
 
+  // Audio player controls
   const handlePlayPause = () => {
     if (!audioRef.current) return;
     if (isPlaying) {
@@ -239,7 +317,7 @@ export function MeetingDetail() {
         .catch((err) => {
           console.warn("Audio play failed:", err);
           setIsPlaying(false);
-          setAudioError("Gagal memutar audio. Pastikan file audio tersedia dan proses telah selesai.");
+          setAudioError("Audio belum siap atau proses rekaman masih berlangsung.");
         });
     }
   };
@@ -257,45 +335,84 @@ export function MeetingDetail() {
     }
   };
 
-  const handleExtractActionItems = () => {
-    if (!meeting) return;
-    setIsExtractingActionItems(true);
-    setTimeout(() => {
-      const fullText = segments.map((s) => s.text).join(" ").trim();
-      let extracted: Array<{ id: string; title: string; desc: string; agent?: string }> = [];
-
-      if (fullText.length > 0) {
-        const sentences = fullText
-          .split(/[.,\n]/)
-          .map((s) => s.trim())
-          .filter((s) => s.length > 5);
-
-        if (sentences.length > 0) {
-          extracted = sentences.slice(0, 3).map((sentence, idx) => ({
-            id: `extracted-${Date.now()}-${idx}`,
-            title: `Tindak Lanjut: ${sentence.charAt(0).toUpperCase() + sentence.slice(1)}`,
-            desc: `Diidentifikasi dari percakapan audio "${meeting.title}"`,
-            agent: agents[0]?.id || "meeting-agent",
-          }));
+  // Notes Auto-Save & Debounced Live Enhancement
+  const triggerEnhance = useCallback(
+    async (notesText: string, styleText: string) => {
+      if (!selectedCompanyId || !id || !notesText.trim()) return;
+      setIsEnhancing(true);
+      try {
+        const res = await meetingsApi.enhanceNotes(selectedCompanyId, id, {
+          notes: notesText,
+          style: styleText,
+        });
+        if (res.enhanced_notes) {
+          setEnhancedNotes(res.enhanced_notes);
         }
+      } catch (err) {
+        console.warn("Live enhance error:", err);
+      } finally {
+        setIsEnhancing(false);
       }
+    },
+    [selectedCompanyId, id]
+  );
 
-      if (extracted.length === 0) {
-        extracted = [
-          {
-            id: `act-${Date.now()}-1`,
-            title: `Review Notulen Rapat: ${meeting.title}`,
-            desc: `Tinjau ${segments.length} segmen percakapan dan pastikan kesepakatan tercapai.`,
-            agent: agents[0]?.id || "meeting-agent",
-          },
-        ];
+  const handleNotesChange = (value: string) => {
+    setNotesContent(value);
+    setIsNotesSaving(true);
+
+    if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+    saveTimeoutRef.current = setTimeout(async () => {
+      if (selectedCompanyId && id) {
+        try {
+          await meetingsApi.update(selectedCompanyId, id, { notes: value });
+        } catch {}
       }
+      setIsNotesSaving(false);
+    }, 1200);
 
-      setActionItems(extracted);
-      setIsExtractingActionItems(false);
-    }, 700);
+    if (liveEnhanceEnabled && value.trim().length > 10) {
+      if (enhanceTimeoutRef.current) clearTimeout(enhanceTimeoutRef.current);
+      enhanceTimeoutRef.current = setTimeout(() => {
+        triggerEnhance(value, selectedStyle);
+      }, 3500);
+    }
   };
 
+  // Formatting helpers for Toolbar
+  const handleInsertMarkdown = (prefix: string, suffix: string = "") => {
+    const textarea = notesTextareaRef.current;
+    if (!textarea) return;
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const selectedText = notesContent.substring(start, end);
+    const replacement = `${prefix}${selectedText || "teks"}${suffix}`;
+    const nextContent = notesContent.substring(0, start) + replacement + notesContent.substring(end);
+    handleNotesChange(nextContent);
+    setTimeout(() => {
+      textarea.focus();
+      textarea.setSelectionRange(start + prefix.length, start + prefix.length + (selectedText.length || 4));
+    }, 50);
+  };
+
+  // Copy helpers
+  const handleCopyEnhanced = () => {
+    if (!enhancedNotes) return;
+    navigator.clipboard.writeText(enhancedNotes);
+    setCopiedEnhanced(true);
+    setTimeout(() => setCopiedEnhanced(false), 2000);
+  };
+
+  const handleCopyTranscript = () => {
+    const fullText = segments
+      .map((s) => `[${formatTime(s.start_seconds)}] ${s.speaker}: ${s.text}`)
+      .join("\n");
+    navigator.clipboard.writeText(fullText);
+    setCopiedTranscript(true);
+    setTimeout(() => setCopiedTranscript(false), 2000);
+  };
+
+  // Title Update
   const handleUpdateTitle = async () => {
     if (!selectedCompanyId || !id || !titleInput.trim()) return;
     setIsEditingTitle(false);
@@ -303,11 +420,11 @@ export function MeetingDetail() {
       await meetingsApi.update(selectedCompanyId, id, { title: titleInput.trim() });
       queryClient.invalidateQueries({ queryKey: ["meeting", selectedCompanyId, id] });
     } catch {
-      // revert on error
       if (meeting) setTitleInput(meeting.title);
     }
   };
 
+  // Sync to Data Source (RAG)
   const handleSyncDatasource = async () => {
     if (!selectedCompanyId || !id) return;
     setIsSyncingDatasource(true);
@@ -322,39 +439,98 @@ export function MeetingDetail() {
     }
   };
 
-  const handleOpenTaskModal = (initialTitle: string, initialDesc?: string) => {
-    setTaskTitle(initialTitle);
-    setTaskDescription(initialDesc || "");
-    const meetingAgent = agents.find((a) => a.urlKey?.includes("meeting") || a.name?.toLowerCase().includes("meeting"));
-    setTaskAssignee(meetingAgent?.id || null);
-    setTaskPriority("medium");
-    setIsTaskModalOpen(true);
-  };
+  // AI Agent Ticket Extraction Flow
+  const handleOpenExtractModal = async () => {
+    if (!selectedCompanyId || !id) return;
+    setIsExtractModalOpen(true);
+    setIsExtractingTickets(true);
+    setTicketCreationNotice(null);
 
-  const handleCreateTask = async () => {
-    if (!selectedCompanyId || !id || !taskTitle.trim()) return;
-    setIsCreatingTask(true);
     try {
-      const res = await meetingsApi.createIssue(selectedCompanyId, id, {
-        title: taskTitle.trim(),
-        description: taskDescription.trim(),
-        assigneeAgentId: taskAssignee,
-        priority: taskPriority,
-        status: "backlog",
+      const res = await meetingsApi.extractTickets(selectedCompanyId, id, {
+        notes: notesContent,
       });
-      setIsTaskModalOpen(false);
-      setCreatedTaskNotice(`Task berhasil dibuat: #${res.issue?.identifier || res.issue?.id}`);
-      setTimeout(() => setCreatedTaskNotice(null), 6000);
+      const ticketsWithSelection: EditableExtractedTicket[] = (res.tickets || []).map((t) => ({
+        ...t,
+        selected: true,
+      }));
+      setExtractedTickets(ticketsWithSelection);
     } catch (err: any) {
-      alert(`Gagal membuat task: ${err.message || String(err)}`);
+      alert(`Gagal mengekstrak tiket via AI Agent: ${err.message || String(err)}`);
     } finally {
-      setIsCreatingTask(false);
+      setIsExtractingTickets(false);
     }
   };
 
-  const handleSendCopilotMessage = (promptText?: string) => {
-    const textToSend = promptText || copilotInput.trim();
-    if (!textToSend || !meeting) return;
+  const handleConfirmCreateTickets = async () => {
+    if (!selectedCompanyId || !id) return;
+    const selected = extractedTickets.filter((t) => t.selected);
+    if (selected.length === 0) return;
+
+    setIsCreatingExtractedTickets(true);
+    let createdCount = 0;
+    try {
+      for (const t of selected) {
+        await meetingsApi.createIssue(selectedCompanyId, id, {
+          title: t.title,
+          description: [
+            t.description,
+            t.rationale ? `\n*Rekomendasi AI*: ${t.rationale}` : "",
+          ].join("\n"),
+          assigneeAgentId: t.suggestedAgentId || null,
+          priority: t.priority || "medium",
+          status: "backlog",
+        });
+        createdCount++;
+      }
+      setIsExtractModalOpen(false);
+      setTicketCreationNotice(`Berhasil membuat ${createdCount} tiket ke backlog Paperclip!`);
+      setTimeout(() => setTicketCreationNotice(null), 8000);
+      queryClient.invalidateQueries({ queryKey: ["issues", selectedCompanyId] });
+    } catch (err: any) {
+      alert(`Gagal membuat sebagian tiket: ${err.message || String(err)}`);
+    } finally {
+      setIsCreatingExtractedTickets(false);
+    }
+  };
+
+  // Single Task Creation Flow
+  const handleOpenSingleTaskModal = (initialTitle: string, initialDesc?: string) => {
+    setSingleTaskTitle(initialTitle);
+    setSingleTaskDesc(initialDesc || "");
+    const meetingAgent = agents.find(
+      (a) => a.urlKey?.includes("meeting") || a.name?.toLowerCase().includes("meeting")
+    );
+    setSingleTaskAssignee(meetingAgent?.id || (agents[0]?.id || null));
+    setSingleTaskPriority("medium");
+    setIsSingleTaskModalOpen(true);
+  };
+
+  const handleCreateSingleTask = async () => {
+    if (!selectedCompanyId || !id || !singleTaskTitle.trim()) return;
+    setIsCreatingSingleTask(true);
+    try {
+      const res = await meetingsApi.createIssue(selectedCompanyId, id, {
+        title: singleTaskTitle.trim(),
+        description: singleTaskDesc.trim(),
+        assigneeAgentId: singleTaskAssignee,
+        priority: singleTaskPriority,
+        status: "backlog",
+      });
+      setIsSingleTaskModalOpen(false);
+      setTicketCreationNotice(`Task berhasil dibuat: #${res.issue?.identifier || res.issue?.id}`);
+      setTimeout(() => setTicketCreationNotice(null), 6000);
+    } catch (err: any) {
+      alert(`Gagal membuat task: ${err.message || String(err)}`);
+    } finally {
+      setIsCreatingSingleTask(false);
+    }
+  };
+
+  // Copilot Chat Flow
+  const handleSendChat = async () => {
+    const textToSend = chatInput.trim();
+    if (!textToSend || !selectedCompanyId || !id) return;
 
     const userMsg: CopilotMessage = {
       id: `u-${Date.now()}`,
@@ -363,50 +539,31 @@ export function MeetingDetail() {
       timestamp: new Date().toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" }),
     };
 
-    setCopilotMessages((prev) => [...prev, userMsg]);
-    if (!promptText) setCopilotInput("");
-    setIsCopilotThinking(true);
+    setChatMessages((prev) => [...prev, userMsg]);
+    setChatInput("");
+    setIsChatSending(true);
 
-    // Contextual answer synthesis grounded in transcript
-    setTimeout(() => {
-      let answer = "";
-      const lower = textToSend.toLowerCase();
-
-      if (lower.includes("action") || lower.includes("tugas") || lower.includes("todo")) {
-        answer =
-          "Berdasarkan percakapan meeting, berikut adalah action items yang teridentifikasi:\n\n" +
-          "1. **Deploy & Integrasi Layanan**: Pastikan service Python Flask dan routing Express telah sinkron.\n" +
-          "2. **Pengecekan Audio Latency**: Uji chunk audio 3-5 detik pada koneksi jaringan live.\n" +
-          "3. **Sinkronisasi ke RAG**: Dokumen meeting otomatis diindeks ke pgvector untuk pencarian lanjutan.\n\n" +
-          "Anda dapat menekan tombol **'Buat Task'** pada setiap item di sebelah kiri untuk memasukkannya ke antrean task Primbon.";
-      } else if (lower.includes("ringkas") || lower.includes("keputusan") || lower.includes("poin")) {
-        answer =
-          `Berikut ringkasan utama dari meeting "${meeting.title}":\n\n` +
-          `• **Topik Utama**: Diskusi mengenai implementasi dan evaluasi alur kerja sistem.\n` +
-          `• **Keputusan**: Menggunakan Whisper Turbo dengan mekanisme dual fallback untuk menjamin uptime transkripsi.\n` +
-          `• **Tindak Lanjut**: Seluruh hasil rapat disimpan ke basis pengetahuan perusahaan (RAG document).\n\n` +
-          `Total durasi pembicaraan: ${Math.round(meeting.duration_seconds || 0)} detik dengan ${segments.length} segmen terdeteksi.`;
-      } else if (lower.includes("sop") || lower.includes("data source") || lower.includes("korelasi")) {
-        answer =
-          "Berdasarkan penelusuran via Enterprise Orchestrator ke Data Sources perusahaan:\n\n" +
-          "• Keputusan teknis yang dibahas selaras dengan SOP Engineering & Arsitektur Paperclip (SPEC-implementation.md).\n" +
-          "• Tidak ada pelanggaran kebijakan privasi data karena semua audio dan data transkrip terisolasi pada batas tenant company.";
-      } else {
-        answer =
-          `Mengenai pertanyaan Anda "${textToSend}":\n\n` +
-          `Dalam transkrip rapat ini terdapat ${segments.length} segmen percakapan. Pembicara membahas koordinasi sprint, keandalan transkripsi, serta pembagian peran agen. Bila Anda ingin membuat task spesifik dari poin ini, silakan gunakan fitur Convert Task.`;
-      }
-
+    try {
+      const res = await meetingsApi.chat(selectedCompanyId, id, { message: textToSend });
       const copilotMsg: CopilotMessage = {
         id: `c-${Date.now()}`,
         sender: "copilot",
-        text: answer,
+        text: res.reply,
+        timestamp: new Date().toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" }),
+        sources: res.sources,
+      };
+      setChatMessages((prev) => [...prev, copilotMsg]);
+    } catch (err: any) {
+      const errorMsg: CopilotMessage = {
+        id: `err-${Date.now()}`,
+        sender: "copilot",
+        text: `Maaf, terjadi kendala saat memproses jawaban: ${err.message || String(err)}`,
         timestamp: new Date().toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" }),
       };
-
-      setCopilotMessages((prev) => [...prev, copilotMsg]);
-      setIsCopilotThinking(false);
-    }, 900);
+      setChatMessages((prev) => [...prev, errorMsg]);
+    } finally {
+      setIsChatSending(false);
+    }
   };
 
   if (isLoading) {
@@ -435,55 +592,68 @@ export function MeetingDetail() {
   const audioUrl = selectedCompanyId && id ? meetingsApi.getAudioUrl(selectedCompanyId, id) : "";
 
   return (
-    <div className="flex flex-col gap-6 p-6 max-w-7xl mx-auto w-full">
-      {/* Top Navigation & Status Bar */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-border pb-4">
-        <div className="flex items-center gap-3">
+    <div className="flex flex-col gap-4 p-4 sm:p-6 max-w-7xl mx-auto w-full min-h-screen">
+      {/* 1. Header Bar matching Gambar 2 */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-border/60 pb-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <Button
             variant="ghost"
             size="icon"
             onClick={() => navigate("/meetings")}
-            className="h-8 w-8 shrink-0"
+            className="h-9 w-9 rounded-full bg-muted/50 hover:bg-muted shrink-0"
+            title="Kembali ke Daftar Meeting"
           >
             <ArrowLeft className="h-4 w-4" />
           </Button>
 
-          {isEditingTitle ? (
-            <div className="flex items-center gap-2">
-              <Input
-                value={titleInput}
-                onChange={(e) => setTitleInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleUpdateTitle()}
-                className="h-8 text-base font-semibold max-w-sm"
-                autoFocus
-              />
-              <Button size="sm" variant="ghost" onClick={handleUpdateTitle} className="h-8">
-                Simpan
-              </Button>
-            </div>
-          ) : (
-            <div className="flex items-center gap-2">
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-muted/60 text-muted-foreground shrink-0">
+            <Calendar className="h-4 w-4" />
+          </div>
+
+          <div className="flex flex-col sm:flex-row sm:items-center gap-1.5 sm:gap-3">
+            {isEditingTitle ? (
+              <div className="flex items-center gap-2">
+                <Input
+                  value={titleInput}
+                  onChange={(e) => setTitleInput(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleUpdateTitle()}
+                  className="h-8 text-base font-semibold max-w-sm"
+                  autoFocus
+                />
+                <Button size="sm" variant="ghost" onClick={handleUpdateTitle} className="h-8 text-xs">
+                  Simpan
+                </Button>
+              </div>
+            ) : (
               <h1
                 onClick={() => setIsEditingTitle(true)}
-                className="text-xl font-bold tracking-tight cursor-pointer hover:underline"
-                title="Klik untuk mengubah judul"
+                className="text-lg font-bold tracking-tight cursor-pointer hover:underline text-foreground"
+                title="Klik untuk mengubah judul rapat"
               >
-                {meeting.title}
+                {meeting.title ? `[${meeting.title}]` : "[New Meeting]"}
               </h1>
-              <Badge variant="outline" className="capitalize text-xs">
-                {meeting.status}
-              </Badge>
+            )}
+
+            <div className="inline-flex items-center gap-2 rounded-lg bg-muted/50 px-2.5 py-1 text-xs text-muted-foreground font-medium">
+              <span>{formattedDateTime.date}</span>
+              <span className="text-muted-foreground/40">•</span>
+              <span>{formattedDateTime.timeRange}</span>
             </div>
-          )}
+
+            <Badge variant="outline" className="capitalize text-xs font-normal">
+              {meeting.status}
+            </Badge>
+          </div>
         </div>
 
+        {/* Action Buttons in Header */}
         <div className="flex items-center gap-2 flex-wrap">
           <Button
             variant="outline"
             size="sm"
             onClick={handleSyncDatasource}
             disabled={isSyncingDatasource}
-            className="gap-2"
+            className="gap-2 text-xs h-8"
           >
             {isSyncingDatasource ? (
               <>
@@ -503,35 +673,15 @@ export function MeetingDetail() {
             )}
           </Button>
 
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => handleOpenTaskModal(`Tindak lanjut meeting: ${meeting.title}`)}
-            className="gap-2"
-          >
-            <ListTodo className="h-3.5 w-3.5" />
-            Buat Task
-          </Button>
-
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setIsCopilotOpen(!isCopilotOpen)}
-            className="gap-2"
-            title={isCopilotOpen ? "Sembunyikan ringkasan analitis" : "Tampilkan ringkasan analitis"}
-          >
-            <Sparkles className="h-3.5 w-3.5 text-primary" />
-            {isCopilotOpen ? "Tutup Ringkasan" : "Ringkasan Analitis"}
-          </Button>
-
+          {/* AI Agent Ticket Extraction Button */}
           <Button
             variant="default"
             size="sm"
-            onClick={() => window.dispatchEvent(new CustomEvent("open-meeting-chat"))}
-            className="gap-2"
+            onClick={handleOpenExtractModal}
+            className="gap-2 text-xs h-8 bg-primary text-primary-foreground font-medium shadow-xs"
           >
-            <MessageSquare className="h-3.5 w-3.5" />
-            Chat Copilot
+            <Sparkles className="h-3.5 w-3.5" />
+            Ekstrak Tiket
           </Button>
 
           <Button
@@ -543,470 +693,879 @@ export function MeetingDetail() {
                 meetingsApi.delete(selectedCompanyId!, id!).then(() => navigate("/meetings"));
               }
             }}
+            title="Hapus meeting"
           >
             <Trash2 className="h-4 w-4" />
           </Button>
         </div>
       </div>
 
-      {createdTaskNotice && (
-        <div className="rounded-lg border border-emerald-500/50 bg-emerald-500/10 p-3 text-sm text-emerald-700 dark:text-emerald-400 flex items-center justify-between">
+      {/* Ticket Creation Banner Feedback */}
+      {ticketCreationNotice && (
+        <div className="rounded-lg border border-emerald-500/50 bg-emerald-500/10 p-3 text-xs sm:text-sm text-emerald-700 dark:text-emerald-400 flex items-center justify-between animate-in fade-in">
           <span className="flex items-center gap-2 font-medium">
             <CheckCircle2 className="h-4 w-4" />
-            {createdTaskNotice}
+            {ticketCreationNotice}
           </span>
-          <Link to="/issues" className="underline text-xs">
-            Buka daftar task
+          <Link to="/issues" className="underline font-semibold text-xs ml-2">
+            Lihat Tiket di Board
           </Link>
         </div>
       )}
 
-      {/* Main 2-Column Split Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        {/* Left Column: Audio Player, Summary, and Transcript */}
-        <div className={`${isCopilotOpen ? "lg:col-span-7" : "lg:col-span-12"} flex flex-col gap-6 transition-all duration-200`}>
-          {/* Audio Player Card */}
-          <Card className="border-border">
-            <CardContent className="p-4 flex flex-col gap-3">
-              <audio
-                ref={audioRef}
-                src={audioUrl}
-                preload="metadata"
-                onTimeUpdate={() => {
-                  if (audioRef.current) {
-                    setCurrentTime(audioRef.current.currentTime);
-                  }
-                }}
-                onLoadedMetadata={() => {
-                  if (audioRef.current) {
-                    const d = audioRef.current.duration;
-                    setAudioDuration(!isNaN(d) && isFinite(d) && d > 0 ? d : meeting.duration_seconds);
-                  }
-                }}
-                onEnded={() => setIsPlaying(false)}
-                onError={() => {
-                  setIsPlaying(false);
-                  if (meeting.status === "recording") {
-                    setAudioError("Audio sedang direkam live.");
-                  } else if (!meeting.audio_path) {
-                    setAudioError("File audio belum siap atau sedang diproses.");
-                  } else {
-                    setAudioError("Audio tidak dapat dimuat.");
-                  }
-                }}
-              />
+      {/* 2. Main Two-Column Layout matching Gambar 2 & Gambar 3 */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start flex-1">
+        {/* Left Card: Notes & Live Enhanced Notes (Gambar 2) */}
+        <div className={`${isRightPaneOpen ? "lg:col-span-7" : "lg:col-span-12"} flex flex-col transition-all duration-200`}>
+          <div className="rounded-2xl border border-border bg-card shadow-xs flex flex-col overflow-hidden">
+            {/* Toolbar Row */}
+            <div className="flex items-center justify-between border-b border-border/60 px-3 py-2 bg-card/60 flex-wrap gap-2">
+              <div className="flex items-center gap-0.5">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 rounded-md font-bold text-xs"
+                  onClick={() => handleInsertMarkdown("**", "**")}
+                  title="Bold (Ctrl+B)"
+                >
+                  <Bold className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 rounded-md italic text-xs"
+                  onClick={() => handleInsertMarkdown("*", "*")}
+                  title="Italic (Ctrl+I)"
+                >
+                  <Italic className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 rounded-md"
+                  onClick={() => handleInsertMarkdown("\n• ", "")}
+                  title="Bullet List"
+                >
+                  <List className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 rounded-md"
+                  onClick={() => handleInsertMarkdown("\n1. ", "")}
+                  title="Numbered List"
+                >
+                  <ListOrdered className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 rounded-md font-semibold text-xs"
+                  onClick={() => handleInsertMarkdown("\n# ", "")}
+                  title="Heading"
+                >
+                  T
+                </Button>
+              </div>
 
-              <div className="flex items-center justify-between gap-4">
-                <div className="flex items-center gap-2">
-                  <Button
-                    size="icon"
-                    variant="default"
-                    onClick={handlePlayPause}
-                    className="h-9 w-9 rounded-full bg-primary text-primary-foreground shrink-0"
-                  >
-                    {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4 ml-0.5" />}
-                  </Button>
+              <div className="flex items-center gap-2">
+                <Select
+                  value={selectedStyle}
+                  onValueChange={(val) => {
+                    setSelectedStyle(val);
+                    if (notesContent.trim()) triggerEnhance(notesContent, val);
+                  }}
+                >
+                  <SelectTrigger className="h-7 text-xs border-none shadow-none font-medium text-muted-foreground hover:text-foreground">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="Standard Executive">Standard</SelectItem>
+                    <SelectItem value="Executive Brief">Executive Brief</SelectItem>
+                    <SelectItem value="Action Oriented">Action Oriented</SelectItem>
+                    <SelectItem value="Technical Deep-Dive">Technical Deep-Dive</SelectItem>
+                    <SelectItem value="Key Takeaways">Key Takeaways</SelectItem>
+                  </SelectContent>
+                </Select>
 
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    onClick={() => seekTo(Math.max(0, currentTime - 10))}
-                    className="h-8 w-8 text-muted-foreground"
-                    title="Mundur 10 detik"
-                  >
-                    <RotateCcw className="h-3.5 w-3.5" />
-                  </Button>
-                </div>
+                {/* Live Enhance ON / OFF Toggle */}
+                <Button
+                  size="sm"
+                  variant={liveEnhanceEnabled ? "secondary" : "outline"}
+                  onClick={() => setLiveEnhanceEnabled(!liveEnhanceEnabled)}
+                  className={`h-7 px-3 rounded-full text-xs gap-1.5 font-medium transition-colors ${
+                    liveEnhanceEnabled
+                      ? "bg-sky-500/15 text-sky-700 dark:text-sky-300 border border-sky-500/30"
+                      : "text-muted-foreground"
+                  }`}
+                >
+                  <Sparkles className="h-3 w-3" />
+                  {liveEnhanceEnabled ? "Live Enhance ON" : "Live Enhance OFF"}
+                </Button>
+              </div>
+            </div>
 
-                {/* Scrubber slider */}
-                <div className="flex-1 flex items-center gap-2">
-                  <span className="text-xs font-mono text-muted-foreground w-12 text-right">
-                    {formatTime(currentTime)}
-                  </span>
-                  <input
-                    type="range"
-                    min={0}
-                    max={audioDuration || 1}
-                    step={0.1}
-                    value={currentTime}
-                    onChange={(e) => {
-                      const val = Number(e.target.value);
-                      seekTo(val);
-                    }}
-                    className="w-full accent-primary h-1.5 bg-muted rounded-lg cursor-pointer"
-                  />
-                  <span className="text-xs font-mono text-muted-foreground w-12">
-                    {formatTime(audioDuration)}
-                  </span>
+            {/* Split Content: Notes (Left) & Live Enhanced Notes (Right) */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 min-h-128 items-stretch">
+              {/* Left Column: Raw Notes Editor */}
+              <div className="flex flex-col justify-between">
+                <Textarea
+                  ref={notesTextareaRef}
+                  value={notesContent}
+                  onChange={(e) => handleNotesChange(e.target.value)}
+                  placeholder={`Enter your notes here. Markdown formatting is supported.\n\nMarkdown guide:\n• # Heading\n• **bold**\n• *italics*\n• - Bullet list\n• 1. Numbered list`}
+                  className="w-full h-full min-h-112 resize-none border-0 shadow-none focus-visible:ring-0 p-2 text-sm leading-relaxed font-sans placeholder:text-muted-foreground/60"
+                />
+
+                <div className="pt-2 flex items-center justify-between text-xs text-muted-foreground/70 border-t border-border/40">
+                  <span>{isNotesSaving ? "Menyimpan notulen..." : "Tersimpan otomatis"}</span>
+                  <span>{notesContent.length} karakter</span>
                 </div>
               </div>
 
-              {audioError && (
-                <div className="text-xs text-destructive flex items-center gap-1.5 px-1 pt-1">
-                  <AlertCircle className="h-3.5 w-3.5 shrink-0" />
-                  <span>{audioError}</span>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* Action Items & Decisions Summary Card */}
-          <Card className="border-border">
-            <CardHeader className="pb-3 flex flex-row items-center justify-between">
-              <div>
-                <CardTitle className="text-base flex items-center gap-2">
-                  <Sparkles className="h-4 w-4 text-primary" />
-                  Action Items & Keputusan Rapat
-                </CardTitle>
-                <CardDescription className="text-xs">
-                  Ringkasan keputusan dan butir tindak lanjut yang dapat dieksekusi oleh agen.
-                </CardDescription>
-              </div>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => handleOpenTaskModal("")}
-                className="gap-1.5 text-xs h-7"
-              >
-                <Plus className="h-3 w-3" />
-                Tambah Task
-              </Button>
-            </CardHeader>
-
-            <CardContent className="pt-0 flex flex-col gap-2.5">
-              {actionItems.length === 0 ? (
-                <div className="p-5 rounded-lg border border-dashed border-border/80 text-center flex flex-col items-center justify-center gap-2.5 bg-muted/10">
-                  <p className="text-xs text-muted-foreground">
-                    Belum ada action items yang diekstrak untuk rapat ini.
-                  </p>
-                  <div className="flex items-center gap-2">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={handleExtractActionItems}
-                      disabled={isExtractingActionItems || segments.length === 0}
-                      className="gap-1.5 text-xs h-7 border-primary/30 text-primary hover:bg-primary/10"
-                    >
-                      {isExtractingActionItems ? (
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                      ) : (
-                        <Sparkles className="h-3 w-3" />
-                      )}
-                      Ekstrak Action Items dengan Copilot
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => handleOpenTaskModal("")}
-                      className="text-xs h-7 gap-1"
-                    >
-                      <Plus className="h-3 w-3" />
-                      Tambah Manual
-                    </Button>
-                  </div>
-                </div>
-              ) : (
-                actionItems.map((item) => (
-                  <div
-                    key={item.id}
-                    className="flex items-center justify-between p-3 rounded-lg border border-border bg-card/60 hover:bg-muted/40 transition-colors"
-                  >
-                    <div className="flex items-start gap-2.5">
-                      <Circle className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
-                      <div>
-                        <p className="text-sm font-medium leading-none">{item.title}</p>
-                        <p className="text-xs text-muted-foreground mt-1">{item.desc}</p>
-                      </div>
-                    </div>
-
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => handleOpenTaskModal(item.title, item.desc)}
-                      className="h-7 text-xs gap-1 text-primary hover:underline"
-                    >
-                      Convert Task
-                      <ExternalLink className="h-3 w-3" />
-                    </Button>
-                  </div>
-                ))
-              )}
-            </CardContent>
-          </Card>
-
-          {/* Transcript Viewer Card */}
-          <Card className="border-border flex flex-col">
-            <CardHeader className="pb-3 border-b border-border/50">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <CardTitle className="text-base flex items-center gap-2">
-                  <FileText className="h-4 w-4 text-muted-foreground" />
-                  Transkrip Percakapan ({segments.length} segmen)
-                </CardTitle>
-
-                <div className="flex items-center gap-2">
-                  <div className="relative w-48">
-                    <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-                    <Input
-                      value={transcriptSearch}
-                      onChange={(e) => setTranscriptSearch(e.target.value)}
-                      placeholder="Cari teks transkrip..."
-                      className="h-8 pl-8 text-xs"
-                    />
+              {/* Right Column: Live Enhanced Notes Card */}
+              <div className="rounded-xl bg-muted/30 border border-border/50 p-4 flex flex-col justify-between min-h-112">
+                <div className="flex items-center justify-between border-b border-border/40 pb-2.5 mb-3">
+                  <div className="flex items-center gap-1.5 font-medium text-xs text-foreground">
+                    <Sparkles className="h-3.5 w-3.5 text-primary" />
+                    <span>Live enhanced notes</span>
                   </div>
 
-                  <Button
-                    size="sm"
-                    variant={autoScroll ? "secondary" : "ghost"}
-                    onClick={() => setAutoScroll(!autoScroll)}
-                    className="h-8 text-xs"
-                  >
-                    Auto-scroll
-                  </Button>
-                </div>
-              </div>
-            </CardHeader>
-
-            <CardContent className="p-0">
-              <div
-                ref={transcriptContainerRef}
-                className="max-h-96 overflow-y-auto p-4 flex flex-col gap-3"
-              >
-                {filteredSegments.length === 0 ? (
-                  <div className="py-12 text-center text-sm text-muted-foreground">
-                    {segments.length === 0
-                      ? "Belum ada segmen transkrip terekam."
-                      : "Tidak ditemukan segmen dengan kata kunci tersebut."}
-                  </div>
-                ) : (
-                  filteredSegments.map((seg, idx) => {
-                    const isActive = activeSegmentIndex === idx;
-                    return (
-                      <div
-                        key={seg.id || idx}
-                        ref={isActive ? activeSegmentRef : null}
-                        onClick={() => seekTo(seg.start_seconds)}
-                        className={`group p-3 rounded-lg border transition-all cursor-pointer ${
-                          isActive
-                            ? "bg-primary/10 border-primary/40 shadow-xs"
-                            : "bg-card/40 border-border/40 hover:bg-muted/50"
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-2 mb-1.5">
-                          <span className="text-xs font-semibold text-primary/80">
-                            {seg.speaker}
-                          </span>
-                          <span className="text-xs font-mono text-muted-foreground group-hover:text-primary transition-colors">
-                            {formatTime(seg.start_seconds)} - {formatTime(seg.end_seconds)}
-                          </span>
-                        </div>
-                        <p className="text-sm leading-relaxed text-foreground/90">
-                          {seg.text}
-                        </p>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Right Column: Live Copilot Analytical Summary Panel (5 cols) */}
-        {isCopilotOpen && (
-          <div className="lg:col-span-5 flex flex-col gap-4 animate-in fade-in duration-200">
-            <Card className="border-border flex flex-col">
-              <CardHeader className="pb-3 border-b border-border/50">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2.5">
-                    <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                      <TrendingUp className="h-4 w-4" />
-                    </div>
-                    <div>
-                      <CardTitle className="text-sm font-semibold">Ringkasan Analitis Copilot</CardTitle>
-                      <CardDescription className="text-xs">
-                        Live Analytical Summary & Real-Time Insights
-                      </CardDescription>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <Badge variant="secondary" className="text-xs bg-primary/10 text-primary border border-primary/20">
-                      {analyticalData.sentiment}
-                    </Badge>
+                  <div className="flex items-center gap-1">
                     <Button
                       variant="ghost"
                       size="icon"
-                      className="h-7 w-7 text-muted-foreground hover:text-foreground"
-                      onClick={() => setIsCopilotOpen(false)}
-                      title="Sembunyikan Ringkasan Analitis"
+                      className="h-6 w-6 text-muted-foreground hover:text-foreground"
+                      onClick={() => triggerEnhance(notesContent, selectedStyle)}
+                      disabled={isEnhancing || !notesContent.trim()}
+                      title="Perbarui Enhancement"
                     >
-                      <Minus className="h-3.5 w-3.5" />
+                      <RefreshCw className={`h-3 w-3 ${isEnhancing ? "animate-spin" : ""}`} />
+                    </Button>
+
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6 text-muted-foreground hover:text-foreground"
+                      onClick={handleCopyEnhanced}
+                      disabled={!enhancedNotes}
+                      title="Salin hasil enhanced notes"
+                    >
+                      {copiedEnhanced ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
+                    </Button>
+
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6 text-muted-foreground hover:text-foreground"
+                      onClick={() => setIsEnhancedCollapsed(!isEnhancedCollapsed)}
+                    >
+                      {isEnhancedCollapsed ? <ChevronDown className="h-3 w-3" /> : <ChevronUp className="h-3 w-3" />}
                     </Button>
                   </div>
                 </div>
-              </CardHeader>
 
-              <CardContent className="p-4 flex flex-col gap-5">
-                {/* 1. Executive Summary */}
-                <div className="flex flex-col gap-2">
-                  <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                    <Sparkles className="h-3.5 w-3.5 text-primary" />
-                    <span>Intisari & Ringkasan Rapat</span>
-                  </div>
-                  <div className="rounded-xl border border-border/60 bg-muted/30 p-3.5 text-sm leading-relaxed text-foreground">
-                    {analyticalData.summary}
-                  </div>
-                </div>
-
-                {/* 2. Key Topics Badges */}
-                <div className="flex flex-col gap-2">
-                  <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                    <Layers className="h-3.5 w-3.5 text-primary" />
-                    <span>Topik Utama & Fokus Diskusi</span>
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {analyticalData.topics.length > 0 ? (
-                      analyticalData.topics.map((topic, i) => (
-                        <Badge
-                          key={i}
-                          variant="outline"
-                          className="text-xs font-medium bg-card px-2.5 py-1 border-border/80 text-foreground"
-                        >
-                          {topic}
-                        </Badge>
-                      ))
-                    ) : (
-                      <span className="text-xs text-muted-foreground">Belum terdeteksi topik spesifik</span>
-                    )}
-                  </div>
-                </div>
-
-                {/* 3. Real-Time Insights */}
-                <div className="flex flex-col gap-2">
-                  <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                    <CheckCircle2 className="h-3.5 w-3.5 text-primary" />
-                    <span>Temuan & Catatan Penting</span>
-                  </div>
-                  <div className="flex flex-col gap-2">
-                    {analyticalData.insights.length > 0 ? (
-                      analyticalData.insights.map((insight, idx) => (
-                        <div
-                          key={idx}
-                          className="flex items-start gap-2.5 rounded-lg border border-border/40 bg-card p-2.5 text-xs text-foreground/90 leading-relaxed"
-                        >
-                          <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-bold text-primary">
-                            {idx + 1}
-                          </span>
-                          <span>{insight}</span>
+                {/* Enhanced Content or Empty State matching Gambar 2 */}
+                {!isEnhancedCollapsed && (
+                  <div className="flex-1 flex flex-col overflow-y-auto max-h-112">
+                    {isEnhancing ? (
+                      <div className="flex-1 flex flex-col items-center justify-center gap-2.5 py-12 text-center text-muted-foreground">
+                        <Loader2 className="h-6 w-6 animate-spin text-primary" />
+                        <p className="text-xs">Merangkum catatan ke format eksekutif...</p>
+                      </div>
+                    ) : !enhancedNotes ? (
+                      <div className="flex-1 flex flex-col items-center justify-center gap-3 py-16 text-center text-muted-foreground/70">
+                        <div className="p-3 rounded-full bg-muted/60 text-muted-foreground/60">
+                          <Sparkles className="h-6 w-6" />
                         </div>
-                      ))
+                        <p className="text-xs max-w-xs leading-relaxed text-muted-foreground">
+                          Live enhanced notes will appear here as shorthand notes are written.
+                        </p>
+                        {notesContent.trim().length > 0 && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => triggerEnhance(notesContent, selectedStyle)}
+                            className="text-xs h-7 gap-1.5 mt-2"
+                          >
+                            <Sparkles className="h-3 w-3" />
+                            Enhance Notes Sekarang
+                          </Button>
+                        )}
+                      </div>
                     ) : (
-                      <div className="text-xs text-muted-foreground italic p-2">
-                        Menunggu analisis lebih lanjut dari percakapan rapat...
+                      <div className="flex-1 pr-1 text-xs leading-relaxed text-foreground/90 space-y-2">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {enhancedNotes}
+                        </ReactMarkdown>
                       </div>
                     )}
                   </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Right Card: Multi-Tab Assistant Pane (Gambar 2 & Gambar 3) */}
+        {isRightPaneOpen && (
+          <div className="lg:col-span-5 flex flex-col transition-all duration-200">
+            <div className="rounded-2xl border border-border bg-card shadow-xs flex flex-col overflow-hidden min-h-128">
+              {/* Tab Bar matching Gambar 2 & Gambar 3 */}
+              <div className="flex items-center justify-between border-b border-border/60 px-3 py-2 bg-card/60">
+                <div className="flex items-center gap-1">
+                  {(["chat", "qa", "summary", "transcript"] as const).map((tab) => (
+                    <button
+                      key={tab}
+                      onClick={() => setActiveTab(tab)}
+                      className={`px-3 py-1 text-xs font-semibold rounded-full transition-all cursor-pointer ${
+                        activeTab === tab
+                          ? "bg-sky-500/15 text-sky-700 dark:text-sky-300 font-bold"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {tab === "chat" && "Chat"}
+                      {tab === "qa" && "Live Q&A"}
+                      {tab === "summary" && "Summary"}
+                      {tab === "transcript" && "Transcript"}
+                    </button>
+                  ))}
                 </div>
 
-                {/* 4. Quick Metrics */}
-                <div className="grid grid-cols-3 gap-2 pt-2 border-t border-border/50">
-                  <div className="flex flex-col rounded-lg border border-border/40 bg-muted/20 p-2.5 text-center">
-                    <span className="text-xs text-muted-foreground uppercase font-medium">Segmen</span>
-                    <span className="text-sm font-semibold text-foreground mt-0.5">{segments.length}</span>
-                  </div>
-                  <div className="flex flex-col rounded-lg border border-border/40 bg-muted/20 p-2.5 text-center">
-                    <span className="text-xs text-muted-foreground uppercase font-medium">Durasi</span>
-                    <span className="text-sm font-semibold text-foreground mt-0.5">
-                      {formatTime(audioDuration || meeting?.duration_seconds || 0)}
-                    </span>
-                  </div>
-                  <div className="flex flex-col rounded-lg border border-border/40 bg-muted/20 p-2.5 text-center">
-                    <span className="text-xs text-muted-foreground uppercase font-medium">Sentimen</span>
-                    <span className="text-sm font-semibold text-primary mt-0.5">{analyticalData.sentiment}</span>
-                  </div>
-                </div>
-
-                {/* 5. Chat Copilot Bridge CTA */}
-                <div className="rounded-xl border border-primary/20 bg-primary/5 p-3.5 flex flex-col gap-2.5">
-                  <div className="flex items-center gap-2">
-                    <div className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/10 text-primary">
-                      <Bot className="h-3.5 w-3.5" />
-                    </div>
-                    <span className="text-xs font-semibold text-foreground">
-                      Tanya Rapat ke Meeting Copilot
-                    </span>
-                  </div>
-                  <p className="text-xs text-muted-foreground leading-relaxed">
-                    Ajukan pertanyaan seputar isi rapat, klarifikasi pernyataan pembicara, atau periksa kesesuaian SOP melalui popup chat.
-                  </p>
-                  <Button
-                    size="sm"
-                    className="w-full gap-2 text-xs h-8"
-                    onClick={() => window.dispatchEvent(new CustomEvent("open-meeting-chat"))}
+                <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                  <button
+                    onClick={() => setFontSize(fontSize === "lg" ? "base" : "sm")}
+                    className="px-1.5 py-0.5 hover:text-foreground font-semibold"
+                    title="Perkecil Font"
                   >
-                    <MessageSquare className="h-3.5 w-3.5" />
-                    Buka Chat Meeting Copilot
+                    A-
+                  </button>
+                  <button
+                    onClick={() => setFontSize(fontSize === "sm" ? "base" : "lg")}
+                    className="px-1.5 py-0.5 hover:text-foreground font-semibold"
+                    title="Perbesar Font"
+                  >
+                    A+
+                  </button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-6 w-6 rounded-full text-muted-foreground hover:text-foreground ml-1"
+                    onClick={() => setIsRightPaneOpen(false)}
+                    title="Tutup Pane Kanan"
+                  >
+                    <X className="h-3.5 w-3.5" />
                   </Button>
                 </div>
-              </CardContent>
-            </Card>
+              </div>
+
+              {/* Tab 1: Chat Tab matching Gambar 2 */}
+              {activeTab === "chat" && (
+                <div className="flex-1 flex flex-col justify-between min-h-112">
+                  <div className="flex-1 p-4 overflow-y-auto max-h-112 flex flex-col gap-3">
+                    {chatMessages.length === 0 ? (
+                      <div className="flex-1 flex flex-col items-center justify-center p-8 text-center text-muted-foreground">
+                        <p className="text-sm font-medium text-muted-foreground/80">
+                          Get answer from your personalized knowledge sources.
+                        </p>
+                      </div>
+                    ) : (
+                      chatMessages.map((msg) => (
+                        <div
+                          key={msg.id}
+                          className={`flex gap-2.5 ${msg.sender === "user" ? "justify-end" : "justify-start"}`}
+                        >
+                          {msg.sender === "copilot" && (
+                            <div className="h-6 w-6 rounded-full bg-primary/10 text-primary flex items-center justify-center shrink-0 mt-0.5">
+                              <Bot className="h-3.5 w-3.5" />
+                            </div>
+                          )}
+                          <div
+                            className={`rounded-2xl px-3.5 py-2 text-xs leading-relaxed max-w-sm ${
+                              msg.sender === "user"
+                                ? "bg-primary text-primary-foreground font-medium rounded-tr-xs"
+                                : "bg-muted/50 border border-border/50 text-foreground rounded-tl-xs"
+                            }`}
+                          >
+                            <p className="whitespace-pre-wrap">{msg.text}</p>
+                            <span className="text-xs opacity-60 mt-1 block text-right font-mono">
+                              {msg.timestamp}
+                            </span>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+
+                  {/* Bottom input bar matching Gambar 2 */}
+                  <div className="p-3 border-t border-border/50 flex items-center gap-2 bg-card">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 rounded-full bg-sky-500/10 text-sky-600 hover:bg-sky-500/20 shrink-0"
+                      title="Grounded in Enterprise Data Sources"
+                    >
+                      <Globe className="h-4 w-4" />
+                    </Button>
+                    <Input
+                      value={chatInput}
+                      onChange={(e) => setChatInput(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSendChat()}
+                      placeholder="Ask Foresight AI..."
+                      className="h-8 text-xs rounded-full border-border bg-muted/20 px-3.5 focus-visible:ring-1"
+                    />
+                    <Button
+                      size="icon"
+                      disabled={!chatInput.trim() || isChatSending}
+                      onClick={handleSendChat}
+                      className="h-8 w-8 rounded-full bg-sky-500 text-white hover:bg-sky-600 shrink-0"
+                    >
+                      {isChatSending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
+                    </Button>
+                  </div>
+                </div>
+              )}
+
+              {/* Tab 2: Live Q&A Tab */}
+              {activeTab === "qa" && (
+                <div className="flex-1 p-4 flex flex-col gap-4 overflow-y-auto max-h-128">
+                  <div className="flex items-center justify-between pb-2 border-b border-border/40">
+                    <span className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+                      <HelpCircle className="h-3.5 w-3.5 text-primary" />
+                      Live Q&A Rapat
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-6 text-xs px-2"
+                      onClick={() => {
+                        const q = "Apa kesepakatan dan pertanyaan yang belum terjawab dalam rapat ini?";
+                        setChatInput(q);
+                        setActiveTab("chat");
+                      }}
+                    >
+                      Tanya ke Copilot
+                    </Button>
+                  </div>
+
+                  <div className="flex flex-col gap-3">
+                    <div className="p-3 rounded-xl border border-border/50 bg-muted/20 flex flex-col gap-1.5 text-xs">
+                      <p className="font-semibold text-foreground">
+                        Q: Bagaimana jadwal rilis dan arsitektur integrasi terbaru?
+                      </p>
+                      <p className="text-muted-foreground leading-relaxed">
+                        A: Dibahas bahwa sinkronisasi service mengadopsi kontrol terisolasi tenant dan data otomatis diindeks ke knowledge base.
+                      </p>
+                    </div>
+
+                    <div className="p-3 rounded-xl border border-border/50 bg-muted/20 flex flex-col gap-1.5 text-xs">
+                      <p className="font-semibold text-foreground">
+                        Q: Siapa yang bertanggung jawab untuk eksekusi action items?
+                      </p>
+                      <p className="text-muted-foreground leading-relaxed">
+                        A: Agen spesialis dari roster perusahaan akan dipilih secara otomatis menggunakan rekomendasi AI saat tombol Ekstrak Tiket ditekan.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Tab 3: Summary Tab */}
+              {activeTab === "summary" && (
+                <div className="flex-1 p-4 flex flex-col gap-4 overflow-y-auto max-h-128">
+                  {/* Executive Summary */}
+                  <div className="flex flex-col gap-1.5">
+                    <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+                      <Sparkles className="h-3 w-3 text-primary" />
+                      Intisari Rapat
+                    </span>
+                    <div className="rounded-xl border border-border/60 bg-muted/30 p-3 text-xs leading-relaxed text-foreground">
+                      {analyticalData.summary}
+                    </div>
+                  </div>
+
+                  {/* Topics */}
+                  <div className="flex flex-col gap-1.5">
+                    <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+                      <Layers className="h-3 w-3 text-primary" />
+                      Topik Diskusi
+                    </span>
+                    <div className="flex flex-wrap gap-1.5">
+                      {analyticalData.topics.map((t, idx) => (
+                        <Badge key={idx} variant="outline" className="text-xs bg-card">
+                          {t}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Insights */}
+                  <div className="flex flex-col gap-1.5">
+                    <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+                      <CheckCircle2 className="h-3 w-3 text-primary" />
+                      Temuan & Catatan
+                    </span>
+                    <div className="flex flex-col gap-1.5">
+                      {analyticalData.insights.map((ins, idx) => (
+                        <div key={idx} className="p-2 rounded-lg bg-card border border-border/40 text-xs">
+                          {ins}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Metrics */}
+                  <div className="grid grid-cols-3 gap-2 pt-2 border-t border-border/40 text-center">
+                    <div className="p-2 rounded-lg bg-muted/20 border border-border/40">
+                      <span className="text-xs text-muted-foreground block">Segmen</span>
+                      <span className="text-sm font-semibold">{segments.length}</span>
+                    </div>
+                    <div className="p-2 rounded-lg bg-muted/20 border border-border/40">
+                      <span className="text-xs text-muted-foreground block">Durasi</span>
+                      <span className="text-sm font-semibold">
+                        {formatTime(audioDuration || meeting?.duration_seconds || 0)}
+                      </span>
+                    </div>
+                    <div className="p-2 rounded-lg bg-muted/20 border border-border/40">
+                      <span className="text-xs text-muted-foreground block">Sentimen</span>
+                      <span className="text-sm font-semibold text-primary">{analyticalData.sentiment}</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Tab 4: Transcript Tab matching Gambar 3 */}
+              {activeTab === "transcript" && (
+                <div className="flex-1 flex flex-col min-h-112 justify-between">
+                  {/* Header in Transcript with Search, Auto-scroll & Copy */}
+                  <div className="p-3 border-b border-border/40 flex items-center justify-between gap-2">
+                    <div className="relative flex-1">
+                      <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                      <Input
+                        value={transcriptSearch}
+                        onChange={(e) => setTranscriptSearch(e.target.value)}
+                        placeholder="Cari transkrip..."
+                        className="h-7 pl-8 text-xs rounded-lg"
+                      />
+                    </div>
+
+                    <Button
+                      size="sm"
+                      variant={autoScroll ? "secondary" : "ghost"}
+                      onClick={() => setAutoScroll(!autoScroll)}
+                      className="h-7 text-xs px-2"
+                    >
+                      Auto-scroll
+                    </Button>
+
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      onClick={handleCopyTranscript}
+                      className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                      title="Salin Transkrip"
+                    >
+                      {copiedTranscript ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
+                    </Button>
+                  </div>
+
+                  {/* Transcript time pill matching Gambar 3 */}
+                  <div className="flex justify-center py-2 bg-muted/10 border-b border-border/30">
+                    <div className="inline-flex items-center gap-1.5 rounded-full bg-muted/60 px-3.5 py-1 text-xs text-muted-foreground font-mono">
+                      <Clock className="h-3 w-3" />
+                      <span>Transcript {formatTime(currentTime > 0 ? currentTime : meeting.duration_seconds)}</span>
+                    </div>
+                  </div>
+
+                  {/* Segments Stream with Font Size scale */}
+                  <div
+                    ref={transcriptContainerRef}
+                    className="flex-1 p-3 overflow-y-auto max-h-96 flex flex-col gap-2.5"
+                  >
+                    {filteredSegments.length === 0 ? (
+                      <div className="py-16 text-center text-xs text-muted-foreground">
+                        {segments.length === 0
+                          ? "Belum ada segmen transkrip terekam."
+                          : "Tidak ditemukan segmen dengan kata kunci tersebut."}
+                      </div>
+                    ) : (
+                      filteredSegments.map((seg, idx) => {
+                        const isActive = activeSegmentIndex === idx;
+                        return (
+                          <div
+                            key={seg.id || idx}
+                            ref={isActive ? activeSegmentRef : null}
+                            onClick={() => seekTo(seg.start_seconds)}
+                            className={`p-2.5 rounded-xl border transition-all cursor-pointer ${
+                              isActive
+                                ? "bg-primary/10 border-primary/40 shadow-xs"
+                                : "bg-card/40 border-border/40 hover:bg-muted/40"
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2 mb-1">
+                              <span className="text-xs font-semibold text-primary/80">
+                                {seg.speaker}
+                              </span>
+                              <span className="text-xs font-mono text-muted-foreground">
+                                {formatTime(seg.start_seconds)} - {formatTime(seg.end_seconds)}
+                              </span>
+                            </div>
+                            <p
+                              className={`leading-relaxed text-foreground/90 ${
+                                fontSize === "sm" ? "text-xs" : fontSize === "lg" ? "text-base" : "text-sm"
+                              }`}
+                            >
+                              {seg.text}
+                            </p>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>
 
-      {/* Floating edge button when Analytical Summary is collapsed */}
-      {!isCopilotOpen && (
+      {/* Floating Toggle button when right pane is closed */}
+      {!isRightPaneOpen && (
         <button
-          onClick={() => setIsCopilotOpen(true)}
-          className="fixed right-0 top-1/2 -translate-y-1/2 z-30 flex items-center gap-2 px-2.5 py-4 bg-card border-l border-y border-border rounded-l-xl shadow-xl text-xs font-medium text-foreground hover:bg-muted/80 transition-all cursor-pointer group"
-          title="Buka Ringkasan Analitis"
+          onClick={() => setIsRightPaneOpen(true)}
+          className="fixed right-6 bottom-20 z-30 flex items-center gap-2 px-3.5 py-2.5 bg-primary text-primary-foreground rounded-full shadow-lg text-xs font-semibold hover:bg-primary/90 transition-all cursor-pointer"
         >
-          <TrendingUp className="h-4 w-4 text-primary group-hover:scale-110 transition-transform" />
-          <span className="[writing-mode:vertical-lr] rotate-180 tracking-wider font-semibold text-xs">
-            Ringkasan Analitis
-          </span>
+          <Sparkles className="h-4 w-4" />
+          <span>Buka Assistant & Transcript</span>
         </button>
       )}
 
-      {/* Task Creation Dialog */}
-      <Dialog open={isTaskModalOpen} onOpenChange={setIsTaskModalOpen}>
-        <DialogContent className="sm:max-w-md">
+      {/* 3. Bottom Sticky Audio Player Bar */}
+      <div className="sticky bottom-0 z-20 rounded-2xl border border-border bg-card/95 backdrop-blur-md p-3 shadow-lg flex flex-col gap-2">
+        <audio
+          ref={audioRef}
+          src={audioUrl}
+          preload="metadata"
+          onTimeUpdate={() => {
+            if (audioRef.current) {
+              setCurrentTime(audioRef.current.currentTime);
+            }
+          }}
+          onLoadedMetadata={() => {
+            if (audioRef.current) {
+              const d = audioRef.current.duration;
+              setAudioDuration(!isNaN(d) && isFinite(d) && d > 0 ? d : meeting.duration_seconds);
+            }
+          }}
+          onEnded={() => setIsPlaying(false)}
+          onError={() => {
+            setIsPlaying(false);
+            if (meeting.status === "recording") {
+              setAudioError("Audio sedang direkam live.");
+            } else if (!meeting.audio_path) {
+              setAudioError("File audio belum siap atau sedang diproses.");
+            } else {
+              setAudioError("Audio tidak dapat dimuat.");
+            }
+          }}
+        />
+
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-2">
+            <Button
+              size="icon"
+              variant="default"
+              onClick={handlePlayPause}
+              className="h-8 w-8 rounded-full bg-primary text-primary-foreground shrink-0"
+            >
+              {isPlaying ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5 ml-0.5" />}
+            </Button>
+
+            <Button
+              size="icon"
+              variant="ghost"
+              onClick={() => seekTo(Math.max(0, currentTime - 10))}
+              className="h-7 w-7 text-muted-foreground"
+              title="Mundur 10 detik"
+            >
+              <RotateCcw className="h-3 w-3" />
+            </Button>
+          </div>
+
+          {/* Timeline Scrubber */}
+          <div className="flex-1 flex items-center gap-2">
+            <span className="text-xs font-mono text-muted-foreground w-12 text-right">
+              {formatTime(currentTime)}
+            </span>
+            <input
+              type="range"
+              min={0}
+              max={audioDuration || 1}
+              step={0.1}
+              value={currentTime}
+              onChange={(e) => seekTo(Number(e.target.value))}
+              className="w-full accent-primary h-1.5 bg-muted rounded-lg cursor-pointer"
+            />
+            <span className="text-xs font-mono text-muted-foreground w-12">
+              {formatTime(audioDuration)}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => handleOpenSingleTaskModal(`Tindak lanjut: ${meeting.title}`)}
+              className="h-7 text-xs gap-1.5"
+            >
+              <Plus className="h-3 w-3" />
+              Buat Task
+            </Button>
+          </div>
+        </div>
+
+        {audioError && (
+          <div className="text-xs text-destructive flex items-center gap-1.5 px-1">
+            <AlertCircle className="h-3 w-3 shrink-0" />
+            <span>{audioError}</span>
+          </div>
+        )}
+      </div>
+
+      {/* 4. AI Agent Ticket Extraction Dialog (Gambar 2 Ekstrak Tiket Flow) */}
+      <Dialog open={isExtractModalOpen} onOpenChange={setIsExtractModalOpen}>
+        <DialogContent className="sm:max-w-2xl max-h-full flex flex-col">
           <DialogHeader>
-            <DialogTitle>Konversi Menjadi Task di Primbon</DialogTitle>
+            <DialogTitle className="flex items-center gap-2">
+              <Sparkles className="h-4 w-4 text-primary" />
+              Ekstrak Tiket dari Meeting dengan AI Agent
+            </DialogTitle>
             <DialogDescription>
-              Buat task otomatis yang ditautkan langsung dengan rekaman dan catatan meeting ini.
+              AI menganalisis notulen dan transkrip pertemuan ini, kemudian memetakan setiap tugas ke agen terbaik dalam tim Anda.
             </DialogDescription>
           </DialogHeader>
 
-          <div className="flex flex-col gap-4 py-2">
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="task-title">Judul Task</Label>
+          <div className="flex-1 overflow-y-auto py-3 flex flex-col gap-3">
+            {isExtractingTickets ? (
+              <div className="flex flex-col items-center justify-center py-12 gap-3 text-center">
+                <Loader2 className="h-8 w-8 animate-spin text-primary" />
+                <p className="text-sm font-medium text-foreground">
+                  AI Agent sedang menganalisis isi rapat...
+                </p>
+                <p className="text-xs text-muted-foreground max-w-sm">
+                  Mencocokkan tanggung jawab tugas dengan kapabilitas dan keahlian tim agen.
+                </p>
+              </div>
+            ) : extractedTickets.length === 0 ? (
+              <div className="py-12 text-center text-sm text-muted-foreground">
+                Tidak ada tiket yang terdeteksi secara otomatis. Pastikan notulen atau transkrip terisi.
+              </div>
+            ) : (
+              <div className="flex flex-col gap-3">
+                <div className="flex items-center justify-between text-xs text-muted-foreground px-1">
+                  <span>
+                    {extractedTickets.filter((t) => t.selected).length} dari {extractedTickets.length} tiket dipilih
+                  </span>
+                  <button
+                    onClick={() => {
+                      const allSelected = extractedTickets.every((t) => t.selected);
+                      setExtractedTickets((prev) =>
+                        prev.map((t) => ({ ...t, selected: !allSelected }))
+                      );
+                    }}
+                    className="underline hover:text-foreground"
+                  >
+                    {extractedTickets.every((t) => t.selected) ? "Batal Pilih Semua" : "Pilih Semua"}
+                  </button>
+                </div>
+
+                {extractedTickets.map((ticket, index) => (
+                  <div
+                    key={index}
+                    className={`rounded-xl border p-3.5 flex flex-col gap-2.5 transition-all ${
+                      ticket.selected
+                        ? "bg-card border-primary/40 shadow-xs"
+                        : "bg-muted/20 border-border/50 opacity-60"
+                    }`}
+                  >
+                    <div className="flex items-start gap-2.5">
+                      <input
+                        type="checkbox"
+                        checked={ticket.selected}
+                        onChange={(e) => {
+                          const checked = e.target.checked;
+                          setExtractedTickets((prev) =>
+                            prev.map((t, i) => (i === index ? { ...t, selected: checked } : t))
+                          );
+                        }}
+                        className="mt-1 h-4 w-4 accent-primary rounded cursor-pointer"
+                      />
+
+                      <div className="flex-1 flex flex-col gap-2">
+                        <Input
+                          value={ticket.title}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setExtractedTickets((prev) =>
+                              prev.map((t, i) => (i === index ? { ...t, title: val } : t))
+                            );
+                          }}
+                          className="h-8 text-xs font-semibold"
+                          placeholder="Judul tiket..."
+                        />
+
+                        <Textarea
+                          value={ticket.description}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setExtractedTickets((prev) =>
+                              prev.map((t, i) => (i === index ? { ...t, description: val } : t))
+                            );
+                          }}
+                          rows={2}
+                          className="text-xs resize-none"
+                          placeholder="Deskripsi tugas..."
+                        />
+
+                        {/* Agent Suggestion & Rationale */}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                          <div className="flex flex-col gap-1">
+                            <Label className="text-xs text-muted-foreground flex items-center gap-1">
+                              <Bot className="h-3 w-3 text-primary" />
+                              Ditugaskan ke (Assignee)
+                            </Label>
+                            <Select
+                              value={ticket.suggestedAgentId || "unassigned"}
+                              onValueChange={(val) => {
+                                const selectedAgent = agents.find((a) => a.id === val);
+                                setExtractedTickets((prev) =>
+                                  prev.map((t, i) =>
+                                    i === index
+                                      ? {
+                                          ...t,
+                                          suggestedAgentId: val === "unassigned" ? null : val,
+                                          suggestedAgentName: selectedAgent?.name || null,
+                                        }
+                                      : t
+                                  )
+                                );
+                              }}
+                            >
+                              <SelectTrigger className="h-8 text-xs">
+                                <SelectValue placeholder="Pilih agen..." />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="unassigned">Unassigned (Umum)</SelectItem>
+                                {agents.map((ag) => (
+                                  <SelectItem key={ag.id} value={ag.id}>
+                                    {ag.name}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+
+                          <div className="flex flex-col gap-1">
+                            <Label className="text-xs text-muted-foreground">Prioritas</Label>
+                            <Select
+                              value={ticket.priority}
+                              onValueChange={(val: any) => {
+                                setExtractedTickets((prev) =>
+                                  prev.map((t, i) => (i === index ? { ...t, priority: val } : t))
+                                );
+                              }}
+                            >
+                              <SelectTrigger className="h-8 text-xs">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="low">Low</SelectItem>
+                                <SelectItem value="medium">Medium</SelectItem>
+                                <SelectItem value="high">High</SelectItem>
+                                <SelectItem value="urgent">Urgent</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        </div>
+
+                        {ticket.rationale && (
+                          <div className="text-xs text-muted-foreground bg-muted/40 p-2 rounded-lg flex items-center gap-1.5">
+                            <Sparkles className="h-3 w-3 text-primary shrink-0" />
+                            <span>
+                              <strong>Rasional AI</strong>: {ticket.rationale}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <DialogFooter className="flex flex-row justify-between sm:justify-between items-center w-full pt-2 border-t border-border/40">
+            <Button variant="ghost" onClick={() => setIsExtractModalOpen(false)} className="text-xs">
+              Batal
+            </Button>
+            <Button
+              onClick={handleConfirmCreateTickets}
+              disabled={isCreatingExtractedTickets || extractedTickets.filter((t) => t.selected).length === 0}
+              className="text-xs gap-1.5 bg-primary text-primary-foreground font-medium"
+            >
+              {isCreatingExtractedTickets ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" />
+                  Membuat Tiket...
+                </>
+              ) : (
+                `Buat ${extractedTickets.filter((t) => t.selected).length} Tiket ke Backlog`
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 5. Single Task Modal */}
+      <Dialog open={isSingleTaskModalOpen} onOpenChange={setIsSingleTaskModalOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Buat Task Baru dari Rapat</DialogTitle>
+            <DialogDescription>
+              Buat task yang ditautkan langsung dengan rekaman dan catatan meeting ini.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex flex-col gap-3 py-2">
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="single-task-title">Judul Task</Label>
               <Input
-                id="task-title"
-                value={taskTitle}
-                onChange={(e) => setTaskTitle(e.target.value)}
+                id="single-task-title"
+                value={singleTaskTitle}
+                onChange={(e) => setSingleTaskTitle(e.target.value)}
                 placeholder="Ringkasan tugas..."
               />
             </div>
 
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="task-desc">Deskripsi / Konteks</Label>
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="single-task-desc">Deskripsi / Konteks</Label>
               <Textarea
-                id="task-desc"
-                value={taskDescription}
-                onChange={(e) => setTaskDescription(e.target.value)}
+                id="single-task-desc"
+                value={singleTaskDesc}
+                onChange={(e) => setSingleTaskDesc(e.target.value)}
                 placeholder="Rincian tindak lanjut..."
                 rows={3}
               />
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
-              <div className="flex flex-col gap-1.5">
-                <Label>Pilih Agen (Assignee)</Label>
+            <div className="grid grid-cols-2 gap-2">
+              <div className="flex flex-col gap-1">
+                <Label>Pilih Agen</Label>
                 <Select
-                  value={taskAssignee || "unassigned"}
-                  onValueChange={(val) => setTaskAssignee(val === "unassigned" ? null : val)}
+                  value={singleTaskAssignee || "unassigned"}
+                  onValueChange={(val) => setSingleTaskAssignee(val === "unassigned" ? null : val)}
                 >
-                  <SelectTrigger className="h-9">
+                  <SelectTrigger className="h-8 text-xs">
                     <SelectValue placeholder="Pilih agen..." />
                   </SelectTrigger>
                   <SelectContent>
@@ -1020,10 +1579,10 @@ export function MeetingDetail() {
                 </Select>
               </div>
 
-              <div className="flex flex-col gap-1.5">
+              <div className="flex flex-col gap-1">
                 <Label>Prioritas</Label>
-                <Select value={taskPriority} onValueChange={setTaskPriority}>
-                  <SelectTrigger className="h-9">
+                <Select value={singleTaskPriority} onValueChange={setSingleTaskPriority}>
+                  <SelectTrigger className="h-8 text-xs">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -1038,13 +1597,17 @@ export function MeetingDetail() {
           </div>
 
           <DialogFooter className="flex flex-row justify-between sm:justify-between items-center w-full">
-            <Button variant="ghost" onClick={() => setIsTaskModalOpen(false)}>
+            <Button variant="ghost" onClick={() => setIsSingleTaskModalOpen(false)} className="text-xs">
               Batal
             </Button>
-            <Button onClick={handleCreateTask} disabled={isCreatingTask || !taskTitle.trim()}>
-              {isCreatingTask ? (
+            <Button
+              onClick={handleCreateSingleTask}
+              disabled={isCreatingSingleTask || !singleTaskTitle.trim()}
+              className="text-xs"
+            >
+              {isCreatingSingleTask ? (
                 <>
-                  <Loader2 className="h-4 w-4 animate-spin mr-1.5" />
+                  <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" />
                   Membuat...
                 </>
               ) : (
