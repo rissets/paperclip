@@ -4,6 +4,15 @@ export interface DecisionSettingsResponse { canManage: boolean; settings: Decisi
 export const decisionModelsApi = {
   settings: (companyId: string) => api.get<DecisionSettingsResponse>(`/companies/${companyId}/decision-model`),
   update: (companyId: string, settings: UpdateDecisionModel) => api.put<DecisionModelSettings>(`/companies/${companyId}/decision-model`, settings),
+  models: (companyId: string, connectionId: string) =>
+    api.get<Array<{ id: string; label?: string }>>(
+      `/companies/${companyId}/decision-model/models?connectionId=${encodeURIComponent(connectionId)}`,
+    ),
+  syncModels: (companyId: string, input: { connectionId?: string; endpoint?: string; apiKey?: string }) =>
+    api.post<{ models: Array<{ id: string; label?: string }> }>(
+      `/companies/${companyId}/decision-model/sync-models`,
+      input,
+    ),
   test: (companyId: string) => api.post<DecisionResult>(`/companies/${companyId}/decision-model/test`, {}),
   history: (companyId: string, from?: string | null, to?: string | null) => {
     const params = new URLSearchParams({ limit: "100" });

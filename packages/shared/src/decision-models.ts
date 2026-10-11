@@ -3,7 +3,8 @@ import type { AiManagedConnectionSummary } from "./ai-connections.js";
 
 export const DECISION_MODELS = {
   openai: { id: "gpt-6-luna", name: "GPT-6 Luna" },
-  openrouter: { id: "typesafe/jev-1.13", name: "Jev 1.13" },
+  openrouter: { id: "typesafe/jev-1.13", name: "TypeSafe Jev 1.13 (typesafe/jev-1.13)" },
+  custom: { id: "custom", name: "Custom Gateway / Endpoint" },
 } as const;
 export type DecisionProvider = keyof typeof DECISION_MODELS;
 export const updateDecisionModelSchema = z.object({
@@ -11,6 +12,7 @@ export const updateDecisionModelSchema = z.object({
   connectionId: z.string().uuid().nullable(),
   grantId: z.string().uuid().nullable(),
   allowBackground: z.boolean().optional(),
+  model: z.string().trim().max(256).nullable().optional(),
 }).refine(v => Boolean(v.connectionId) === Boolean(v.grantId) && (!v.enabled || Boolean(v.connectionId)), {
   message: "Select a connection before enabling decisions",
 });
@@ -64,10 +66,11 @@ export const DECISION_TEST_REQUEST: DecisionRequest = {
   },
 };
 
-/** Native endpoints only; OpenRouter's official routing metadata is compatible. */
+/** Native endpoints and custom gateways. */
 export function decisionProviderForConnection(metadata: { provider: string; method: string; routing?: { kind: string; baseUrl?: string } }): DecisionProvider | null {
   if (metadata.method !== "api_key") return null;
   if (metadata.provider === "openai" && !metadata.routing) return "openai";
   if (metadata.provider === "openrouter" && (!metadata.routing || (metadata.routing.kind === "openrouter" && !metadata.routing.baseUrl))) return "openrouter";
+  if (metadata.routing?.kind === "gateway" || metadata.routing?.kind === "local" || Boolean(metadata.routing?.baseUrl)) return "custom";
   return null;
 }

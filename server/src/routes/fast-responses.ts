@@ -9,6 +9,7 @@ import { fastResponseService } from "../services/fast-responses.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { listOpenRouterModels } from "../services/openrouter-models.js";
 import { fastResponseCatalogModels } from "../services/fast-response-models.js";
+import { fetchModelsFromEndpoint } from "../services/custom-endpoint-models.js";
 import { parseCostDateRange, parseCostLimit } from "./costs.js";
 
 export function fastResponseRoutes(db: Db) {
@@ -53,6 +54,19 @@ export function fastResponseRoutes(db: Db) {
     const choices = await service.choices(companyId, getActorInfo(req).actorId);
     const connection = choices.find((c) => c.id === req.query.connectionId);
     if (!connection) throw forbidden();
+    if (connection.routing?.baseUrl) {
+      try {
+        const liveModels = await fetchModelsFromEndpoint({
+          endpoint: connection.routing.baseUrl,
+        });
+        if (liveModels.length > 0) {
+          res.json(liveModels);
+          return;
+        }
+      } catch {
+        // Fallback to catalog or configured models below
+      }
+    }
     const models =
       connection.provider === "openrouter" ||
       connection.routing?.kind === "openrouter"
@@ -62,6 +76,36 @@ export function fastResponseRoutes(db: Db) {
           }))
         : fastResponseCatalogModels(connection);
     res.json(models);
+  });
+  router.post("/companies/:companyId/fast-response/sync-models", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    assertBoard(req);
+    if (!(await canManageAiConnections(db, req, companyId))) throw forbidden();
+    const { connectionId, endpoint, apiKey } = req.body ?? {};
+    if (endpoint) {
+      const models = await fetchModelsFromEndpoint({ endpoint, apiKey });
+      res.json({ models });
+      return;
+    }
+    const choices = await service.choices(companyId, getActorInfo(req).actorId);
+    const connection = choices.find((c) => c.id === connectionId);
+    if (!connection) throw forbidden();
+    if (connection.provider === "openrouter" || connection.routing?.kind === "openrouter") {
+      const models = (await listOpenRouterModels()).map((m) => ({
+        ...m,
+        id: m.id.replace(/^openrouter\//, ""),
+      }));
+      res.json({ models });
+      return;
+    }
+    if (connection.routing?.baseUrl) {
+      const models = await fetchModelsFromEndpoint({ endpoint: connection.routing.baseUrl });
+      res.json({ models });
+      return;
+    }
+    const models = fastResponseCatalogModels(connection);
+    res.json({ models });
   });
   router.get("/companies/:companyId/fast-response/availability", async (req, res) => {
     const companyId = req.params.companyId as string;

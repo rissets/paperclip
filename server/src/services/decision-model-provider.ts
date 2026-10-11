@@ -40,10 +40,16 @@ export function decisionReceipt(provider: DecisionProvider, result: unknown): De
   return { ...base, costCents: null, costStatus: "unpriced", pricingProvenance: { source: "unknown" } };
 }
 export async function runDecisionProvider(input: {
-  provider: DecisionProvider; model: string; apiKey: string; request: DecisionRequest; signal: AbortSignal;
+  provider: DecisionProvider; model: string; apiKey: string; baseUrl?: string; request: DecisionRequest; signal: AbortSignal;
 }, options: { fetch?: typeof fetch } = {}): Promise<DecisionProviderOutcome> {
   const native = input.provider === "openai"
     ? createOpenAI({ apiKey: input.apiKey, fetch: options.fetch }).decisionModel(input.model)
+    : input.provider === "custom"
+    ? createOpenAI({
+        apiKey: input.apiKey || "dummy",
+        baseURL: input.baseUrl ? input.baseUrl.replace(/\/+$/, "") : undefined,
+        fetch: options.fetch,
+      }).decisionModel(input.model)
     : createOpenRouter({ apiKey: input.apiKey, fetch: options.fetch }).evaluationModel(input.model);
   let receipt = decisionReceipt(input.provider, null);
   // Capture only accounting metadata before SDK answer validation/refusal errors.
@@ -60,7 +66,8 @@ export async function runDecisionProvider(input: {
       telemetry: { isEnabled: false, recordInputs: false, recordOutputs: false } });
     const metadata = record(result.providerMetadata);
     const answers = Object.fromEntries(Object.entries(result.answers).map(([id, answer]) => {
-      const confidence = input.provider === "openai" ? record(record(metadata.openai).confidence)[id]
+      const confidence = (input.provider === "openai" || input.provider === "custom")
+        ? record(record(metadata.openai).confidence)[id]
         : record(record(record(metadata.openrouter).answers)[id]).confidence;
       return [id, { ...answer, ...(typeof confidence === "number" && confidence >= 0 && confidence <= 1 ? { confidence } : {}) }];
     }));

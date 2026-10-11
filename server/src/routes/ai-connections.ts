@@ -2,6 +2,7 @@ import { validateAiApiKey } from "../services/ai-api-key-test.js";
 export { validateAiApiKey } from "../services/ai-api-key-test.js";
 import { supportsLocalAiLogin } from "../services/local-ai-login-policy.js";
 import { localAiLoginService } from "../services/local-ai-login.js";
+import { fetchModelsFromEndpoint } from "../services/custom-endpoint-models.js";
 import { z } from "zod";
 import { Router, type Request } from "express";
 import { and, eq, inArray, sql } from "drizzle-orm";
@@ -315,6 +316,24 @@ export function aiConnectionRoutes(db: Db, options: Parameters<typeof supportsLo
         attemptStartedAt,
       );
       res.status(201).json(result);
+    },
+  );
+  router.post(
+    "/companies/:companyId/ai-connections/sync-endpoint-models",
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      assertBoard(req);
+      assertCompanyAccess(req, companyId);
+      if (!(await canManageAiConnections(db, req, companyId)))
+        throw forbidden("Manage connections permission is required");
+      const { endpoint, apiKey } = z
+        .object({
+          endpoint: z.string().trim().min(1),
+          apiKey: z.string().trim().optional(),
+        })
+        .parse(req.body);
+      const models = await fetchModelsFromEndpoint({ endpoint, apiKey });
+      res.json({ models });
     },
   );
   router.post(

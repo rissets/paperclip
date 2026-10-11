@@ -20,6 +20,11 @@ export const fastResponsesApi = {
     api.get<Array<{ id: string; label?: string }>>(
       `/companies/${companyId}/fast-response/models?connectionId=${encodeURIComponent(connectionId)}`,
     ),
+  syncModels: (companyId: string, input: { connectionId?: string; endpoint?: string; apiKey?: string }) =>
+    api.post<{ models: Array<{ id: string; label?: string }> }>(
+      `/companies/${companyId}/fast-response/sync-models`,
+      input,
+    ),
   test: (companyId: string) =>
     api.post<FastResponseTestResult>(
       `/companies/${companyId}/fast-response/test`,

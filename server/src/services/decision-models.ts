@@ -6,6 +6,7 @@ import {
 } from "@paperclipai/db";
 import {
   DECISION_MODELS, decisionProviderForConnection, decisionRequestSchema, updateDecisionModelSchema,
+  aiConnectionMetadataSchema,
   centsToUnits, unitsToCents, type DecisionAvailability, type DecisionConnectionChoice, type DecisionHistoryEntry,
   type DecisionModelSettings, type DecisionProvider, type DecisionRequest, type DecisionResult, type DecisionUnavailableReason, type UpdateDecisionModel,
 } from "@paperclipai/shared";
@@ -62,7 +63,8 @@ export function decisionModelService(db: Db, options: { provider?: typeof runDec
     if (!(await connections.membership(companyId, userId))) throw forbidden();
     return (await connections.list(companyId, userId)).flatMap(row => {
       const provider = decisionProviderForConnection(row);
-      return provider && row.ownership === "shared" ? [{ ...row, decisionModel: DECISION_MODELS[provider].id }] : [];
+      const defaultModel = row.routing?.models?.[0]?.id ?? (provider ? DECISION_MODELS[provider].id : "");
+      return provider && row.ownership === "shared" ? [{ ...row, decisionModel: defaultModel }] : [];
     });
   }
   async function configure(companyId: string, userId: string, input: UpdateDecisionModel) {
@@ -74,7 +76,8 @@ export function decisionModelService(db: Db, options: { provider?: typeof runDec
       const row = !disabling && data.connectionId && data.grantId ? await aiConnectionService(tx).selectDecision({ companyId,
         userId, connectionId: data.connectionId, grantId: data.grantId }) : null;
       const provider = (disabling ? previous?.provider : row?.provider) as DecisionProvider | null | undefined;
-      const values = { ...data, allowBackground: data.allowBackground ?? previous?.allowBackground ?? true, companyId, provider: provider ?? null, model: provider ? DECISION_MODELS[provider].id : null, updatedAt: new Date() };
+      const model = data.model !== undefined ? data.model : (provider ? DECISION_MODELS[provider].id : null);
+      const values = { ...data, allowBackground: data.allowBackground ?? previous?.allowBackground ?? true, companyId, provider: provider ?? null, model: model ?? previous?.model ?? null, updatedAt: new Date() };
       await tx.insert(companyDecisionModels).values(values).onConflictDoUpdate({ target: companyDecisionModels.companyId, set: values });
       await logActivity(tx, { companyId, actorType: "user", actorId: userId, action: "decision_model.configured", entityType: "company", entityId: companyId,
         details: { ...data, provider: values.provider, model: values.model } }, publications);
@@ -123,7 +126,7 @@ export function decisionModelService(db: Db, options: { provider?: typeof runDec
     }
     const connection = await aiConnectionService(executor).selectDecision({ companyId: context.companyId,
       connectionId: config.connectionId, grantId: config.grantId, userId, agentId, sponsoredBackground: actor.type === "system" });
-    if (connection.provider !== config.provider || config.model !== DECISION_MODELS[connection.provider].id) throw new DecisionUnavailable("incompatible_connection");
+    if (connection.provider !== config.provider || !config.model) throw new DecisionUnavailable("incompatible_connection");
     return { config, connection, userId, agentId, runId, identityContextId, issueId, projectId,
       actorType: actor.type === "board" ? "user" as const : actor.type === "agent" ? "agent" as const : "system" as const,
       actorId: actor.type === "system" ? "paperclip-decisions" : agentId ?? userId! };
@@ -155,7 +158,7 @@ export function decisionModelService(db: Db, options: { provider?: typeof runDec
         usageKind: "decision", responsibleUserId: invocation.responsibleUserId, ...links,
         // Run attribution lives on the invocation. Run receipt reconciliation must not ingest this independent charge.
         heartbeatRunId: null, idempotencyKey: `decision:${invocation.id}`,
-        provider: invocation.provider === "openrouter" ? "typesafe" : "openai", biller: invocation.provider,
+        provider: invocation.provider === "openrouter" ? "typesafe" : invocation.provider === "custom" ? "custom" : "openai", biller: invocation.provider,
         billingType: "metered_api", costStatus: receipt.costStatus, model: invocation.model,
         inputTokens: receipt.inputTokens ?? 0, outputTokens: receipt.outputTokens ?? 0, costCents: receipt.costCents ?? "0",
         providerRequestId: receipt.providerRequestId, pricingProvenance: receipt.pricingProvenance, occurredAt: invocation.startedAt,
@@ -231,9 +234,11 @@ export function decisionModelService(db: Db, options: { provider?: typeof runDec
     });
     if (admission.reason) return { status: "unavailable", reason: admission.reason };
     const invocation = admission.invocation!;
+    const metadata = aiConnectionMetadataSchema.safeParse(selected.connection.connection.config.ai);
+    const baseUrl = metadata.success ? metadata.data.routing?.baseUrl : undefined;
     let outcome: DecisionProviderOutcome;
     try { outcome = await providerCall({ provider: selected.connection.provider, model: invocation.model, apiKey: credential,
-      request: parsed.data, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000) }); }
+      baseUrl, request: parsed.data, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000) }); }
     catch { outcome = { errorCode: "provider_failed", receipt: decisionReceipt(selected.connection.provider, null) }; }
     await settle(invocation, outcome);
     const { inputTokens, outputTokens, costCents, costStatus } = outcome.receipt;

@@ -15,6 +15,8 @@ import { ToggleField } from "@/components/agent-config-primitives";
 import { ConnectionChoiceList } from "@/features/connections/ConnectionChoiceList";
 import { AppLogo } from "@/pages/apps/AppLogo";
 import { ConnectionSetupFlow } from "@/features/connections/ConnectionSetupFlow";
+import { CustomEndpointConnectionForm } from "@/components/ai-connections/CustomEndpointConnectionForm";
+import { Loader2, Network, RefreshCw } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -38,6 +40,7 @@ export function FastResponseSettingsView({
   models = [],
   saving,
   testing,
+  syncingModels,
   error,
   result,
   newlyConnectedId,
@@ -45,6 +48,7 @@ export function FastResponseSettingsView({
   onTest,
   onConnectionChange,
   onAdd,
+  onSyncModels,
 }: {
   settings: FastResponseSettings;
   choices: AiManagedConnectionSummary[];
@@ -52,12 +56,14 @@ export function FastResponseSettingsView({
   newlyConnectedId?: string | null;
   saving?: boolean;
   testing?: boolean;
+  syncingModels?: boolean;
   error?: string | null;
   result?: FastResponseTestResult | null;
   onAdd?: () => void;
   onSave: (value: UpdateFastResponse) => void;
   onTest: () => void;
   onConnectionChange?: (id: string | null) => void;
+  onSyncModels?: () => void;
 }) {
   const [draft, setDraft] = useState<UpdateFastResponse>(() =>
     editable(settings),
@@ -122,7 +128,14 @@ export function FastResponseSettingsView({
           name: c.name,
           description:
             c.status === "connected" ? "Connected" : "Needs attention",
-          icon: <AppLogo name={c.provider} brandKey={c.provider} size={24} />,
+          icon:
+            c.routing?.kind === "gateway" || c.routing?.kind === "local" ? (
+              <span className="flex size-9 items-center justify-center rounded-lg bg-muted">
+                <Network className="size-5" />
+              </span>
+            ) : (
+              <AppLogo name={c.provider} brandKey={c.provider} size={24} />
+            ),
         }))}
         onSelect={(grantId) => {
           const c = choices.find((c) => c.grantId === grantId)!;
@@ -169,15 +182,33 @@ export function FastResponseSettingsView({
             >
               Model
             </label>
-            <Input
-              id={`${modelListId}-input`}
-              list={modelListId}
-              value={draft.model ?? ""}
-              placeholder="Choose or enter a model ID"
-              onChange={(e) =>
-                setDraft((d) => ({ ...d, model: e.target.value || null }))
-              }
-            />
+            <div className="flex gap-2">
+              <Input
+                id={`${modelListId}-input`}
+                list={modelListId}
+                value={draft.model ?? ""}
+                placeholder="Choose or enter a model ID"
+                disabled={saving || testing}
+                onChange={(e) =>
+                  setDraft((d) => ({ ...d, model: e.target.value || null }))
+                }
+                className="flex-1"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={onSyncModels}
+                disabled={saving || testing || syncingModels || !selected}
+              >
+                {syncingModels ? (
+                  <Loader2 className="size-4 animate-spin mr-1.5" />
+                ) : (
+                  <RefreshCw className="size-4 mr-1.5" />
+                )}
+                Sync models
+              </Button>
+            </div>
             <datalist id={modelListId}>
               {models.map((m) => (
                 <option key={m.id} value={m.id}>
@@ -218,32 +249,49 @@ export function FastResponseSettingsView({
             <p>{result.text}</p>
             <p className="text-xs text-muted-foreground">
               {(result.durationMs / 1000).toFixed(2)} seconds ·{" "}
-              {result.usage.inputTokens ?? "—"} input /{" "}
-              {result.usage.outputTokens ?? "—"} output tokens · Usage recorded
-              in Costs.
+              {result.usage.costCents
+                ? `$${(Number(result.usage.costCents) / 100).toFixed(4)}`
+                : "unpriced"}
             </p>
           </div>
         ) : (
           <p role="alert" className="text-sm text-destructive">
             {result.reason === "timeout"
               ? "The model did not respond within three seconds. Try a faster model."
-              : "Could not generate a response. Check the connection and model, then try again."}
+              : result.reason === "not_configured"
+                ? "Configure and save fast responses before testing."
+                : result.reason === "disabled"
+                  ? "Enable and save fast responses before testing."
+                  : result.reason === "budget_blocked"
+                    ? "Company budget limit reached."
+                    : result.reason === "responsible_user_missing"
+                      ? "A responsible user is required to test fast responses."
+                      : result.reason === "access_denied"
+                        ? "You do not have access to this connection."
+                        : "Could not generate a response. Check the connection and model, then try again."}
           </p>
         ))}
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="space-y-1">
           <Button
             variant="outline"
             size="sm"
+            disabled={
+              !settings.enabled ||
+              dirty ||
+              saving ||
+              testing ||
+              !draft.model ||
+              selected?.status !== "connected"
+            }
             onClick={onTest}
-            disabled={dirty || !settings.enabled || saving || testing}
           >
             {testing ? "Testing…" : "Test response"}
           </Button>
           <p className="text-xs text-muted-foreground">
             {dirty
               ? "Save changes before testing."
-              : "Runs a small sample with an API charge."}
+              : "Runs a test acknowledgement with an API charge."}
           </p>
         </div>
         {dirty && (
@@ -263,6 +311,7 @@ export function FastResponseSettingsView({
     </section>
   );
 }
+
 export function FastResponseSettingsSection({
   companyId,
 }: {
@@ -276,13 +325,25 @@ export function FastResponseSettingsSection({
   });
   const [newlyConnectedId, setNewlyConnectedId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
-  const [provider, setProvider] = useState<AiProvider | null>(null);
+  const [provider, setProvider] = useState<AiProvider | "custom" | null>(null);
   const [connectionId, setConnectionId] = useState<string | null>(null);
   const models = useQuery({
     queryKey: ["fast-response-models", companyId, connectionId],
     queryFn: () => fastResponsesApi.models(companyId, connectionId!),
     enabled: Boolean(connectionId),
   });
+
+  const syncModels = useMutation({
+    mutationFn: () =>
+      fastResponsesApi.syncModels(companyId, { connectionId: connectionId! }),
+    onSuccess: (data) => {
+      client.setQueryData(
+        ["fast-response-models", companyId, connectionId],
+        data.models,
+      );
+    },
+  });
+
   const settingsRevision = JSON.stringify(
     query.data?.settings ?? { companyId },
   );
@@ -335,6 +396,7 @@ export function FastResponseSettingsSection({
         models={models.data}
         saving={save.isPending}
         testing={test.isPending}
+        syncingModels={syncModels.isPending}
         error={
           save.error?.message ??
           test.error?.message ??
@@ -346,6 +408,9 @@ export function FastResponseSettingsSection({
         onConnectionChange={setConnectionId}
         onSave={(v) => save.mutate(v)}
         onTest={() => test.mutate(settingsRevision)}
+        onSyncModels={() => {
+          if (connectionId) syncModels.mutate();
+        }}
         onAdd={() => {
           setProvider(null);
           setAdding(true);
@@ -359,7 +424,27 @@ export function FastResponseSettingsSection({
               Use a shared API connection for short acknowledgements.
             </DialogDescription>
           </DialogHeader>
-          {provider ? (
+          {provider === "custom" ? (
+            <CustomEndpointConnectionForm
+              companyId={companyId}
+              defaultName="Custom Fast Response Gateway"
+              defaultProtocol="chat"
+              showProtocol={true}
+              onCancel={() => setAdding(false)}
+              onComplete={async (result) => {
+                const refreshed = await query.refetch();
+                if (
+                  result.connectionId &&
+                  refreshed.data?.choices.some(
+                    (row) => row.id === result.connectionId,
+                  )
+                ) {
+                  setNewlyConnectedId(result.connectionId);
+                }
+                setAdding(false);
+              }}
+            />
+          ) : provider ? (
             <ConnectionSetupFlow
               host="dialog"
               serviceSlug={provider}
@@ -383,27 +468,39 @@ export function FastResponseSettingsSection({
           ) : (
             <ConnectionChoiceList
               choices={[
-                "openrouter",
-                "openai",
-                "anthropic",
-                "google",
-                "xai",
-              ].map((id) => ({
-                id,
-                description: "Shared API connection",
-                name:
-                  id === "openrouter"
-                    ? "OpenRouter"
-                    : id === "openai"
-                      ? "OpenAI"
-                      : id === "xai"
-                        ? "xAI"
-                        : id === "google"
-                          ? "Google"
-                          : "Anthropic",
-                icon: <AppLogo name={id} brandKey={id} size={24} />,
-              }))}
-              onSelect={(id) => setProvider(id as AiProvider)}
+                ...[
+                  "openrouter",
+                  "openai",
+                  "anthropic",
+                  "google",
+                  "xai",
+                ].map((id) => ({
+                  id,
+                  description: "Shared API connection",
+                  name:
+                    id === "openrouter"
+                      ? "OpenRouter"
+                      : id === "openai"
+                        ? "OpenAI"
+                        : id === "xai"
+                          ? "xAI"
+                          : id === "google"
+                            ? "Google"
+                            : "Anthropic",
+                  icon: <AppLogo name={id} brandKey={id} size={24} />,
+                })),
+                {
+                  id: "custom",
+                  name: "Custom endpoint",
+                  description: "OpenAI or Anthropic compatible gateway",
+                  icon: (
+                    <span className="flex size-9 items-center justify-center rounded-lg bg-muted">
+                      <Network className="size-5" />
+                    </span>
+                  ),
+                },
+              ]}
+              onSelect={(id) => setProvider(id as AiProvider | "custom")}
             />
           )}
         </DialogContent>

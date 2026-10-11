@@ -63,8 +63,18 @@ describe("decision provider contract", () => {
   });
   it("rejects subscription, personal endpoint routing and other provider capabilities", () => {
     expect(decisionProviderForConnection({ provider: "openai", method: "subscription" })).toBeNull();
-    expect(decisionProviderForConnection({ provider: "openai", method: "api_key", routing: { kind: "gateway", baseUrl: "https://example.com" } })).toBeNull();
+    expect(decisionProviderForConnection({ provider: "openai", method: "api_key", routing: { kind: "gateway", baseUrl: "https://example.com" } })).toBe("custom");
     expect(decisionProviderForConnection({ provider: "anthropic", method: "api_key" })).toBeNull();
     expect(decisionProviderForConnection({ provider: "openrouter", method: "api_key", routing: { kind: "openrouter" } })).toBe("openrouter");
+  });
+  it("uses custom gateway decisions with the custom baseUrl", async () => {
+    const transport = vi.fn<typeof fetch>().mockResolvedValue(Response.json(openaiResponse()));
+    const result = await runDecisionProvider({ provider: "custom", model: "my-custom-model", apiKey: "custom-key", baseUrl: "https://custom-gateway.local/v1", request: DECISION_TEST_REQUEST, signal: new AbortController().signal }, { fetch: transport });
+    expect(transport).toHaveBeenCalledTimes(1);
+    const [url, options] = transport.mock.calls[0];
+    expect(String(url)).toBe("https://custom-gateway.local/v1/decisions");
+    expect(new Headers(options?.headers).get("authorization")).toBe("Bearer custom-key");
+    expect(result.answers).toMatchObject({ billing: { type: "boolean", probability: 0.99 } });
+    expect(JSON.parse(String(options?.body)).model).toBe("my-custom-model");
   });
 });
