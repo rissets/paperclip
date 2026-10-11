@@ -16254,9 +16254,26 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
                   eq(issues.companyId, endpoint.companyId),
                 ),
               );
+          } else if (
+            taskUserId &&
+            (issue.sourceTrust as any)?.preset === LOW_TRUST_REVIEW_PRESET
+          ) {
+            await taskTx
+              .update(issues)
+              .set({
+                sourceTrust: null,
+                executionPolicy: null,
+                updatedAt: new Date(),
+              })
+              .where(
+                and(
+                  eq(issues.id, issue.id),
+                  eq(issues.companyId, endpoint.companyId),
+                ),
+              );
           }
 
-        if (issue.status === "done" || issue.status === "cancelled") {
+        if (issue.status === "done" || issue.status === "cancelled" || (issue.status === "blocked" && Boolean(taskUserId))) {
           await issuesSvc.update(
             issue.id,
             {
@@ -28855,6 +28872,37 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
         )
         .returning({ endpointId: chatIdentityLinks.endpointId })
         .then((rows) => rows[0] ?? null);
+      if (confirmedLink) {
+        const boundConversations = await tx
+          .select({
+            issueId: chatConversations.issueId,
+          })
+          .from(chatConversations)
+          .where(
+            and(
+              eq(chatConversations.companyId, link.companyId),
+              eq(chatConversations.endpointId, link.endpointId),
+              inArray(chatConversations.state, ["active", "waiting"]),
+            ),
+          );
+        for (const conv of boundConversations) {
+          await tx
+            .update(issues)
+            .set({
+              status: "todo",
+              sourceTrust: null,
+              executionPolicy: null,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(issues.id, conv.issueId),
+                eq(issues.companyId, link.companyId),
+                eq(issues.status, "blocked"),
+              ),
+            );
+        }
+      }
       if (confirmedLink && connectReceipt && confirmationRuntime &&
           typeof connectReceipt.payload.channelId === "string" && typeof connectReceipt.payload.userId === "string") {
         const effect = await stageProviderEffect(tx, {
