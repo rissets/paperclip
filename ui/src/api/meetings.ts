@@ -129,4 +129,10 @@ export const meetingsApi = {
       `/companies/${encodeURIComponent(companyId)}/meetings/${encodeURIComponent(id)}/chat`,
       body
     ),
+
+  extractQA: (companyId: string, id: string) =>
+    api.post<{ success: boolean; qa: Array<{ question: string; answer: string; askedBy?: string }> }>(
+      `/companies/${encodeURIComponent(companyId)}/meetings/${encodeURIComponent(id)}/extract-qa`,
+      {}
+    ),
 };

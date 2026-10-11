@@ -528,5 +528,35 @@ export function meetingRoutes(db: Db) {
     });
   });
 
+  // 17. Extract Q&A from Meeting Conversation
+  router.post("/companies/:companyId/meetings/:id/extract-qa", async (req: Request, res: Response) => {
+    const companyId = req.params.companyId as string;
+    await assertCompanyAccess(req, companyId);
+    const meetingId = req.params.id as string;
+
+    const checkRes = await callMeetingService(`/api/meetings/${encodeURIComponent(meetingId)}`);
+    if (checkRes.status === 404) throw notFound("Meeting not found");
+    const meeting = await checkRes.json();
+    if (meeting.company_id && meeting.company_id !== companyId) {
+      throw notFound("Meeting not found in this company");
+    }
+
+    const transcriptRes = await callMeetingService(`/api/meetings/${encodeURIComponent(meetingId)}/transcript`);
+    const transcriptData = await transcriptRes.json();
+    const segments = transcriptData.segments || [];
+    const transcriptText = segments.map((s: any) => `[${s.speaker}]: ${s.text}`).join("\n");
+
+    const qa = await meetingIntelligence.extractQA({
+      meetingTitle: meeting.title || "Meeting",
+      notes: meeting.notes || "",
+      transcriptText,
+    });
+
+    res.status(200).json({
+      success: true,
+      qa,
+    });
+  });
+
   return router;
 }

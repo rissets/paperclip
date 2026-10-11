@@ -82,6 +82,21 @@ function extractJsonObject(text: string): any {
   return null;
 }
 
+function extractJsonArray(text: string): any[] | null {
+  if (!text) return null;
+  const start = text.indexOf("[");
+  const end = text.lastIndexOf("]");
+  if (start !== -1 && end !== -1 && end > start) {
+    try {
+      const parsed = JSON.parse(text.slice(start, end + 1));
+      if (Array.isArray(parsed)) return parsed;
+    } catch {
+      // ignore
+    }
+  }
+  return null;
+}
+
 export const meetingIntelligence = {
   async extractTickets(input: {
     meetingTitle: string;
@@ -247,5 +262,48 @@ Jawablah secara informatif dalam Bahasa Indonesia:`;
     }
 
     return `Berdasarkan catatan rapat "${input.meetingTitle}", topik yang dibahas mencakup poin-poin yang tercatat di ringkasan. Apakah ada bagian spesifik dari transkrip yang ingin Anda gali lebih dalam?`;
+  },
+
+  async extractQA(input: {
+    meetingTitle: string;
+    notes?: string;
+    transcriptText?: string;
+  }): Promise<Array<{ question: string; answer: string; askedBy?: string }>> {
+    const transcriptExcerpt = (input.transcriptText || "").slice(-3500);
+    if (!transcriptExcerpt.trim()) return [];
+
+    const prompt = `Analisis percakapan rapat berikut dan temukan pertanyaan-pertanyaan nyata yang diajukan selama pembicaraan beserta jawabannya (jika ada dijawab oleh pembicara lain atau terdapat dalam notulen).
+
+Judul Rapat: ${input.meetingTitle}
+Notulen: ${input.notes || "(Tidak ada)"}
+Transkrip Percakapan:
+${transcriptExcerpt}
+
+Format output HARUS format JSON array murni tanpa markdown triple-backtick:
+[
+  {
+    "question": "teks pertanyaan yang benar-benar ditanyakan dalam rapat",
+    "answer": "jawaban atau penjelasan yang diberikan dalam percakapan",
+    "askedBy": "nama atau pembicara yang bertanya (opsional)"
+  }
+]
+Jika TIDAK ADA pertanyaan sama sekali dalam percakapan, kembalikan array kosong: []`;
+
+    try {
+      const raw = await runPiPrompt(prompt, 20_000);
+      const json = extractJsonArray(raw);
+      if (Array.isArray(json)) {
+        return json
+          .map((item) => ({
+            question: String(item.question || "").trim(),
+            answer: String(item.answer || "Belum ada jawaban eksplisit dalam percakapan.").trim(),
+            askedBy: item.askedBy ? String(item.askedBy).trim() : undefined,
+          }))
+          .filter((q) => q.question.length > 3);
+      }
+    } catch (err: any) {
+      console.warn("[meetingIntelligence] extractQA failed:", err.message);
+    }
+    return [];
   },
 };

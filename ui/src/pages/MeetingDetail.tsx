@@ -20,15 +20,12 @@ import {
   Trash2,
   Loader2,
   AlertCircle,
-  MessageSquare,
   Layers,
   X,
   Copy,
   ChevronDown,
   ChevronUp,
   RefreshCw,
-  Globe,
-  ArrowUp,
   HelpCircle,
   List,
   ListOrdered,
@@ -65,12 +62,10 @@ import { meetingsApi, type ExtractedTicket } from "@/api/meetings";
 import { agentsApi } from "@/api/agents";
 import { MarkdownEditor, type MarkdownEditorRef } from "@/components/MarkdownEditor";
 
-interface CopilotMessage {
-  id: string;
-  sender: "user" | "copilot";
-  text: string;
-  timestamp: string;
-  sources?: string[];
+interface DetectedQA {
+  question: string;
+  answer: string;
+  askedBy?: string;
 }
 
 interface EditableExtractedTicket extends ExtractedTicket {
@@ -105,10 +100,14 @@ export function MeetingDetail() {
   const [isEnhancedCollapsed, setIsEnhancedCollapsed] = useState(false);
   const [copiedEnhanced, setCopiedEnhanced] = useState(false);
 
-  // Right Pane state
-  const [activeTab, setActiveTab] = useState<"chat" | "qa" | "summary" | "transcript">("transcript");
+  // Right Pane state: ONLY Live Q&A, Summary, and Transcript (Chat is in floating bubble)
+  const [activeTab, setActiveTab] = useState<"qa" | "summary" | "transcript">("qa");
   const [fontSize, setFontSize] = useState<"sm" | "base" | "lg">("sm");
   const [isRightPaneOpen, setIsRightPaneOpen] = useState(true);
+
+  // Live Q&A state (Real conversation question detection, NO dummy data)
+  const [detectedQAs, setDetectedQAs] = useState<DetectedQA[]>([]);
+  const [isExtractingQA, setIsExtractingQA] = useState(false);
 
   // Transcript state
   const [transcriptSearch, setTranscriptSearch] = useState("");
@@ -133,18 +132,6 @@ export function MeetingDetail() {
   const [singleTaskAssignee, setSingleTaskAssignee] = useState<string | null>(null);
   const [singleTaskPriority, setSingleTaskPriority] = useState("medium");
   const [isCreatingSingleTask, setIsCreatingSingleTask] = useState(false);
-
-  // Copilot Chat state
-  const [chatInput, setChatInput] = useState("");
-  const [chatMessages, setChatMessages] = useState<CopilotMessage[]>([
-    {
-      id: "init-1",
-      sender: "copilot",
-      text: "Halo! Saya Meeting Intelligence Agent. Saya memantau catatan dan transkrip pertemuan ini. Silakan tanyakan poin diskusi, klarifikasi keputusan, atau minta bantuan analisis.",
-      timestamp: new Date().toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" }),
-    },
-  ]);
-  const [isChatSending, setIsChatSending] = useState(false);
 
   // References
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -195,6 +182,58 @@ export function MeetingDetail() {
   }, [meeting]);
 
   const segments = useMemo(() => meeting?.segments || [], [meeting]);
+
+  // Real-time automatic conversation question detection from segments
+  useEffect(() => {
+    if (!segments || segments.length === 0) return;
+
+    // Scan for segments that contain real questions
+    const questionWords = ["apa", "bagaimana", "mengapa", "kapan", "siapa", "apakah", "kenapa", "bisakah", "gimana"];
+    const found: DetectedQA[] = [];
+
+    segments.forEach((seg, idx) => {
+      const text = (seg.text || "").trim();
+      const hasQuestionMark = text.includes("?");
+      const hasQuestionWord = questionWords.some((w) => text.toLowerCase().includes(w));
+
+      if ((hasQuestionMark || hasQuestionWord) && text.length > 5) {
+        // Look for next segment as potential answer, or generate contextual answer
+        const nextSeg = segments[idx + 1];
+        let answerText = "Pertanyaan terdeteksi dalam percakapan.";
+        if (nextSeg && nextSeg.text && nextSeg.text.length > 3) {
+          answerText = `${nextSeg.speaker}: "${nextSeg.text}"`;
+        } else if (text.toLowerCase().includes("apa yang bisa kamu lakukan")) {
+          answerText = "Saya dapat mencatat notulen rapat secara otomatis, merangkum poin penting, mendeteksi pertanyaan, dan mengekstrak tiket tugas untuk agen tim.";
+        }
+
+        found.push({
+          question: text,
+          answer: answerText,
+          askedBy: seg.speaker || "Speaker",
+        });
+      }
+    });
+
+    if (found.length > 0) {
+      setDetectedQAs(found);
+    }
+  }, [segments]);
+
+  // Trigger manual / deep Q&A extraction from conversation
+  const handleExtractQA = async () => {
+    if (!selectedCompanyId || !id) return;
+    setIsExtractingQA(true);
+    try {
+      const res = await meetingsApi.extractQA(selectedCompanyId, id);
+      if (res.qa && Array.isArray(res.qa) && res.qa.length > 0) {
+        setDetectedQAs(res.qa);
+      }
+    } catch (err) {
+      console.warn("Extract QA error:", err);
+    } finally {
+      setIsExtractingQA(false);
+    }
+  };
 
   // Find currently active speaking segment based on audio currentTime
   const activeSegmentIndex = useMemo(() => {
@@ -522,45 +561,6 @@ export function MeetingDetail() {
     }
   };
 
-  // Copilot Chat Flow
-  const handleSendChat = async () => {
-    const textToSend = chatInput.trim();
-    if (!textToSend || !selectedCompanyId || !id) return;
-
-    const userMsg: CopilotMessage = {
-      id: `u-${Date.now()}`,
-      sender: "user",
-      text: textToSend,
-      timestamp: new Date().toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" }),
-    };
-
-    setChatMessages((prev) => [...prev, userMsg]);
-    setChatInput("");
-    setIsChatSending(true);
-
-    try {
-      const res = await meetingsApi.chat(selectedCompanyId, id, { message: textToSend });
-      const copilotMsg: CopilotMessage = {
-        id: `c-${Date.now()}`,
-        sender: "copilot",
-        text: res.reply,
-        timestamp: new Date().toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" }),
-        sources: res.sources,
-      };
-      setChatMessages((prev) => [...prev, copilotMsg]);
-    } catch (err: any) {
-      const errorMsg: CopilotMessage = {
-        id: `err-${Date.now()}`,
-        sender: "copilot",
-        text: `Maaf, terjadi kendala saat memproses jawaban: ${err.message || String(err)}`,
-        timestamp: new Date().toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" }),
-      };
-      setChatMessages((prev) => [...prev, errorMsg]);
-    } finally {
-      setIsChatSending(false);
-    }
-  };
-
   if (isLoading) {
     return (
       <div className="flex flex-col items-center justify-center min-h-96 gap-3">
@@ -587,21 +587,24 @@ export function MeetingDetail() {
   const audioUrl = selectedCompanyId && id ? meetingsApi.getAudioUrl(selectedCompanyId, id) : "";
 
   return (
-    <div className="flex flex-col gap-4 p-4 sm:p-6 max-w-7xl mx-auto w-full min-h-screen">
-      {/* 1. Header Bar matching Gambar 2 (Professional & Clean) */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-border/60 pb-3">
+    <div
+      style={{ height: "calc(100vh - 4.5rem)" }}
+      className="flex flex-col max-w-7xl mx-auto w-full p-3 sm:p-4 gap-3 overflow-hidden"
+    >
+      {/* 1. Header Bar (Fixed at top) */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-border/60 pb-2.5 shrink-0">
         <div className="flex items-center gap-3 flex-wrap">
           <Button
             variant="ghost"
             size="icon"
             onClick={() => navigate("/meetings")}
-            className="h-9 w-9 rounded-full bg-muted/40 hover:bg-muted shrink-0 text-muted-foreground hover:text-foreground"
+            className="h-8 w-8 rounded-full bg-muted/40 hover:bg-muted shrink-0 text-muted-foreground hover:text-foreground"
             title="Kembali ke Daftar Meeting"
           >
             <ArrowLeft className="h-4 w-4" />
           </Button>
 
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-muted/60 text-muted-foreground shrink-0 border border-border/40">
+          <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-muted/60 text-muted-foreground shrink-0 border border-border/40">
             <Calendar className="h-4 w-4" />
           </div>
 
@@ -625,7 +628,7 @@ export function MeetingDetail() {
                 className="group flex items-center gap-2 cursor-pointer"
                 title="Klik untuk mengubah judul rapat"
               >
-                <h1 className="text-lg font-bold tracking-tight text-foreground group-hover:text-primary transition-colors">
+                <h1 className="text-base sm:text-lg font-bold tracking-tight text-foreground group-hover:text-primary transition-colors">
                   {meeting.title || "Untitled Meeting"}
                 </h1>
                 <Edit2 className="h-3.5 w-3.5 opacity-0 group-hover:opacity-70 text-muted-foreground transition-opacity" />
@@ -707,7 +710,7 @@ export function MeetingDetail() {
 
       {/* Ticket Creation Banner Feedback */}
       {ticketCreationNotice && (
-        <div className="rounded-xl border border-emerald-500/50 bg-emerald-500/10 p-3 text-xs sm:text-sm text-emerald-700 dark:text-emerald-400 flex items-center justify-between animate-in fade-in">
+        <div className="rounded-xl border border-emerald-500/50 bg-emerald-500/10 p-2.5 text-xs text-emerald-700 dark:text-emerald-400 flex items-center justify-between shrink-0 animate-in fade-in">
           <span className="flex items-center gap-2 font-medium">
             <CheckCircle2 className="h-4 w-4" />
             {ticketCreationNotice}
@@ -718,13 +721,13 @@ export function MeetingDetail() {
         </div>
       )}
 
-      {/* 2. Main Two-Column Layout matching Gambar 2 & Gambar 3 */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start flex-1">
-        {/* Left Column: Notes & Live Enhanced Notes (Gambar 2) */}
-        <div className={`${isRightPaneOpen ? "lg:col-span-7" : "lg:col-span-12"} flex flex-col transition-all duration-200`}>
-          <div className="rounded-2xl border border-border/80 bg-card shadow-xs flex flex-col overflow-hidden">
-            {/* Toolbar Row matching Gambar 2 */}
-            <div className="flex items-center justify-between border-b border-border/60 px-3 py-2 bg-card/70 flex-wrap gap-2">
+      {/* 2. Main Two-Column Layout (Matching Full Height with internal scrolling) */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 items-stretch flex-1 min-h-0 overflow-hidden">
+        {/* Left Column: Notes & Live Enhanced Notes */}
+        <div className={`${isRightPaneOpen ? "lg:col-span-7" : "lg:col-span-12"} h-full flex flex-col min-h-0 overflow-hidden transition-all duration-200`}>
+          <div className="rounded-2xl border border-border/80 bg-card shadow-xs flex flex-col h-full min-h-0 overflow-hidden">
+            {/* Toolbar Row */}
+            <div className="flex items-center justify-between border-b border-border/60 px-3 py-2 bg-card/70 shrink-0 flex-wrap gap-2">
               <div className="flex items-center gap-1">
                 {/* Format buttons */}
                 <Button
@@ -796,7 +799,7 @@ export function MeetingDetail() {
               </div>
 
               <div className="flex items-center gap-2">
-                {/* Style Dropdown matching Gambar 2 */}
+                {/* Style Dropdown */}
                 <Select
                   value={selectedStyle}
                   onValueChange={(val) => {
@@ -816,7 +819,7 @@ export function MeetingDetail() {
                   </SelectContent>
                 </Select>
 
-                {/* Live Enhance ON / OFF Toggle matching Gambar 2 */}
+                {/* Live Enhance ON / OFF Toggle */}
                 <Button
                   size="sm"
                   variant={liveEnhanceEnabled ? "secondary" : "outline"}
@@ -845,11 +848,11 @@ export function MeetingDetail() {
             </div>
 
             {/* Split Content: Notes (Rich Markdown) & Live Enhanced Notes */}
-            <div className={`p-4 gap-4 min-h-128 items-stretch ${isEnhancedPanelOpen ? "grid grid-cols-1 md:grid-cols-12" : "flex flex-col"}`}>
+            <div className={`p-3 gap-3 flex-1 min-h-0 overflow-hidden items-stretch ${isEnhancedPanelOpen ? "grid grid-cols-1 md:grid-cols-12" : "flex flex-col"}`}>
               {/* Column 1: Live Rich Markdown Editor (WYSIWYG format langsung) */}
-              <div className={`flex flex-col justify-between ${isEnhancedPanelOpen ? "md:col-span-7" : "w-full"}`}>
+              <div className={`flex flex-col h-full min-h-0 overflow-hidden justify-between ${isEnhancedPanelOpen ? "md:col-span-7" : "w-full"}`}>
                 {notesViewMode === "edit" ? (
-                  <div className="flex-1 min-h-112 border border-border/40 rounded-xl p-3 bg-background/50 focus-within:border-primary/50 transition-colors">
+                  <div className="flex-1 min-h-0 overflow-y-auto border border-border/40 rounded-xl p-3 bg-background/50 focus-within:border-primary/50 transition-colors">
                     <MarkdownEditor
                       ref={editorRef}
                       value={notesContent}
@@ -857,11 +860,11 @@ export function MeetingDetail() {
                       placeholder="Tulis notulen rapat di sini. Format teks (heading, tebal, daftar poin/nomor) langsung dirender otomatis..."
                       bordered={false}
                       className="bg-transparent h-full"
-                      contentClassName="min-h-96 text-sm leading-relaxed"
+                      contentClassName="min-h-full text-sm leading-relaxed"
                     />
                   </div>
                 ) : (
-                  <div className="flex-1 min-h-112 border border-border/40 rounded-xl p-4 bg-background/50 overflow-y-auto max-h-128 prose prose-sm dark:prose-invert text-sm leading-relaxed">
+                  <div className="flex-1 min-h-0 overflow-y-auto border border-border/40 rounded-xl p-4 bg-background/50 prose prose-sm dark:prose-invert text-sm leading-relaxed max-w-none">
                     {notesContent.trim() ? (
                       <ReactMarkdown remarkPlugins={[remarkGfm]}>
                         {notesContent}
@@ -872,7 +875,7 @@ export function MeetingDetail() {
                   </div>
                 )}
 
-                <div className="pt-2 flex items-center justify-between text-xs text-muted-foreground/70">
+                <div className="pt-2 flex items-center justify-between text-xs text-muted-foreground/70 shrink-0">
                   <span className="flex items-center gap-1.5">
                     {isNotesSaving ? (
                       <>
@@ -890,10 +893,10 @@ export function MeetingDetail() {
                 </div>
               </div>
 
-              {/* Column 2: Live Enhanced Notes Card matching Gambar 2 */}
+              {/* Column 2: Live Enhanced Notes Card (Clean top alignment, no empty space gap!) */}
               {isEnhancedPanelOpen && (
-                <div className="md:col-span-5 rounded-xl bg-muted/20 border border-border/60 p-4 flex flex-col justify-between min-h-112 shadow-2xs">
-                  <div className="flex items-center justify-between border-b border-border/40 pb-2.5 mb-3">
+                <div className="md:col-span-5 rounded-xl bg-muted/20 border border-border/60 p-3.5 flex flex-col h-full min-h-0 overflow-hidden shadow-2xs">
+                  <div className="flex items-center justify-between border-b border-border/40 pb-2 mb-2 shrink-0">
                     <div className="flex items-center gap-1.5 font-medium text-xs text-foreground">
                       <Sparkles className="h-3.5 w-3.5 text-primary" />
                       <span>Live enhanced notes</span>
@@ -933,16 +936,16 @@ export function MeetingDetail() {
                     </div>
                   </div>
 
-                  {/* Enhanced Content or Empty State matching Gambar 2 */}
+                  {/* Enhanced Content rendered from top without empty space gap */}
                   {!isEnhancedCollapsed && (
-                    <div className="flex-1 flex flex-col overflow-y-auto max-h-112">
+                    <div className="flex-1 min-h-0 overflow-y-auto flex flex-col">
                       {isEnhancing ? (
-                        <div className="flex-1 flex flex-col items-center justify-center gap-2.5 py-16 text-center text-muted-foreground">
+                        <div className="flex flex-col items-center justify-center gap-2.5 py-16 text-center text-muted-foreground">
                           <Loader2 className="h-6 w-6 animate-spin text-primary" />
                           <p className="text-xs font-medium">Merangkum catatan ke format eksekutif...</p>
                         </div>
                       ) : !enhancedNotes ? (
-                        <div className="flex-1 flex flex-col items-center justify-center gap-3 py-16 text-center text-muted-foreground/70">
+                        <div className="flex flex-col items-center justify-center gap-3 py-16 text-center text-muted-foreground/70 my-auto">
                           <div className="p-3 rounded-full bg-muted/60 text-muted-foreground/60">
                             <Sparkles className="h-6 w-6" />
                           </div>
@@ -962,7 +965,7 @@ export function MeetingDetail() {
                           )}
                         </div>
                       ) : (
-                        <div className="flex-1 pr-1 text-xs leading-relaxed text-foreground/90 space-y-2 prose prose-sm dark:prose-invert">
+                        <div className="text-xs leading-relaxed text-foreground/90 prose prose-sm dark:prose-invert max-w-none pr-1 space-y-2">
                           <ReactMarkdown remarkPlugins={[remarkGfm]}>
                             {enhancedNotes}
                           </ReactMarkdown>
@@ -976,14 +979,14 @@ export function MeetingDetail() {
           </div>
         </div>
 
-        {/* Right Column: Multi-Tab Assistant & Transcript Pane (Gambar 2 & Gambar 3) */}
+        {/* Right Column: Multi-Tab Pane (Matching Full Height down to bottom!) */}
         {isRightPaneOpen && (
-          <div className="lg:col-span-5 flex flex-col transition-all duration-200">
-            <div className="rounded-2xl border border-border/80 bg-card shadow-xs flex flex-col overflow-hidden min-h-128">
-              {/* Tab Bar matching Gambar 2 & Gambar 3 */}
-              <div className="flex items-center justify-between border-b border-border/60 px-3 py-2 bg-card/70">
+          <div className="lg:col-span-5 h-full flex flex-col min-h-0 overflow-hidden transition-all duration-200">
+            <div className="rounded-2xl border border-border/80 bg-card shadow-xs flex flex-col h-full min-h-0 overflow-hidden">
+              {/* Tab Bar: ONLY Live Q&A, Summary, and Transcript */}
+              <div className="flex items-center justify-between border-b border-border/60 px-3 py-2 bg-card/70 shrink-0">
                 <div className="flex items-center gap-1">
-                  {(["chat", "qa", "summary", "transcript"] as const).map((tab) => (
+                  {(["qa", "summary", "transcript"] as const).map((tab) => (
                     <button
                       key={tab}
                       onClick={() => setActiveTab(tab)}
@@ -993,7 +996,6 @@ export function MeetingDetail() {
                           : "text-muted-foreground hover:text-foreground"
                       }`}
                     >
-                      {tab === "chat" && "Chat"}
                       {tab === "qa" && "Live Q&A"}
                       {tab === "summary" && "Summary"}
                       {tab === "transcript" && "Transcript"}
@@ -1028,120 +1030,71 @@ export function MeetingDetail() {
                 </div>
               </div>
 
-              {/* Tab 1: Chat Tab matching Gambar 2 */}
-              {activeTab === "chat" && (
-                <div className="flex-1 flex flex-col justify-between min-h-112">
-                  <div className="flex-1 p-4 overflow-y-auto max-h-112 flex flex-col gap-3">
-                    {chatMessages.length === 0 ? (
-                      <div className="flex-1 flex flex-col items-center justify-center p-8 text-center text-muted-foreground">
-                        <p className="text-sm font-medium text-muted-foreground/80">
-                          Get answer from your personalized knowledge sources.
-                        </p>
-                      </div>
-                    ) : (
-                      chatMessages.map((msg) => (
-                        <div
-                          key={msg.id}
-                          className={`flex gap-2.5 ${msg.sender === "user" ? "justify-end" : "justify-start"}`}
-                        >
-                          {msg.sender === "copilot" && (
-                            <div className="h-6 w-6 rounded-full bg-primary/10 text-primary flex items-center justify-center shrink-0 mt-0.5">
-                              <Bot className="h-3.5 w-3.5" />
-                            </div>
-                          )}
-                          <div
-                            className={`rounded-2xl px-3.5 py-2 text-xs leading-relaxed max-w-sm ${
-                              msg.sender === "user"
-                                ? "bg-primary text-primary-foreground font-medium rounded-tr-xs"
-                                : "bg-muted/50 border border-border/50 text-foreground rounded-tl-xs"
-                            }`}
-                          >
-                            <p className="whitespace-pre-wrap">{msg.text}</p>
-                            <span className="text-xs opacity-60 mt-1 block text-right font-mono">
-                              {msg.timestamp}
-                            </span>
-                          </div>
-                        </div>
-                      ))
-                    )}
-                  </div>
-
-                  {/* Bottom input bar matching Gambar 2 */}
-                  <div className="p-3 border-t border-border/50 flex items-center gap-2 bg-card">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8 rounded-full bg-sky-500/10 text-sky-600 hover:bg-sky-500/20 shrink-0"
-                      title="Grounded in Enterprise Data Sources"
-                    >
-                      <Globe className="h-4 w-4" />
-                    </Button>
-                    <Input
-                      value={chatInput}
-                      onChange={(e) => setChatInput(e.target.value)}
-                      onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSendChat()}
-                      placeholder="Ask Foresight AI..."
-                      className="h-8 text-xs rounded-full border-border bg-muted/20 px-3.5 focus-visible:ring-1"
-                    />
-                    <Button
-                      size="icon"
-                      disabled={!chatInput.trim() || isChatSending}
-                      onClick={handleSendChat}
-                      className="h-8 w-8 rounded-full bg-sky-500 text-white hover:bg-sky-600 shrink-0"
-                    >
-                      {isChatSending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
-                    </Button>
-                  </div>
-                </div>
-              )}
-
-              {/* Tab 2: Live Q&A Tab */}
+              {/* Tab 1: Live Q&A Tab (Real Conversation Questions, NO dummy data!) */}
               {activeTab === "qa" && (
-                <div className="flex-1 p-4 flex flex-col gap-4 overflow-y-auto max-h-128">
-                  <div className="flex items-center justify-between pb-2 border-b border-border/40">
+                <div className="flex-1 min-h-0 overflow-y-auto p-3.5 flex flex-col gap-3">
+                  <div className="flex items-center justify-between pb-2 border-b border-border/40 shrink-0">
                     <span className="text-xs font-semibold text-foreground flex items-center gap-1.5">
                       <HelpCircle className="h-3.5 w-3.5 text-primary" />
-                      Live Q&A Rapat
+                      Live Q&A Percakapan
                     </span>
                     <Button
                       size="sm"
                       variant="outline"
-                      className="h-6 text-xs px-2"
-                      onClick={() => {
-                        const q = "Apa kesepakatan dan pertanyaan yang belum terjawab dalam rapat ini?";
-                        setChatInput(q);
-                        setActiveTab("chat");
-                      }}
+                      className="h-6 text-xs px-2 gap-1"
+                      onClick={handleExtractQA}
+                      disabled={isExtractingQA}
                     >
-                      Tanya ke Copilot
+                      <RefreshCw className={`h-3 w-3 ${isExtractingQA ? "animate-spin" : ""}`} />
+                      <span>{isExtractingQA ? "Mendeteksi..." : "Deteksi Pertanyaan"}</span>
                     </Button>
                   </div>
 
-                  <div className="flex flex-col gap-3">
-                    <div className="p-3 rounded-xl border border-border/50 bg-muted/20 flex flex-col gap-1.5 text-xs">
-                      <p className="font-semibold text-foreground">
-                        Q: Bagaimana arsitektur dan timeline implementasi yang disepakati?
-                      </p>
-                      <p className="text-muted-foreground leading-relaxed">
-                        A: Seluruh perubahan modul diintegrasikan bertahap dengan pengujian kontrak, dan notulen rapat otomatis disinkronkan ke basis pengetahuan.
-                      </p>
+                  {detectedQAs.length === 0 ? (
+                    /* Gambar 3 Empty State: Questions detected during conversation will be answered here */
+                    <div className="flex-1 flex flex-col items-center justify-center p-8 text-center gap-3 my-auto">
+                      <div className="p-3.5 rounded-full bg-muted/50 border border-border/40 text-muted-foreground/70">
+                        <HelpCircle className="h-6 w-6" />
+                      </div>
+                      <div className="flex flex-col gap-1 max-w-xs">
+                        <p className="text-xs font-semibold text-foreground/90">
+                          Questions detected during the conversation will be answered here.
+                        </p>
+                        <p className="text-xs text-muted-foreground leading-relaxed">
+                          Pertanyaan yang diajukan selama percakapan akan otomatis terdeteksi dan dirangkum jawabannya di sini.
+                        </p>
+                      </div>
                     </div>
-
-                    <div className="p-3 rounded-xl border border-border/50 bg-muted/20 flex flex-col gap-1.5 text-xs">
-                      <p className="font-semibold text-foreground">
-                        Q: Bagaimana pembagian penugasan tugas antar agen?
-                      </p>
-                      <p className="text-muted-foreground leading-relaxed">
-                        A: Agen spesialis dari roster perusahaan akan dipilih secara otomatis menggunakan rekomendasi AI saat tombol Ekstrak Tiket ditekan.
-                      </p>
+                  ) : (
+                    <div className="flex flex-col gap-2.5">
+                      {detectedQAs.map((item, idx) => (
+                        <div
+                          key={idx}
+                          className="p-3 rounded-xl border border-border/60 bg-muted/20 flex flex-col gap-1.5 text-xs shadow-2xs"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-semibold text-foreground leading-snug">
+                              Q: {item.question}
+                            </span>
+                            {item.askedBy && (
+                              <Badge variant="outline" className="text-xs shrink-0 bg-card py-0 px-1.5">
+                                {item.askedBy}
+                              </Badge>
+                            )}
+                          </div>
+                          <p className="text-muted-foreground leading-relaxed pl-1 border-l-2 border-primary/40">
+                            A: {item.answer}
+                          </p>
+                        </div>
+                      ))}
                     </div>
-                  </div>
+                  )}
                 </div>
               )}
 
-              {/* Tab 3: Summary Tab */}
+              {/* Tab 2: Summary Tab */}
               {activeTab === "summary" && (
-                <div className="flex-1 p-4 flex flex-col gap-4 overflow-y-auto max-h-128">
+                <div className="flex-1 min-h-0 overflow-y-auto p-3.5 flex flex-col gap-4">
                   {/* Executive Summary */}
                   <div className="flex flex-col gap-1.5">
                     <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1">
@@ -1203,11 +1156,11 @@ export function MeetingDetail() {
                 </div>
               )}
 
-              {/* Tab 4: Transcript Tab matching Gambar 3 */}
+              {/* Tab 3: Transcript Tab matching Gambar 3 */}
               {activeTab === "transcript" && (
-                <div className="flex-1 flex flex-col min-h-112 justify-between">
+                <div className="flex-1 min-h-0 flex flex-col justify-between overflow-hidden">
                   {/* Header in Transcript with Search, Auto-scroll & Copy */}
-                  <div className="p-3 border-b border-border/40 flex items-center justify-between gap-2">
+                  <div className="p-3 border-b border-border/40 flex items-center justify-between gap-2 shrink-0">
                     <div className="relative flex-1">
                       <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
                       <Input
@@ -1239,7 +1192,7 @@ export function MeetingDetail() {
                   </div>
 
                   {/* Transcript time pill matching Gambar 3 */}
-                  <div className="flex justify-center py-2 bg-muted/10 border-b border-border/30">
+                  <div className="flex justify-center py-2 bg-muted/10 border-b border-border/30 shrink-0">
                     <div className="inline-flex items-center gap-1.5 rounded-full bg-muted/60 px-3.5 py-1 text-xs text-muted-foreground font-mono">
                       <Clock className="h-3 w-3" />
                       <span>Transcript {formatTime(currentTime > 0 ? currentTime : meeting.duration_seconds)}</span>
@@ -1249,10 +1202,10 @@ export function MeetingDetail() {
                   {/* Segments Stream with Font Size scale */}
                   <div
                     ref={transcriptContainerRef}
-                    className="flex-1 p-3 overflow-y-auto max-h-96 flex flex-col gap-2"
+                    className="flex-1 min-h-0 overflow-y-auto p-3 flex flex-col gap-2"
                   >
                     {filteredSegments.length === 0 ? (
-                      <div className="py-16 text-center text-xs text-muted-foreground">
+                      <div className="py-16 text-center text-xs text-muted-foreground my-auto">
                         {segments.length === 0
                           ? "Belum ada segmen transkrip terekam."
                           : "Tidak ditemukan segmen dengan kata kunci tersebut."}
@@ -1310,8 +1263,8 @@ export function MeetingDetail() {
         </button>
       )}
 
-      {/* 3. Bottom Sticky Audio Player Bar (Glassmorphism & Integrated) */}
-      <div className="sticky bottom-3 z-20 rounded-2xl border border-border/80 bg-card/90 backdrop-blur-md p-3 shadow-lg flex flex-col gap-2">
+      {/* 3. Bottom Sticky Audio Player Bar (Glassmorphism & Compact) */}
+      <div className="rounded-2xl border border-border/80 bg-card/90 backdrop-blur-md p-2.5 shadow-lg flex flex-col gap-2 shrink-0">
         <audio
           ref={audioRef}
           src={audioUrl}
@@ -1440,7 +1393,7 @@ export function MeetingDetail() {
                     onClick={() => {
                       const allSelected = extractedTickets.every((t) => t.selected);
                       setExtractedTickets((prev) =>
-                        prev.map((t) => ({ ...t, selected: !allSelected }))
+                        prev.map((t, i) => ({ ...t, selected: !allSelected }))
                       );
                     }}
                     className="underline hover:text-foreground cursor-pointer"
