@@ -39,6 +39,201 @@ export function decisionReceipt(provider: DecisionProvider, result: unknown): De
   }
   return { ...base, costCents: null, costStatus: "unpriced", pricingProvenance: { source: "unknown" } };
 }
+function buildChatDecisionPrompt(request: DecisionRequest): { system: string; user: string } {
+  const stateText = typeof request.state === "string"
+    ? request.state
+    : JSON.stringify(request.state, null, 2);
+
+  const questionPrompts = Object.entries(request.questions).map(([id, q]) => {
+    if (q.type === "boolean") {
+      return `- Question "${id}" (type: boolean):\n  Instructions: ${q.instructions}\n  Expected: Answer with "probability" as a number between 0.0 and 1.0 (representing probability of true).`;
+    }
+    if (q.type === "choice") {
+      const opts = Object.entries(q.criteria).map(([k, v]) => `    * "${k}": ${v}`).join("\n");
+      return `- Question "${id}" (type: choice):\n  Instructions: ${q.instructions}\n  Options:\n${opts}\n  Expected: Answer with "choice" set to one of the exact option keys above, and optional "confidence" (0.0 to 1.0).`;
+    }
+    if (q.type === "score") {
+      const levels = q.criteria.map((v, i) => `    * level ${i}: ${v}`).join("\n");
+      return `- Question "${id}" (type: score):\n  Instructions: ${q.instructions}\n  Scale (0 to ${q.criteria.length - 1}):\n${levels}\n  Expected: Answer with "score" set to an integer from 0 to ${q.criteria.length - 1}, and optional "confidence" (0.0 to 1.0).`;
+    }
+    return "";
+  }).filter(Boolean).join("\n\n");
+
+  const system = "You are an AI decision engine. Evaluate the given state and provide structured answers for every question. Output ONLY a valid JSON object matching the requested schema with no surrounding text or markdown formatting.";
+
+  const user = `STATE:
+${stateText}
+
+QUESTIONS TO ANSWER:
+${questionPrompts}
+
+Return a JSON object with this exact shape:
+{
+  "answers": {
+    "<question_id>": { "type": "boolean", "probability": 0.95 },
+    "<question_id>": { "type": "choice", "choice": "<selected_key>", "confidence": 0.9 },
+    "<question_id>": { "type": "score", "score": 1, "confidence": 0.85 }
+  }
+}`;
+
+  return { system, user };
+}
+
+function parseChatDecisionAnswers(content: string, request: DecisionRequest): Record<string, DecisionAnswer> {
+  let cleaned = content.trim();
+  cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+  if (cleaned.startsWith("```")) {
+    cleaned = cleaned.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  }
+  const firstBrace = cleaned.indexOf("{");
+  const lastBrace = cleaned.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+  }
+  const parsed = record(JSON.parse(cleaned));
+  const rawAnswers = record(parsed.answers || parsed);
+
+  const answers: Record<string, DecisionAnswer> = {};
+  for (const [id, q] of Object.entries(request.questions)) {
+    const raw = record(rawAnswers[id]);
+    if (q.type === "boolean") {
+      let prob = typeof raw.probability === "number" ? raw.probability
+        : typeof rawAnswers[id] === "number" ? (rawAnswers[id] as number)
+        : rawAnswers[id] === true || raw.value === true ? 1
+        : rawAnswers[id] === false || raw.value === false ? 0
+        : 0.5;
+      prob = Math.max(0, Math.min(1, prob));
+      answers[id] = { type: "boolean", probability: Number(prob.toFixed(2)) };
+    } else if (q.type === "choice") {
+      const rawChoice = typeof raw.choice === "string" ? raw.choice : typeof rawAnswers[id] === "string" ? (rawAnswers[id] as string) : "";
+      const validKeys = Object.keys(q.criteria);
+      const matched = validKeys.find(k => k === rawChoice)
+        ?? validKeys.find(k => k.toLowerCase() === rawChoice.toLowerCase())
+        ?? validKeys[0];
+      const conf = typeof raw.confidence === "number" && raw.confidence >= 0 && raw.confidence <= 1
+        ? Number(raw.confidence.toFixed(2))
+        : undefined;
+      answers[id] = {
+        type: "choice",
+        choice: matched,
+        ...(conf !== undefined ? { confidence: conf } : {}),
+      };
+    } else if (q.type === "score") {
+      const maxScore = q.criteria.length - 1;
+      let score = typeof raw.score === "number" ? raw.score
+        : typeof rawAnswers[id] === "number" ? (rawAnswers[id] as number)
+        : 0;
+      score = Math.max(0, Math.min(maxScore, Math.round(score)));
+      const conf = typeof raw.confidence === "number" && raw.confidence >= 0 && raw.confidence <= 1
+        ? Number(raw.confidence.toFixed(2))
+        : undefined;
+      answers[id] = {
+        type: "score",
+        score,
+        ...(conf !== undefined ? { confidence: conf } : {}),
+      };
+    }
+  }
+  return answers;
+}
+
+async function runChatCompletionDecision(
+  input: {
+    provider: DecisionProvider;
+    model: string;
+    apiKey: string;
+    baseUrl?: string;
+    request: DecisionRequest;
+    signal: AbortSignal;
+  },
+  options: { fetch?: typeof fetch } = {},
+): Promise<DecisionProviderOutcome> {
+  const fetchFn = options.fetch ?? globalThis.fetch;
+  const chatUrl = input.baseUrl
+    ? `${input.baseUrl.replace(/\/+$/, "")}/chat/completions`
+    : input.provider === "openai"
+    ? "https://api.openai.com/v1/chat/completions"
+    : "https://openrouter.ai/api/v1/chat/completions";
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (input.apiKey) {
+    headers["Authorization"] = `Bearer ${input.apiKey}`;
+  }
+
+  const { system, user } = buildChatDecisionPrompt(input.request);
+  const requestBody: Record<string, unknown> = {
+    model: input.model,
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+    response_format: { type: "json_object" },
+    temperature: 0.1,
+  };
+
+  let res = await fetchFn(chatUrl, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(requestBody),
+    signal: input.signal,
+  });
+
+  if (res.status === 400) {
+    delete requestBody.response_format;
+    res = await fetchFn(chatUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(requestBody),
+      signal: input.signal,
+    });
+  }
+
+  if (!res.ok) {
+    const status = res.status;
+    const errorCode = input.signal.aborted
+      ? "timeout"
+      : status === 401 || status === 403
+      ? "provider_auth_failed"
+      : status === 429
+      ? "provider_rate_limited"
+      : "provider_failed";
+    const noProviderWork = [400, 401, 403, 404, 422, 429].includes(status);
+    return {
+      errorCode,
+      receipt: decisionReceipt(input.provider, null),
+      noProviderWork,
+    };
+  }
+
+  const data = record(await res.json());
+  const rawUsage = record(data.usage);
+  const inputTokens = tokenCount(rawUsage.prompt_tokens ?? rawUsage.input_tokens ?? rawUsage.inputTokens);
+  const outputTokens = tokenCount(rawUsage.completion_tokens ?? rawUsage.output_tokens ?? rawUsage.outputTokens);
+  const providerRequestId = typeof data.id === "string" ? data.id.slice(0, 250) : null;
+
+  const costCents = (input.provider === "openai" && inputTokens !== null && inputTokens <= 32_000)
+    ? unitsToCents(centsToUnits("10") * BigInt(inputTokens) / 1_000_000n)
+    : null;
+  const receipt: DecisionProviderReceipt = {
+    inputTokens,
+    outputTokens,
+    providerRequestId,
+    costCents,
+    costStatus: costCents ? "estimated" : "unpriced",
+    pricingProvenance: costCents
+      ? { source: "rate_card", version: "openai-decisions-2026-10-07", inputCentsPerMillion: "10.0000000" }
+      : { source: "unknown" },
+  };
+
+  const choices = Array.isArray(data.choices) ? data.choices : [];
+  const content = String(record(record(choices[0]).message).content ?? "");
+  const answers = parseChatDecisionAnswers(content, input.request);
+
+  return { answers, receipt };
+}
+
 export async function runDecisionProvider(input: {
   provider: DecisionProvider; model: string; apiKey: string; baseUrl?: string; request: DecisionRequest; signal: AbortSignal;
 }, options: { fetch?: typeof fetch } = {}): Promise<DecisionProviderOutcome> {
@@ -73,9 +268,19 @@ export async function runDecisionProvider(input: {
     }));
     return { answers, receipt };
   } catch (error) {
+    const status = Number(record(error).statusCode);
+    if (
+      !input.signal.aborted &&
+      (status === 404 || status === 405 || (input.provider === "custom" && status !== 401 && status !== 403 && status !== 429))
+    ) {
+      try {
+        return await runChatCompletionDecision(input, options);
+      } catch {
+        // Fall back to original error handling if chat fallback fails
+      }
+    }
     // Never expose provider error messages/bodies; they may contain inputs or credentials.
     const name = error instanceof Error ? error.name : "";
-    const status = record(error).statusCode;
     // SDKs can reject refusals or malformed answers before normalized usage.
     // Keep only validated accounting fields, even in this failure path.
     const data = rejectedResponseData(error);

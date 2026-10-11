@@ -77,4 +77,44 @@ describe("decision provider contract", () => {
     expect(result.answers).toMatchObject({ billing: { type: "boolean", probability: 0.99 } });
     expect(JSON.parse(String(options?.body)).model).toBe("my-custom-model");
   });
+  it("falls back to /chat/completions when /decisions returns 404", async () => {
+    const transport = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: "Unknown route" } }), { status: 404 }))
+      .mockResolvedValueOnce(Response.json({
+        id: "chat-fallback-test",
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              answers: {
+                billing: { type: "boolean", probability: 0.95 },
+                team: { type: "choice", choice: "billing", confidence: 0.9 },
+                severity: { type: "score", score: 0, confidence: 0.85 },
+              },
+            }),
+          },
+        }],
+        usage: { prompt_tokens: 80, completion_tokens: 40 },
+      }));
+    const result = await runDecisionProvider({
+      provider: "custom",
+      model: "llm-hd/qwen3.8-27b",
+      apiKey: "custom-key",
+      baseUrl: "https://custom-gateway.local/v1",
+      request: DECISION_TEST_REQUEST,
+      signal: new AbortController().signal,
+    }, { fetch: transport });
+    expect(transport).toHaveBeenCalledTimes(2);
+    const [url1] = transport.mock.calls[0];
+    const [url2, options2] = transport.mock.calls[1];
+    expect(String(url1)).toBe("https://custom-gateway.local/v1/decisions");
+    expect(String(url2)).toBe("https://custom-gateway.local/v1/chat/completions");
+    expect(new Headers(options2?.headers).get("authorization")).toBe("Bearer custom-key");
+    expect(result.answers).toMatchObject({
+      billing: { type: "boolean", probability: 0.95 },
+      team: { type: "choice", choice: "billing", confidence: 0.9 },
+      severity: { type: "score", score: 0, confidence: 0.85 },
+    });
+    expect(result.receipt.inputTokens).toBe(80);
+    expect(result.receipt.outputTokens).toBe(40);
+  });
 });

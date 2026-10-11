@@ -37,6 +37,7 @@ const failureMessages: Record<string, string> = {
   provider_rate_limited: "The provider is rate limited. Try again later.",
   timeout: "The provider did not respond in time. Billing is unresolved; review Costs.",
   refused: "The model declined the test. Review the connection and try again.",
+  provider_failed: "The provider or model returned an error. Check the endpoint URL, model ID, and API key.",
 };
 
 export function DecisionModelSettingsView({
