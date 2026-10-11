@@ -299,7 +299,7 @@ function ChatSdkEndpointSetup() {
     onSuccess: (next) => {
       setViewedStep(null);
       syncEndpointSnapshot(next);
-      if (next.provider === "imessage-photon" || next.provider === "slack") {
+      if (next.provider === "imessage-photon" || next.provider === "slack" || next.provider === "whatsapp") {
         const resumed = new URLSearchParams(params);
         resumed.set("resume", next.id);
         setParams(resumed, { replace: true });

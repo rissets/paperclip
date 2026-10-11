@@ -69,6 +69,7 @@ const chatProviderName = (provider) =>
     slack: "Slack",
     telegram: "Telegram",
     "imessage-photon": "iMessage Photon",
+    whatsapp: "WhatsApp",
   })[provider];
 const channelMethod = (
   provider,
@@ -432,6 +433,27 @@ const apps = [
     channelMethod("imessage-photon", [field("projectSecret", "Project secret", "Photon project secret")], ["direct_message", "group_chat"],
       "Connect a Photon Cloud project. Pro shared lines support DMs after sender enrollment in Photon and identity linking in Paperclip. Dedicated lines also support individually enabled groups.",
       { register: "https://photon.codes/", docs: "https://photon.codes/docs/spectrum-ts/providers/imessage/connection-and-routing" }),
+  ],
+  [
+    "whatsapp",
+    "WhatsApp",
+    "Connect WhatsApp via QR code to chat with Paperclip agents and create tasks directly from WhatsApp.",
+    "communication",
+    "whatsapp.com",
+    ["https://web.whatsapp.com/*"],
+    {
+      key: "chat-agent",
+      label: "Chat with an agent",
+      purpose: "channel",
+      provider: "whatsapp",
+      transport: "chat_sdk",
+      auth: "none",
+      ownershipModes: ["customer"],
+      whenToUse: "Connect WhatsApp to let users interact and assign tasks to an agent directly from WhatsApp.",
+      guidanceMd: "Scan the QR code with WhatsApp on your phone (Settings > Linked Devices) to connect.",
+      riskTier: "S2",
+      requiredResourceFilters: ["direct_message", "group_chat"],
+    },
   ],
   [
     "telegram",
