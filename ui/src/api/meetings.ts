@@ -131,8 +131,56 @@ export const meetingsApi = {
     ),
 
   extractQA: (companyId: string, id: string) =>
-    api.post<{ success: boolean; qa: Array<{ question: string; answer: string; askedBy?: string }> }>(
+    api.post<{ success: boolean; qa: Array<{ question: string; answer: string; askedBy?: string; answeredBy?: string; timestamp?: string }> }>(
       `/companies/${encodeURIComponent(companyId)}/meetings/${encodeURIComponent(id)}/extract-qa`,
       {}
+    ),
+
+  diarize: (companyId: string, id: string, options?: { num_speakers?: number }) =>
+    api.post<{
+      success: boolean;
+      meeting_id: string;
+      num_speakers: number;
+      speaker_counts: Record<string, number>;
+      total_segments: number;
+      duration_seconds: number;
+    }>(
+      `/companies/${encodeURIComponent(companyId)}/meetings/${encodeURIComponent(id)}/diarize`,
+      options || {}
+    ),
+
+  renameSpeaker: (companyId: string, id: string, body: { from_speaker: string; to_speaker: string }) =>
+    api.post<{
+      success: boolean;
+      meeting_id: string;
+      from_speaker: string;
+      to_speaker: string;
+      updated_count: number;
+    }>(
+      `/companies/${encodeURIComponent(companyId)}/meetings/${encodeURIComponent(id)}/rename-speaker`,
+      body
+    ),
+
+  generateSummary: (companyId: string, id: string, options?: { interval_minutes?: number }) =>
+    api.post<{
+      summary: string;
+      executive_summary: string;
+      topics: string[];
+      key_decisions: string[];
+      action_items: string[];
+      sentiment: string;
+      interval_minutes: number;
+      timeline_breakdown: Array<{
+        interval: string;
+        start_seconds: number;
+        end_seconds: number;
+        title: string;
+        summary: string;
+        key_points: string[];
+        speakers: string[];
+      }>;
+    }>(
+      `/companies/${encodeURIComponent(companyId)}/meetings/${encodeURIComponent(id)}/generate-summary`,
+      options || {}
     ),
 };

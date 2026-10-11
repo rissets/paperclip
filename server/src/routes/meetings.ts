@@ -546,6 +546,19 @@ export function meetingRoutes(db: Db) {
     const segments = transcriptData.segments || [];
     const transcriptText = segments.map((s: any) => `[${s.speaker}]: ${s.text}`).join("\n");
 
+    // Try meeting service analyzer first for rich conversation Q&A extraction
+    try {
+      const msRes = await callMeetingService(`/api/meetings/${encodeURIComponent(meetingId)}/extract-qa`, {
+        method: "POST",
+      });
+      if (msRes.ok) {
+        const msData = await msRes.json();
+        if (msData.qa && Array.isArray(msData.qa) && msData.qa.length > 0) {
+          return res.status(200).json({ success: true, qa: msData.qa });
+        }
+      }
+    } catch {}
+
     const qa = await meetingIntelligence.extractQA({
       meetingTitle: meeting.title || "Meeting",
       notes: meeting.notes || "",
@@ -556,6 +569,72 @@ export function meetingRoutes(db: Db) {
       success: true,
       qa,
     });
+  });
+
+  // 18. Diarize Meeting Audio (Multi-speaker recognition)
+  router.post("/companies/:companyId/meetings/:id/diarize", async (req: Request, res: Response) => {
+    const companyId = req.params.companyId as string;
+    await assertCompanyAccess(req, companyId);
+    const meetingId = req.params.id as string;
+
+    const checkRes = await callMeetingService(`/api/meetings/${encodeURIComponent(meetingId)}`);
+    if (checkRes.status === 404) throw notFound("Meeting not found");
+    const meeting = await checkRes.json();
+    if (meeting.company_id && meeting.company_id !== companyId) {
+      throw notFound("Meeting not found in this company");
+    }
+
+    const serviceRes = await callMeetingService(`/api/meetings/${encodeURIComponent(meetingId)}/diarize`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req.body || {}),
+    });
+    const data = await serviceRes.json();
+    res.status(serviceRes.status).json(data);
+  });
+
+  // 19. Rename Speaker across Meeting Transcript
+  router.post("/companies/:companyId/meetings/:id/rename-speaker", async (req: Request, res: Response) => {
+    const companyId = req.params.companyId as string;
+    await assertCompanyAccess(req, companyId);
+    const meetingId = req.params.id as string;
+
+    const checkRes = await callMeetingService(`/api/meetings/${encodeURIComponent(meetingId)}`);
+    if (checkRes.status === 404) throw notFound("Meeting not found");
+    const meeting = await checkRes.json();
+    if (meeting.company_id && meeting.company_id !== companyId) {
+      throw notFound("Meeting not found in this company");
+    }
+
+    const serviceRes = await callMeetingService(`/api/meetings/${encodeURIComponent(meetingId)}/rename-speaker`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req.body || {}),
+    });
+    const data = await serviceRes.json();
+    res.status(serviceRes.status).json(data);
+  });
+
+  // 20. Generate Rolling Summary with Configurable Interval (e.g. 5m, 10m)
+  router.post("/companies/:companyId/meetings/:id/generate-summary", async (req: Request, res: Response) => {
+    const companyId = req.params.companyId as string;
+    await assertCompanyAccess(req, companyId);
+    const meetingId = req.params.id as string;
+
+    const checkRes = await callMeetingService(`/api/meetings/${encodeURIComponent(meetingId)}`);
+    if (checkRes.status === 404) throw notFound("Meeting not found");
+    const meeting = await checkRes.json();
+    if (meeting.company_id && meeting.company_id !== companyId) {
+      throw notFound("Meeting not found in this company");
+    }
+
+    const serviceRes = await callMeetingService(`/api/meetings/${encodeURIComponent(meetingId)}/generate-summary`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req.body || {}),
+    });
+    const data = await serviceRes.json();
+    res.status(serviceRes.status).json(data);
   });
 
   return router;

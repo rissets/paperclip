@@ -204,4 +204,107 @@ describe("Meeting Notes Routes", () => {
       .send({});
     expect(badRes.status).toBe(400);
   });
+
+  it("proxies diarization request to meeting service", async () => {
+    fetchSpy
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            id: "meet-1",
+            company_id: companyId,
+            title: "Sprint Planning",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        )
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            success: true,
+            meeting_id: "meet-1",
+            num_speakers: 3,
+            speaker_counts: { "Speaker 1": 190, "Speaker 2": 94, "Speaker 3": 106 },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        )
+      );
+
+    const app = createTestApp();
+    const res = await request(app)
+      .post(`/api/companies/${companyId}/meetings/meet-1/diarize`)
+      .send({ num_speakers: 3 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.num_speakers).toBe(3);
+  });
+
+  it("proxies rename-speaker request to meeting service", async () => {
+    fetchSpy
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            id: "meet-1",
+            company_id: companyId,
+            title: "Sprint Planning",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        )
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            success: true,
+            meeting_id: "meet-1",
+            from_speaker: "Speaker 1",
+            to_speaker: "Mongol",
+            updated_count: 190,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        )
+      );
+
+    const app = createTestApp();
+    const res = await request(app)
+      .post(`/api/companies/${companyId}/meetings/meet-1/rename-speaker`)
+      .send({ from_speaker: "Speaker 1", to_speaker: "Mongol" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.to_speaker).toBe("Mongol");
+  });
+
+  it("proxies generate-summary request to meeting service", async () => {
+    fetchSpy
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            id: "meet-1",
+            company_id: companyId,
+            title: "Sprint Planning",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        )
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            summary: "Ringkasan eksekutif",
+            interval_minutes: 5,
+            timeline_breakdown: [{ interval: "00:00 - 05:00", title: "Topik Pembuka" }],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        )
+      );
+
+    const app = createTestApp();
+    const res = await request(app)
+      .post(`/api/companies/${companyId}/meetings/meet-1/generate-summary`)
+      .send({ interval_minutes: 5 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.interval_minutes).toBe(5);
+    expect(res.body.timeline_breakdown).toHaveLength(1);
+  });
 });
+

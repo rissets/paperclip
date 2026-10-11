@@ -68,6 +68,9 @@ interface DetectedQA {
   question: string;
   answer: string;
   askedBy?: string;
+  answeredBy?: string;
+  timestamp?: string;
+  seconds?: number;
 }
 
 interface EditableExtractedTicket extends ExtractedTicket {
@@ -136,6 +139,22 @@ export function MeetingDetail() {
   const [singleTaskPriority, setSingleTaskPriority] = useState("medium");
   const [isCreatingSingleTask, setIsCreatingSingleTask] = useState(false);
 
+  // Diarization & Multi-speaker state
+  const [isDiarizing, setIsDiarizing] = useState(false);
+  const [selectedSpeakerCount, setSelectedSpeakerCount] = useState<number>(3);
+  const [isRenameSpeakerOpen, setIsRenameSpeakerOpen] = useState(false);
+  const [renameFromSpeaker, setRenameFromSpeaker] = useState("");
+  const [renameToSpeaker, setRenameToSpeaker] = useState("");
+  const [isRenamingSpeaker, setIsRenamingSpeaker] = useState(false);
+
+  // Rolling Summary & Settings state
+  const [summaryInterval, setSummaryInterval] = useState<number>(5);
+  const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
+
+  // Live Q&A Copilot Chat state
+  const [copilotQuestion, setCopilotQuestion] = useState("");
+  const [isAskingCopilot, setIsAskingCopilot] = useState(false);
+
   // References
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const editorRef = useRef<MarkdownEditorRef | null>(null);
@@ -193,11 +212,21 @@ export function MeetingDetail() {
 
   const segments = useMemo(() => meeting?.segments || [], [meeting]);
 
-  // Real-time automatic conversation question detection from segments
+  // Load saved AI Q&A from meeting summary, or detect from conversation segments as fallback
   useEffect(() => {
+    if (meeting?.summary) {
+      try {
+        const parsed = JSON.parse(meeting.summary);
+        if (parsed.qa_items && Array.isArray(parsed.qa_items) && parsed.qa_items.length > 0) {
+          setDetectedQAs(parsed.qa_items);
+          return;
+        }
+      } catch {}
+    }
+
     if (!segments || segments.length === 0) return;
 
-    // Scan for segments that contain real questions
+    // Scan for segments that contain real questions as initial baseline
     const questionWords = ["apa", "bagaimana", "mengapa", "kapan", "siapa", "apakah", "kenapa", "bisakah", "gimana"];
     const found: DetectedQA[] = [];
 
@@ -207,19 +236,17 @@ export function MeetingDetail() {
       const hasQuestionWord = questionWords.some((w) => text.toLowerCase().includes(w));
 
       if ((hasQuestionMark || hasQuestionWord) && text.length > 5) {
-        // Look for next segment as potential answer, or generate contextual answer
         const nextSeg = segments[idx + 1];
         let answerText = "Pertanyaan terdeteksi dalam percakapan.";
         if (nextSeg && nextSeg.text && nextSeg.text.length > 3) {
           answerText = `${nextSeg.speaker}: "${nextSeg.text}"`;
-        } else if (text.toLowerCase().includes("apa yang bisa kamu lakukan")) {
-          answerText = "Saya dapat mencatat notulen rapat secara otomatis, merangkum poin penting, mendeteksi pertanyaan, dan mengekstrak tiket tugas untuk agen tim.";
         }
 
         found.push({
           question: text,
           answer: answerText,
           askedBy: seg.speaker || "Speaker",
+          timestamp: formatTime(seg.start_seconds || 0),
         });
       }
     });
@@ -227,7 +254,7 @@ export function MeetingDetail() {
     if (found.length > 0) {
       setDetectedQAs(found);
     }
-  }, [segments]);
+  }, [meeting?.summary, segments]);
 
   // Trigger manual / deep Q&A extraction from conversation
   const handleExtractQA = async () => {
@@ -310,29 +337,50 @@ export function MeetingDetail() {
   // Analytical summary synthesis
   const analyticalData = useMemo(() => {
     let summaryText = "";
+    let executiveSummary = "";
     let topics: string[] = [];
     let insights: string[] = [];
+    let keyDecisions: string[] = [];
+    let actionItems: string[] = [];
+    let timelineBreakdown: Array<{
+      interval: string;
+      start_seconds: number;
+      end_seconds: number;
+      title: string;
+      summary: string;
+      key_points: string[];
+      speakers: string[];
+    }> = [];
     let sentiment = "Produktif";
+    let intervalMinutes = 5;
 
     if (meeting?.summary) {
       try {
         const parsed = JSON.parse(meeting.summary);
         if (typeof parsed === "object" && parsed !== null) {
           summaryText = parsed.summary || "";
+          executiveSummary = parsed.executive_summary || parsed.summary || "";
           topics = Array.isArray(parsed.topics) ? parsed.topics : [];
           insights = Array.isArray(parsed.insights) ? parsed.insights : [];
+          keyDecisions = Array.isArray(parsed.key_decisions) ? parsed.key_decisions : [];
+          actionItems = Array.isArray(parsed.action_items) ? parsed.action_items : [];
+          timelineBreakdown = Array.isArray(parsed.timeline_breakdown) ? parsed.timeline_breakdown : [];
           sentiment = parsed.sentiment || "Produktif";
+          intervalMinutes = parsed.interval_minutes || 5;
         } else {
           summaryText = String(meeting.summary);
+          executiveSummary = summaryText;
         }
       } catch {
         summaryText = meeting.summary;
+        executiveSummary = summaryText;
       }
     }
 
     if (!summaryText) {
       if (segments.length > 0) {
         summaryText = `Rapat membahas ${segments.length} poin percakapan. Topik utama mencakup koordinasi teknis, evaluasi alur kerja, dan pembagian peran tugas antar agen.`;
+        executiveSummary = summaryText;
         topics = ["Koordinasi Tim", "Evaluasi Alur Kerja", "Tindak Lanjut"];
         insights = [
           `Terdeteksi ${segments.length} segmen pembicaraan aktif selama ${formatTime(meeting?.duration_seconds || 0)}.`,
@@ -340,6 +388,7 @@ export function MeetingDetail() {
         ];
       } else {
         summaryText = "Belum ada analisis transkrip. Mulai berbicara atau unggah audio rapat untuk melihat ringkasan analitis.";
+        executiveSummary = summaryText;
         topics = ["Belum ada topik"];
         insights = ["Menunggu data percakapan masuk."];
         sentiment = "Menunggu";
@@ -348,11 +397,28 @@ export function MeetingDetail() {
 
     return {
       summary: summaryText,
+      executiveSummary,
       topics,
       insights,
+      keyDecisions,
+      actionItems,
+      timelineBreakdown,
       sentiment,
+      intervalMinutes,
     };
   }, [meeting, segments]);
+
+  const distinctSpeakers = useMemo(() => {
+    return Array.from(new Set(segments.map((s) => s.speaker).filter(Boolean)));
+  }, [segments]);
+
+  const getSpeakerColor = (speaker: string) => {
+    if (speaker.includes("1")) return "bg-blue-500/10 text-blue-500 border-blue-500/30";
+    if (speaker.includes("2")) return "bg-purple-500/10 text-purple-500 border-purple-500/30";
+    if (speaker.includes("3")) return "bg-emerald-500/10 text-emerald-500 border-emerald-500/30";
+    if (speaker.includes("4")) return "bg-amber-500/10 text-amber-500 border-amber-500/30";
+    return "bg-primary/10 text-primary border-primary/30";
+  };
 
   // Audio player controls
   const handlePlayPause = () => {
@@ -480,6 +546,90 @@ export function MeetingDetail() {
       alert(`Gagal sinkronisasi data source: ${err.message || String(err)}`);
     } finally {
       setIsSyncingDatasource(false);
+    }
+  };
+
+  // Speaker Diarization Handler
+  const handleRunDiarization = async (speakerCount?: number) => {
+    if (!selectedCompanyId || !id) return;
+    setIsDiarizing(true);
+    try {
+      const res = await meetingsApi.diarize(selectedCompanyId, id, {
+        num_speakers: speakerCount ?? (selectedSpeakerCount > 0 ? selectedSpeakerCount : undefined),
+      });
+      queryClient.invalidateQueries({ queryKey: ["meeting", selectedCompanyId, id] });
+      setTicketCreationNotice(`Berhasil mendeteksi ${res.num_speakers} pembicara! ${res.total_segments} segmen berhasil diperbarui.`);
+      setTimeout(() => setTicketCreationNotice(null), 8000);
+    } catch (err: any) {
+      alert(`Gagal menjalankan diarization: ${err.message || String(err)}`);
+    } finally {
+      setIsDiarizing(false);
+    }
+  };
+
+  // Speaker Rename Handler
+  const handleConfirmRenameSpeaker = async () => {
+    if (!selectedCompanyId || !id || !renameFromSpeaker || !renameToSpeaker.trim()) return;
+    setIsRenamingSpeaker(true);
+    try {
+      await meetingsApi.renameSpeaker(selectedCompanyId, id, {
+        from_speaker: renameFromSpeaker,
+        to_speaker: renameToSpeaker.trim(),
+      });
+      setIsRenameSpeakerOpen(false);
+      setRenameToSpeaker("");
+      queryClient.invalidateQueries({ queryKey: ["meeting", selectedCompanyId, id] });
+    } catch (err: any) {
+      alert(`Gagal mengubah nama speaker: ${err.message || String(err)}`);
+    } finally {
+      setIsRenamingSpeaker(false);
+    }
+  };
+
+  // Rolling Summary Generator Handler
+  const handleRegenerateSummary = async (interval?: number) => {
+    if (!selectedCompanyId || !id) return;
+    const chosenInterval = interval ?? summaryInterval;
+    setIsGeneratingSummary(true);
+    try {
+      await meetingsApi.generateSummary(selectedCompanyId, id, {
+        interval_minutes: chosenInterval,
+      });
+      queryClient.invalidateQueries({ queryKey: ["meeting", selectedCompanyId, id] });
+      setTicketCreationNotice(`Ringkasan berkala per ${chosenInterval} menit dan intisari eksekutif berhasil dibuat!`);
+      setTimeout(() => setTicketCreationNotice(null), 8000);
+    } catch (err: any) {
+      alert(`Gagal meregenerasi ringkasan: ${err.message || String(err)}`);
+    } finally {
+      setIsGeneratingSummary(false);
+    }
+  };
+
+  // Copilot Live Chat in Q&A Tab Handler
+  const handleAskCopilot = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!selectedCompanyId || !id || !copilotQuestion.trim()) return;
+    const q = copilotQuestion.trim();
+    setIsAskingCopilot(true);
+    try {
+      const res = await meetingsApi.chat(selectedCompanyId, id, { message: q });
+      if (res.reply) {
+        setDetectedQAs((prev) => [
+          {
+            question: q,
+            answer: res.reply,
+            askedBy: "Anda",
+            answeredBy: "Meeting Copilot Agent",
+            timestamp: formatTime(currentTime),
+          },
+          ...prev,
+        ]);
+        setCopilotQuestion("");
+      }
+    } catch (err: any) {
+      alert(`Gagal bertanya ke Copilot: ${err.message || String(err)}`);
+    } finally {
+      setIsAskingCopilot(false);
     }
   };
 
@@ -1061,10 +1211,10 @@ export function MeetingDetail() {
                 </div>
               </div>
 
-              {/* Tab 1: Live Q&A Tab (Real Conversation Questions, NO dummy data!) */}
+              {/* Tab 1: Live Q&A Tab (Real Conversation Questions & AI Copilot Q&A) */}
               {activeTab === "qa" && (
-                <div className="flex-1 min-h-0 overflow-y-auto scrollbar-auto-hide p-3.5 flex flex-col gap-3">
-                  <div className="flex items-center justify-between pb-2 border-b border-border/40 shrink-0">
+                <div className="flex-1 min-h-0 flex flex-col justify-between overflow-hidden">
+                  <div className="p-3 border-b border-border/40 flex items-center justify-between shrink-0 bg-card/60">
                     <span className="text-xs font-semibold text-foreground flex items-center gap-1.5">
                       <HelpCircle className="h-3.5 w-3.5 text-primary" />
                       Live Q&A Percakapan
@@ -1072,127 +1222,296 @@ export function MeetingDetail() {
                     <Button
                       size="sm"
                       variant="outline"
-                      className="h-6 text-xs px-2 gap-1"
+                      className="h-7 text-xs px-2.5 gap-1.5 rounded-lg border-primary/30 hover:bg-primary/10"
                       onClick={handleExtractQA}
                       disabled={isExtractingQA}
                     >
-                      <RefreshCw className={`h-3 w-3 ${isExtractingQA ? "animate-spin" : ""}`} />
-                      <span>{isExtractingQA ? "Mendeteksi..." : "Deteksi Pertanyaan"}</span>
+                      <RefreshCw className={`h-3 w-3 ${isExtractingQA ? "animate-spin text-primary" : ""}`} />
+                      <span>{isExtractingQA ? "Mengekstrak..." : "Ekstrak Q&A Agent"}</span>
                     </Button>
                   </div>
 
-                  {detectedQAs.length === 0 ? (
-                    /* Gambar 3 Empty State: Questions detected during conversation will be answered here */
-                    <div className="flex-1 flex flex-col items-center justify-center p-8 text-center gap-3 my-auto">
-                      <div className="p-3.5 rounded-full bg-muted/50 border border-border/40 text-muted-foreground/70">
-                        <HelpCircle className="h-6 w-6" />
-                      </div>
-                      <div className="flex flex-col gap-1 max-w-xs">
-                        <p className="text-xs font-semibold text-foreground/90">
-                          Questions detected during the conversation will be answered here.
-                        </p>
-                        <p className="text-xs text-muted-foreground leading-relaxed">
-                          Pertanyaan yang diajukan selama percakapan akan otomatis terdeteksi dan dirangkum jawabannya di sini.
-                        </p>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="flex flex-col gap-2.5">
-                      {detectedQAs.map((item, idx) => (
-                        <div
-                          key={idx}
-                          className="p-3 rounded-xl border border-border/60 bg-muted/20 flex flex-col gap-1.5 text-xs shadow-2xs"
-                        >
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="font-semibold text-foreground leading-snug">
-                              Q: {item.question}
-                            </span>
-                            {item.askedBy && (
-                              <Badge variant="outline" className="text-xs shrink-0 bg-card py-0 px-1.5">
-                                {item.askedBy}
-                              </Badge>
-                            )}
-                          </div>
-                          <p className="text-muted-foreground leading-relaxed pl-1 border-l-2 border-primary/40">
-                            A: {item.answer}
+                  <div className="flex-1 min-h-0 overflow-y-auto scrollbar-auto-hide p-3.5 flex flex-col gap-3">
+                    {detectedQAs.length === 0 ? (
+                      <div className="flex-1 flex flex-col items-center justify-center p-8 text-center gap-3 my-auto">
+                        <div className="p-3.5 rounded-full bg-muted/50 border border-border/40 text-muted-foreground/70">
+                          <HelpCircle className="h-6 w-6" />
+                        </div>
+                        <div className="flex flex-col gap-1 max-w-xs">
+                          <p className="text-xs font-semibold text-foreground/90">
+                            Pertanyaan dan Jawaban Diskusi
+                          </p>
+                          <p className="text-xs text-muted-foreground leading-relaxed">
+                            Klik &apos;Ekstrak Q&A Agent&apos; untuk mendeteksi tanya-jawab percakapan, atau ketik pertanyaan langsung ke Copilot di bawah.
                           </p>
                         </div>
-                      ))}
-                    </div>
-                  )}
+                      </div>
+                    ) : (
+                      <div className="flex flex-col gap-3">
+                        {detectedQAs.map((item, idx) => (
+                          <div
+                            key={idx}
+                            className="p-3 rounded-xl border border-border/60 bg-muted/20 flex flex-col gap-2 text-xs shadow-2xs hover:border-primary/40 transition-colors"
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="font-bold text-foreground leading-snug">
+                                  Q: {item.question}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1 shrink-0">
+                                {item.timestamp && (
+                                  <Badge
+                                    variant="outline"
+                                    onClick={() => {
+                                      const parts = item.timestamp?.split(":") || [];
+                                      if (parts.length === 2) {
+                                        seekTo(parseInt(parts[0], 10) * 60 + parseInt(parts[1], 10));
+                                      }
+                                    }}
+                                    className="text-xs font-mono cursor-pointer hover:bg-primary/10 transition-colors py-0 px-1.5"
+                                    title="Lompat ke audio"
+                                  >
+                                    <Clock className="h-2.5 w-2.5 mr-1" />
+                                    {item.timestamp}
+                                  </Badge>
+                                )}
+                                {item.askedBy && (
+                                  <span className={`text-xs px-1.5 py-0.2 rounded border font-medium ${getSpeakerColor(item.askedBy)}`}>
+                                    {item.askedBy}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <div className="pl-2 border-l-2 border-primary/50 text-muted-foreground leading-relaxed flex flex-col gap-1">
+                              <p className="text-foreground/90">
+                                <span className="font-semibold text-primary/80 mr-1">
+                                  {item.answeredBy ? `${item.answeredBy}:` : "A:"}
+                                </span>
+                                {item.answer}
+                              </p>
+                            </div>
+                            <div className="flex items-center justify-end pt-1 border-t border-border/30">
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className="h-6 text-xs px-2 gap-1 text-muted-foreground hover:text-primary"
+                                onClick={() => handleOpenSingleTaskModal(`Tindak lanjut: ${item.question}`, `Hasil diskusi rapat: ${item.answer}`)}
+                              >
+                                <Plus className="h-3 w-3" />
+                                Buat Task
+                              </Button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Interactive Copilot Chat input for Live Q&A */}
+                  <form onSubmit={handleAskCopilot} className="p-2 border-t border-border/40 flex items-center gap-2 bg-card/70 shrink-0">
+                    <Input
+                      value={copilotQuestion}
+                      onChange={(e) => setCopilotQuestion(e.target.value)}
+                      placeholder="Tanya Copilot tentang diskusi rapat..."
+                      className="h-8 text-xs flex-1 rounded-xl"
+                      disabled={isAskingCopilot}
+                    />
+                    <Button
+                      type="submit"
+                      size="sm"
+                      className="h-8 text-xs px-3 gap-1 rounded-xl"
+                      disabled={isAskingCopilot || !copilotQuestion.trim()}
+                    >
+                      {isAskingCopilot ? <Loader2 className="h-3 w-3 animate-spin" /> : <Bot className="h-3 w-3" />}
+                      <span>Tanya</span>
+                    </Button>
+                  </form>
                 </div>
               )}
 
-              {/* Tab 2: Summary Tab */}
+              {/* Tab 2: Summary Tab with Rolling Timeline Intervals */}
               {activeTab === "summary" && (
-                <div className="flex-1 min-h-0 overflow-y-auto scrollbar-auto-hide p-3.5 flex flex-col gap-4">
-                  {/* Executive Summary */}
-                  <div className="flex flex-col gap-1.5">
-                    <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1">
-                      <Sparkles className="h-3 w-3 text-primary" />
-                      Intisari Rapat
-                    </span>
-                    <div className="rounded-xl border border-border/60 bg-muted/30 p-3 text-xs leading-relaxed text-foreground">
-                      {analyticalData.summary}
-                    </div>
-                  </div>
-
-                  {/* Topics */}
-                  <div className="flex flex-col gap-1.5">
-                    <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1">
-                      <Layers className="h-3 w-3 text-primary" />
-                      Topik Diskusi
-                    </span>
-                    <div className="flex flex-wrap gap-1.5">
-                      {analyticalData.topics.map((t, idx) => (
-                        <Badge key={idx} variant="outline" className="text-xs bg-card border-border/60">
-                          {t}
-                        </Badge>
+                <div className="flex-1 min-h-0 flex flex-col justify-between overflow-hidden">
+                  {/* Interval Settings Bar */}
+                  <div className="p-2.5 border-b border-border/40 flex items-center justify-between gap-2 shrink-0 bg-card/60 flex-wrap">
+                    <div className="flex items-center gap-1">
+                      <span className="text-xs text-muted-foreground font-medium mr-1">Interval:</span>
+                      {[3, 5, 10, 15].map((mins) => (
+                        <button
+                          key={mins}
+                          onClick={() => {
+                            setSummaryInterval(mins);
+                            handleRegenerateSummary(mins);
+                          }}
+                          className={`px-2 py-0.5 text-xs rounded-md font-semibold transition-all cursor-pointer ${
+                            summaryInterval === mins
+                              ? "bg-primary text-primary-foreground"
+                              : "bg-muted/50 text-muted-foreground hover:bg-muted"
+                          }`}
+                        >
+                          {mins}m
+                        </button>
                       ))}
                     </div>
+
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs px-2.5 gap-1.5 rounded-lg border-primary/30 hover:bg-primary/10"
+                      onClick={() => handleRegenerateSummary(summaryInterval)}
+                      disabled={isGeneratingSummary}
+                    >
+                      <Sparkles className={`h-3 w-3 text-primary ${isGeneratingSummary ? "animate-spin" : ""}`} />
+                      <span>{isGeneratingSummary ? "Menganalisis..." : "Regenerasi AI Agent"}</span>
+                    </Button>
                   </div>
 
-                  {/* Insights */}
-                  <div className="flex flex-col gap-1.5">
-                    <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1">
-                      <CheckCircle2 className="h-3 w-3 text-primary" />
-                      Temuan & Catatan
-                    </span>
+                  <div className="flex-1 min-h-0 overflow-y-auto scrollbar-auto-hide p-3.5 flex flex-col gap-4">
+                    {/* Executive Summary */}
                     <div className="flex flex-col gap-1.5">
-                      {analyticalData.insights.map((ins, idx) => (
-                        <div key={idx} className="p-2.5 rounded-lg bg-card border border-border/40 text-xs">
-                          {ins}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Metrics */}
-                  <div className="grid grid-cols-3 gap-2 pt-2 border-t border-border/40 text-center">
-                    <div className="p-2 rounded-lg bg-muted/20 border border-border/40">
-                      <span className="text-xs text-muted-foreground block">Segmen</span>
-                      <span className="text-sm font-semibold">{segments.length}</span>
-                    </div>
-                    <div className="p-2 rounded-lg bg-muted/20 border border-border/40">
-                      <span className="text-xs text-muted-foreground block">Durasi</span>
-                      <span className="text-sm font-semibold">
-                        {formatTime(audioDuration || meeting?.duration_seconds || 0)}
+                      <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+                        <Sparkles className="h-3 w-3 text-primary" />
+                        Ringkasan Eksekutif
                       </span>
+                      <div className="rounded-xl border border-border/60 bg-muted/30 p-3 text-xs leading-relaxed text-foreground space-y-2">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {analyticalData.executiveSummary || analyticalData.summary}
+                        </ReactMarkdown>
+                      </div>
                     </div>
-                    <div className="p-2 rounded-lg bg-muted/20 border border-border/40">
-                      <span className="text-xs text-muted-foreground block">Sentimen</span>
-                      <span className="text-sm font-semibold text-primary">{analyticalData.sentiment}</span>
+
+                    {/* Timeline Breakdown / Rolling Interval Summaries */}
+                    {analyticalData.timelineBreakdown.length > 0 && (
+                      <div className="flex flex-col gap-2">
+                        <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+                          <Clock className="h-3 w-3 text-primary" />
+                          Alur Pembahasan Per Interval ({analyticalData.intervalMinutes} Menit)
+                        </span>
+                        <div className="flex flex-col gap-2">
+                          {analyticalData.timelineBreakdown.map((item, idx) => (
+                            <div
+                              key={idx}
+                              className="p-3 rounded-xl border border-border/60 bg-muted/20 flex flex-col gap-1.5 text-xs shadow-2xs hover:border-primary/40 transition-colors cursor-pointer"
+                              onClick={() => seekTo(item.start_seconds)}
+                              title="Klik untuk putar audio di interval ini"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-semibold text-foreground flex items-center gap-1.5">
+                                  <Play className="h-2.5 w-2.5 text-primary" />
+                                  {item.title}
+                                </span>
+                                <Badge variant="outline" className="text-xs font-mono bg-card">
+                                  {item.interval}
+                                </Badge>
+                              </div>
+                              {item.speakers && item.speakers.length > 0 && (
+                                <div className="flex items-center gap-1 flex-wrap">
+                                  {item.speakers.map((spk, sIdx) => (
+                                    <span key={sIdx} className={`text-xs px-1.5 py-0.2 rounded border font-medium ${getSpeakerColor(spk)}`}>
+                                      {spk}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                              <p className="text-muted-foreground leading-relaxed">{item.summary}</p>
+                              {item.key_points && item.key_points.length > 0 && (
+                                <ul className="list-disc list-inside text-foreground/80 space-y-0.5 pt-1 pl-1 border-t border-border/30">
+                                  {item.key_points.map((pt, pIdx) => (
+                                    <li key={pIdx}>{pt}</li>
+                                  ))}
+                                </ul>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Key Decisions */}
+                    {analyticalData.keyDecisions.length > 0 && (
+                      <div className="flex flex-col gap-1.5">
+                        <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+                          <CheckCircle2 className="h-3 w-3 text-emerald-500" />
+                          Keputusan & Kesepakatan
+                        </span>
+                        <div className="flex flex-col gap-1.5">
+                          {analyticalData.keyDecisions.map((kd, idx) => (
+                            <div key={idx} className="p-2.5 rounded-lg bg-emerald-500/5 border border-emerald-500/20 text-xs text-foreground">
+                              {kd}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Action Items */}
+                    {analyticalData.actionItems.length > 0 && (
+                      <div className="flex flex-col gap-1.5">
+                        <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+                          <ListOrdered className="h-3 w-3 text-primary" />
+                          Tindak Lanjut & Penugasan
+                        </span>
+                        <div className="flex flex-col gap-1.5">
+                          {analyticalData.actionItems.map((ai, idx) => (
+                            <div key={idx} className="p-2.5 rounded-lg bg-card border border-border/40 text-xs flex items-center justify-between gap-2">
+                              <span>{ai}</span>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className="h-6 text-xs px-2 shrink-0"
+                                onClick={() => handleOpenSingleTaskModal(ai)}
+                              >
+                                Buat Task
+                              </Button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Topics */}
+                    <div className="flex flex-col gap-1.5">
+                      <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+                        <Layers className="h-3 w-3 text-primary" />
+                        Topik Diskusi
+                      </span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {analyticalData.topics.map((t, idx) => (
+                          <Badge key={idx} variant="outline" className="text-xs bg-card border-border/60">
+                            {t}
+                          </Badge>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Metrics */}
+                    <div className="grid grid-cols-3 gap-2 pt-2 border-t border-border/40 text-center">
+                      <div className="p-2 rounded-lg bg-muted/20 border border-border/40">
+                        <span className="text-xs text-muted-foreground block">Segmen</span>
+                        <span className="text-sm font-semibold">{segments.length}</span>
+                      </div>
+                      <div className="p-2 rounded-lg bg-muted/20 border border-border/40">
+                        <span className="text-xs text-muted-foreground block">Durasi</span>
+                        <span className="text-sm font-semibold">
+                          {formatTime(audioDuration || meeting?.duration_seconds || 0)}
+                        </span>
+                      </div>
+                      <div className="p-2 rounded-lg bg-muted/20 border border-border/40">
+                        <span className="text-xs text-muted-foreground block">Sentimen</span>
+                        <span className="text-sm font-semibold text-primary">{analyticalData.sentiment}</span>
+                      </div>
                     </div>
                   </div>
                 </div>
               )}
 
-              {/* Tab 3: Transcript Tab matching Gambar 3 */}
+              {/* Tab 3: Transcript Tab with Diarization & Rename Controls */}
               {activeTab === "transcript" && (
                 <div className="flex-1 min-h-0 flex flex-col justify-between overflow-hidden">
-                  {/* Header in Transcript with Search, Auto-scroll & Copy */}
-                  <div className="p-3 border-b border-border/40 flex items-center justify-between gap-2 shrink-0">
-                    <div className="relative flex-1">
+                  {/* Header in Transcript with Search, Diarization Controls & Copy */}
+                  <div className="p-2.5 border-b border-border/40 flex items-center justify-between gap-2 shrink-0 bg-card/60 flex-wrap">
+                    <div className="relative flex-1 min-w-36">
                       <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
                       <Input
                         value={transcriptSearch}
@@ -1202,35 +1521,102 @@ export function MeetingDetail() {
                       />
                     </div>
 
-                    <Button
-                      size="sm"
-                      variant={autoScroll ? "secondary" : "ghost"}
-                      onClick={() => setAutoScroll(!autoScroll)}
-                      className="h-7 text-xs px-2"
-                    >
-                      Auto-scroll
-                    </Button>
+                    {/* Diarization Trigger & Options */}
+                    <div className="flex items-center gap-1">
+                      <Select
+                        value={String(selectedSpeakerCount)}
+                        onValueChange={(val) => {
+                          const n = parseInt(val, 10);
+                          setSelectedSpeakerCount(n);
+                          handleRunDiarization(n);
+                        }}
+                      >
+                        <SelectTrigger className="h-7 text-xs px-2 gap-1 rounded-lg">
+                          <SelectValue placeholder="Jumlah Speaker" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="0">Auto Deteksi</SelectItem>
+                          <SelectItem value="2">2 Speaker</SelectItem>
+                          <SelectItem value="3">3 Speaker</SelectItem>
+                          <SelectItem value="4">4 Speaker</SelectItem>
+                          <SelectItem value="5">5 Speaker</SelectItem>
+                        </SelectContent>
+                      </Select>
 
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      onClick={handleCopyTranscript}
-                      className="h-7 w-7 text-muted-foreground hover:text-foreground"
-                      title="Salin Transkrip"
-                    >
-                      {copiedTranscript ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
-                    </Button>
-                  </div>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => handleRunDiarization(selectedSpeakerCount)}
+                        disabled={isDiarizing}
+                        className="h-7 text-xs px-2 gap-1 rounded-lg border-primary/30"
+                        title="Jalankan AI Voice Diarization"
+                      >
+                        <RefreshCw className={`h-3 w-3 ${isDiarizing ? "animate-spin text-primary" : ""}`} />
+                        <span>{isDiarizing ? "Memproses..." : "Diarisasi"}</span>
+                      </Button>
 
-                  {/* Transcript time pill matching Gambar 3 */}
-                  <div className="flex justify-center py-2 bg-muted/10 border-b border-border/30 shrink-0">
-                    <div className="inline-flex items-center gap-1.5 rounded-full bg-muted/60 px-3.5 py-1 text-xs text-muted-foreground font-mono">
-                      <Clock className="h-3 w-3" />
-                      <span>Transcript {formatTime(currentTime > 0 ? currentTime : meeting.duration_seconds)}</span>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => {
+                          if (distinctSpeakers.length > 0) {
+                            setRenameFromSpeaker(distinctSpeakers[0]);
+                          }
+                          setIsRenameSpeakerOpen(true);
+                        }}
+                        className="h-7 text-xs px-2 rounded-lg text-muted-foreground hover:text-foreground"
+                        title="Ubah nama speaker"
+                      >
+                        <Edit2 className="h-3 w-3 mr-1" />
+                        Ganti Nama
+                      </Button>
+
+                      <Button
+                        size="sm"
+                        variant={autoScroll ? "secondary" : "ghost"}
+                        onClick={() => setAutoScroll(!autoScroll)}
+                        className="h-7 text-xs px-2 rounded-lg"
+                      >
+                        Scroll
+                      </Button>
+
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        onClick={handleCopyTranscript}
+                        className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                        title="Salin Transkrip"
+                      >
+                        {copiedTranscript ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
+                      </Button>
                     </div>
                   </div>
 
-                  {/* Segments Stream with Font Size scale */}
+                  {/* Transcript time pill */}
+                  <div className="flex justify-between items-center px-3 py-1.5 bg-muted/10 border-b border-border/30 shrink-0 text-xs text-muted-foreground">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="font-semibold">Pembicara ({distinctSpeakers.length}):</span>
+                      {distinctSpeakers.map((spk, idx) => (
+                        <span
+                          key={idx}
+                          onClick={() => {
+                            setRenameFromSpeaker(spk);
+                            setIsRenameSpeakerOpen(true);
+                          }}
+                          className={`cursor-pointer px-1.5 py-0.2 rounded border font-medium ${getSpeakerColor(spk)}`}
+                          title="Klik untuk ubah nama speaker ini"
+                        >
+                          {spk}
+                        </span>
+                      ))}
+                    </div>
+                    <div className="inline-flex items-center gap-1 font-mono">
+                      <Clock className="h-3 w-3" />
+                      <span>{formatTime(currentTime > 0 ? currentTime : meeting.duration_seconds)}</span>
+                    </div>
+                  </div>
+
+                  {/* Segments Stream */}
                   <div
                     ref={transcriptContainerRef}
                     className="flex-1 min-h-0 overflow-y-auto scrollbar-auto-hide p-3 flex flex-col gap-2"
@@ -1256,7 +1642,17 @@ export function MeetingDetail() {
                             }`}
                           >
                             <div className="flex items-center justify-between gap-2 mb-1">
-                              <span className="text-xs font-semibold text-primary/80 flex items-center gap-1.5">
+                              <span
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setRenameFromSpeaker(seg.speaker);
+                                  setIsRenameSpeakerOpen(true);
+                                }}
+                                className={`text-xs px-2 py-0.5 rounded-md border font-semibold flex items-center gap-1 hover:opacity-80 transition-opacity ${getSpeakerColor(
+                                  seg.speaker
+                                )}`}
+                                title="Klik untuk ubah nama pembicara ini"
+                              >
                                 {isActive && <Volume2 className="h-3 w-3 text-primary animate-pulse" />}
                                 {seg.speaker}
                               </span>
@@ -1656,6 +2052,70 @@ export function MeetingDetail() {
                 </>
               ) : (
                 "Simpan & Buat Task"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 6. Rename Speaker Modal */}
+      <Dialog open={isRenameSpeakerOpen} onOpenChange={setIsRenameSpeakerOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-base font-bold">Ubah Nama Pembicara</DialogTitle>
+            <DialogDescription className="text-xs text-muted-foreground">
+              Ubah label pembicara (misal &apos;Speaker 1&apos;) menjadi nama asli peserta rapat di seluruh transkrip.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex flex-col gap-3 py-2">
+            <div className="flex flex-col gap-1.5">
+              <Label className="text-xs">Pilih Pembicara Yang Ingin Diubah</Label>
+              <Select value={renameFromSpeaker} onValueChange={setRenameFromSpeaker}>
+                <SelectTrigger className="h-8 text-xs">
+                  <SelectValue placeholder="Pilih pembicara..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {distinctSpeakers.map((spk) => (
+                    <SelectItem key={spk} value={spk}>
+                      {spk}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <Label className="text-xs">Nama Baru</Label>
+              <Input
+                value={renameToSpeaker}
+                onChange={(e) => setRenameToSpeaker(e.target.value)}
+                placeholder="Contoh: Mas Mongol, Host 1, Anda"
+                className="h-8 text-xs"
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleConfirmRenameSpeaker();
+                }}
+              />
+            </div>
+          </div>
+
+          <DialogFooter className="flex flex-row justify-between sm:justify-between items-center w-full">
+            <Button variant="ghost" onClick={() => setIsRenameSpeakerOpen(false)} className="text-xs">
+              Batal
+            </Button>
+            <Button
+              onClick={handleConfirmRenameSpeaker}
+              disabled={isRenamingSpeaker || !renameFromSpeaker || !renameToSpeaker.trim()}
+              className="text-xs"
+            >
+              {isRenamingSpeaker ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" />
+                  Menyimpan...
+                </>
+              ) : (
+                "Simpan Nama"
               )}
             </Button>
           </DialogFooter>

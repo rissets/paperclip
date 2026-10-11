@@ -9,6 +9,7 @@ from config import Config
 from core.audio_processor import audio_processor
 from core.transcriber import transcriber
 from core.analyzer import analyzer
+from core.diarizer import diarizer
 from models.schema import (
     get_meeting,
     update_meeting,
@@ -199,6 +200,14 @@ class LiveMeetingSession:
         prev_prompt = self.segments[-1]["text"] if self.segments else None
         stt_result = transcriber.transcribe(wav_chunk_path, language="id", prompt=prev_prompt)
         
+        # Acoustic speaker classification before removing chunk WAV
+        speaker_label = "Speaker 1"
+        try:
+            if wav_chunk_path.exists():
+                speaker_label = diarizer.live_classify_speaker(wav_chunk_path, self.meeting_id)
+        except Exception as e:
+            logger.warning(f"Live speaker classification error: {e}")
+
         # Clean up chunk wav file
         try:
             if wav_chunk_path.exists():
@@ -223,7 +232,7 @@ class LiveMeetingSession:
                     text=text,
                     start_seconds=start_sec,
                     end_seconds=end_sec,
-                    speaker="Speaker 1"
+                    speaker=speaker_label
                 )
                 self.segments.append(segment)
                 
@@ -238,7 +247,7 @@ class LiveMeetingSession:
         return None
 
     def finalize(self) -> Optional[Path]:
-        """Finalizes recording file from accumulated stream."""
+        """Finalizes recording file from accumulated stream and runs full diarization & rolling summary."""
         if not self.accumulated_raw_path.exists() or self.accumulated_raw_path.stat().st_size == 0:
             return None
             
@@ -255,25 +264,26 @@ class LiveMeetingSession:
         except Exception:
             pass
 
-        # Ensure final analytical summary is saved
-        final_summary_str = None
-        if self.last_analysis:
-            final_summary_str = json.dumps(self.last_analysis, ensure_ascii=False)
-        elif self.segments:
-            try:
-                final_analysis = analyzer.analyze_segments(self.meeting_id, self.segments)
-                final_summary_str = json.dumps(final_analysis, ensure_ascii=False)
-            except Exception as e:
-                logger.warning(f"Failed finalizing analysis: {e}")
-
         chosen_path = final_audio_path if (ok and final_audio_path.exists()) else self.accumulated_raw_path
         update_meeting(
             self.meeting_id,
             audio_path=str(chosen_path),
             duration_seconds=total_duration,
-            status="completed",
-            summary=final_summary_str
+            status="completed"
         )
+
+        # Run global acoustic diarization across the completed audio
+        try:
+            diarizer.diarize_meeting(self.meeting_id)
+        except Exception as e:
+            logger.warning(f"Error during final diarization in finalize(): {e}")
+
+        # Run rich rolling summary (5-minute intervals + executive summary)
+        try:
+            analyzer.generate_rolling_summary(self.meeting_id, interval_minutes=5)
+        except Exception as e:
+            logger.warning(f"Error during final rolling summary in finalize(): {e}")
+
         return chosen_path
 
 class LiveStreamManager:

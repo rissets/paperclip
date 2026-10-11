@@ -17,6 +17,8 @@ from models.schema import (
 from core.audio_processor import audio_processor
 from core.transcriber import transcriber
 from core.live_stream_manager import live_stream_manager
+from core.diarizer import diarizer
+from core.analyzer import analyzer
 
 meetings_bp = Blueprint("meetings", __name__)
 
@@ -216,3 +218,75 @@ def stream_meeting_audio(meeting_id: str):
     response.headers["Accept-Ranges"] = "bytes"
     response.headers["Content-Length"] = str(length)
     return response
+
+@meetings_bp.route("/api/meetings/<meeting_id>/diarize", methods=["POST"])
+def diarize_meeting_route(meeting_id: str):
+    meeting = get_meeting(meeting_id)
+    if not meeting:
+        return jsonify({"error": "Meeting not found"}), 404
+        
+    data = request.get_json() or {}
+    num_speakers = data.get("num_speakers")
+    if num_speakers is not None:
+        try:
+            num_speakers = int(num_speakers)
+        except ValueError:
+            num_speakers = None
+
+    result = diarizer.diarize_meeting(meeting_id, num_speakers=num_speakers)
+    if not result.get("success"):
+        return jsonify(result), 500
+    return jsonify(result)
+
+@meetings_bp.route("/api/meetings/<meeting_id>/rename-speaker", methods=["POST"])
+def rename_speaker_route(meeting_id: str):
+    meeting = get_meeting(meeting_id)
+    if not meeting:
+        return jsonify({"error": "Meeting not found"}), 404
+        
+    data = request.get_json() or {}
+    from_speaker = data.get("from_speaker")
+    to_speaker = data.get("to_speaker")
+    if not from_speaker or not to_speaker:
+        return jsonify({"error": "Both from_speaker and to_speaker are required"}), 400
+
+    result = diarizer.rename_speaker(meeting_id, from_speaker=from_speaker, to_speaker=to_speaker)
+    return jsonify(result)
+
+@meetings_bp.route("/api/meetings/<meeting_id>/generate-summary", methods=["POST"])
+def generate_summary_route(meeting_id: str):
+    meeting = get_meeting(meeting_id)
+    if not meeting:
+        return jsonify({"error": "Meeting not found"}), 404
+        
+    data = request.get_json() or {}
+    interval_minutes = int(data.get("interval_minutes", 5))
+
+    result = analyzer.generate_rolling_summary(meeting_id, interval_minutes=interval_minutes)
+    if "error" in result:
+        return jsonify(result), 500
+    return jsonify(result)
+
+@meetings_bp.route("/api/meetings/<meeting_id>/extract-qa", methods=["POST"])
+def extract_qa_route(meeting_id: str):
+    meeting = get_meeting(meeting_id)
+    if not meeting:
+        return jsonify({"error": "Meeting not found"}), 404
+
+    qa_list = analyzer.extract_qa(meeting_id)
+    return jsonify({"success": True, "qa": qa_list})
+
+@meetings_bp.route("/api/meetings/<meeting_id>/chat", methods=["POST"])
+def chat_meeting_route(meeting_id: str):
+    meeting = get_meeting(meeting_id)
+    if not meeting:
+        return jsonify({"error": "Meeting not found"}), 404
+        
+    data = request.get_json() or {}
+    message = data.get("message")
+    if not message:
+        return jsonify({"error": "Message is required"}), 400
+
+    reply = analyzer.ask_copilot(meeting_id, message)
+    return jsonify({"success": True, "reply": reply})
+

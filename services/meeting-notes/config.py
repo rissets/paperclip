@@ -28,17 +28,17 @@ class Config:
     
     # Fallback STT (OmniRoute / Router Rissets)
     FALLBACK_STT_URL = os.getenv("FALLBACK_STT_URL", "https://router.rissets.com/v1/audio/transcriptions")
-    FALLBACK_STT_KEY = os.getenv("FALLBACK_STT_KEY", "sk-f874f548c166ae39-b8b98d-c8e05721")
+    FALLBACK_STT_KEY = os.getenv("FALLBACK_STT_KEY", "sk-0c27a71ff911acd8-add3ea-db2d8e61")
     FALLBACK_STT_MODEL = os.getenv("FALLBACK_STT_MODEL", "openai/whisper-large-v3-turbo")
 
-    # LLM for Real-time Meeting Analysis & Summarization (Fast primary via router.rissets.com, fallback to hellodigi)
+    # LLM for Real-time Meeting Analysis & Summarization (Fast primary via router.rissets.com)
     LLM_API_URL = os.getenv("MEETING_LLM_URL", "https://router.rissets.com/v1/chat/completions")
-    LLM_API_KEY = os.getenv("MEETING_LLM_KEY", "sk-f874f548c166ae39-b8b98d-c8e05721")
-    LLM_MODEL = os.getenv("MEETING_LLM_MODEL", "neural/qwen-3.8-27b-none")
+    LLM_API_KEY = os.getenv("MEETING_LLM_KEY", "sk-0c27a71ff911acd8-add3ea-db2d8e61")
+    LLM_MODEL = os.getenv("MEETING_LLM_MODEL", "ghb/gpt-6-astra")
     
-    FALLBACK_LLM_URL = os.getenv("FALLBACK_LLM_URL", "https://llm-v1.hellodigi.id/v1/chat/completions")
-    FALLBACK_LLM_KEY = os.getenv("FALLBACK_LLM_KEY", "fe85e354c928821e4e01242b3a8624ce1268b7bd683a439771a723d79ede56f5")
-    FALLBACK_LLM_MODEL = os.getenv("FALLBACK_LLM_MODEL", "Qwen/Qwen3.8-27B")
+    FALLBACK_LLM_URL = os.getenv("FALLBACK_LLM_URL", "https://router.rissets.com/v1/chat/completions")
+    FALLBACK_LLM_KEY = os.getenv("FALLBACK_LLM_KEY", "sk-0c27a71ff911acd8-add3ea-db2d8e61")
+    FALLBACK_LLM_MODEL = os.getenv("FALLBACK_LLM_MODEL", "cinf/gpt-6-luna")
 
 # Ensure storage directories exist
 Config.STORAGE_DIR.mkdir(parents=True, exist_ok=True)
