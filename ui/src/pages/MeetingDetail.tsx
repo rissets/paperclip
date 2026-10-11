@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from "react";
-import { useParams, useNavigate, Link } from "react-router-dom";
+import { useParams } from "react-router-dom";
+import { Link, useNavigate } from "@/lib/router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -38,6 +39,7 @@ import {
   Volume2,
 } from "lucide-react";
 import { useCompany } from "@/context/CompanyContext";
+import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -75,6 +77,7 @@ interface EditableExtractedTicket extends ExtractedTicket {
 export function MeetingDetail() {
   const { id } = useParams<{ id: string }>();
   const { selectedCompanyId } = useCompany();
+  const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
 
@@ -180,6 +183,13 @@ export function MeetingDetail() {
       }
     }
   }, [meeting]);
+
+  useEffect(() => {
+    setBreadcrumbs([
+      { label: "Meeting Notes", href: "/meetings" },
+      { label: meeting?.title || "Detail Rapat" },
+    ]);
+  }, [setBreadcrumbs, meeting?.title]);
 
   const segments = useMemo(() => meeting?.segments || [], [meeting]);
 
@@ -692,6 +702,27 @@ export function MeetingDetail() {
             Ekstrak Tiket
           </Button>
 
+          {/* Toggle Assistant & Transcript Panel (Icon in top header to open/close) */}
+          <Button
+            variant={isRightPaneOpen ? "ghost" : "outline"}
+            size="sm"
+            onClick={() => setIsRightPaneOpen(!isRightPaneOpen)}
+            className={`gap-1.5 text-xs h-8 ${!isRightPaneOpen ? "border-primary/40 text-foreground bg-primary/10 hover:bg-primary/20 font-medium" : "text-muted-foreground hover:text-foreground"}`}
+            title={isRightPaneOpen ? "Tutup panel asisten & transkrip" : "Buka panel asisten & transkrip"}
+          >
+            {isRightPaneOpen ? (
+              <>
+                <PanelRightClose className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">Tutup Panel</span>
+              </>
+            ) : (
+              <>
+                <PanelRightOpen className="h-3.5 w-3.5 text-primary" />
+                <span className="font-semibold">Buka Panel</span>
+              </>
+            )}
+          </Button>
+
           <Button
             variant="ghost"
             size="icon"
@@ -852,7 +883,7 @@ export function MeetingDetail() {
               {/* Column 1: Live Rich Markdown Editor (WYSIWYG format langsung) */}
               <div className={`flex flex-col h-full min-h-0 overflow-hidden justify-between ${isEnhancedPanelOpen ? "md:col-span-7" : "w-full"}`}>
                 {notesViewMode === "edit" ? (
-                  <div className="flex-1 min-h-0 overflow-y-auto border border-border/40 rounded-xl p-3 bg-background/50 focus-within:border-primary/50 transition-colors">
+                  <div className="flex-1 min-h-0 overflow-y-auto scrollbar-auto-hide border border-border/40 rounded-xl p-3 bg-background/50 focus-within:border-primary/50 transition-colors">
                     <MarkdownEditor
                       ref={editorRef}
                       value={notesContent}
@@ -864,7 +895,7 @@ export function MeetingDetail() {
                     />
                   </div>
                 ) : (
-                  <div className="flex-1 min-h-0 overflow-y-auto border border-border/40 rounded-xl p-4 bg-background/50 prose prose-sm dark:prose-invert text-sm leading-relaxed max-w-none">
+                  <div className="flex-1 min-h-0 overflow-y-auto scrollbar-auto-hide border border-border/40 rounded-xl p-4 bg-background/50 prose prose-sm dark:prose-invert text-sm leading-relaxed max-w-none">
                     {notesContent.trim() ? (
                       <ReactMarkdown remarkPlugins={[remarkGfm]}>
                         {notesContent}
@@ -938,7 +969,7 @@ export function MeetingDetail() {
 
                   {/* Enhanced Content rendered from top without empty space gap */}
                   {!isEnhancedCollapsed && (
-                    <div className="flex-1 min-h-0 overflow-y-auto flex flex-col">
+                    <div className="flex-1 min-h-0 overflow-y-auto scrollbar-auto-hide flex flex-col pr-1">
                       {isEnhancing ? (
                         <div className="flex flex-col items-center justify-center gap-2.5 py-16 text-center text-muted-foreground">
                           <Loader2 className="h-6 w-6 animate-spin text-primary" />
@@ -1032,7 +1063,7 @@ export function MeetingDetail() {
 
               {/* Tab 1: Live Q&A Tab (Real Conversation Questions, NO dummy data!) */}
               {activeTab === "qa" && (
-                <div className="flex-1 min-h-0 overflow-y-auto p-3.5 flex flex-col gap-3">
+                <div className="flex-1 min-h-0 overflow-y-auto scrollbar-auto-hide p-3.5 flex flex-col gap-3">
                   <div className="flex items-center justify-between pb-2 border-b border-border/40 shrink-0">
                     <span className="text-xs font-semibold text-foreground flex items-center gap-1.5">
                       <HelpCircle className="h-3.5 w-3.5 text-primary" />
@@ -1094,7 +1125,7 @@ export function MeetingDetail() {
 
               {/* Tab 2: Summary Tab */}
               {activeTab === "summary" && (
-                <div className="flex-1 min-h-0 overflow-y-auto p-3.5 flex flex-col gap-4">
+                <div className="flex-1 min-h-0 overflow-y-auto scrollbar-auto-hide p-3.5 flex flex-col gap-4">
                   {/* Executive Summary */}
                   <div className="flex flex-col gap-1.5">
                     <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1">
@@ -1202,7 +1233,7 @@ export function MeetingDetail() {
                   {/* Segments Stream with Font Size scale */}
                   <div
                     ref={transcriptContainerRef}
-                    className="flex-1 min-h-0 overflow-y-auto p-3 flex flex-col gap-2"
+                    className="flex-1 min-h-0 overflow-y-auto scrollbar-auto-hide p-3 flex flex-col gap-2"
                   >
                     {filteredSegments.length === 0 ? (
                       <div className="py-16 text-center text-xs text-muted-foreground my-auto">
@@ -1252,16 +1283,6 @@ export function MeetingDetail() {
         )}
       </div>
 
-      {/* Floating Toggle button when right pane is closed */}
-      {!isRightPaneOpen && (
-        <button
-          onClick={() => setIsRightPaneOpen(true)}
-          className="fixed right-6 bottom-20 z-30 flex items-center gap-2 px-3.5 py-2.5 bg-primary text-primary-foreground rounded-full shadow-lg text-xs font-semibold hover:bg-primary/90 transition-all cursor-pointer"
-        >
-          <Sparkles className="h-4 w-4" />
-          <span>Buka Assistant & Transcript</span>
-        </button>
-      )}
 
       {/* 3. Bottom Sticky Audio Player Bar (Glassmorphism & Compact) */}
       <div className="rounded-2xl border border-border/80 bg-card/90 backdrop-blur-md p-2.5 shadow-lg flex flex-col gap-2 shrink-0">
@@ -1368,7 +1389,7 @@ export function MeetingDetail() {
             </DialogDescription>
           </DialogHeader>
 
-          <div className="flex-1 overflow-y-auto py-3 flex flex-col gap-3">
+          <div className="flex-1 overflow-y-auto scrollbar-auto-hide py-3 flex flex-col gap-3">
             {isExtractingTickets ? (
               <div className="flex flex-col items-center justify-center py-12 gap-3 text-center">
                 <Loader2 className="h-8 w-8 animate-spin text-primary" />

@@ -1,6 +1,6 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "@/lib/router";
 import {
   Mic,
   UploadCloud,
@@ -15,6 +15,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { useCompany } from "@/context/CompanyContext";
+import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -24,9 +25,14 @@ import { useMeetingRecorder } from "@/context/MeetingRecorderContext";
 
 export function Meetings() {
   const { selectedCompanyId } = useCompany();
+  const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const { openRecorder } = useMeetingRecorder();
+
+  useEffect(() => {
+    setBreadcrumbs([{ label: "Meeting Notes" }]);
+  }, [setBreadcrumbs]);
 
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");

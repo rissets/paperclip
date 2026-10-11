@@ -770,16 +770,15 @@ select:where(:not([multiple]):not(.appearance-none)):where(:not([size]), [size="
   background: oklch(0.5 0 0);
 }
 
-/* Auto-hide scrollbar: thin, stable gutter with the thumb visible only on hover */
+/* Auto-hide scrollbar: minimalist, thumb visible only on hover */
 .scrollbar-auto-hide {
-  scrollbar-gutter: stable;
   scrollbar-width: thin;
   scrollbar-color: transparent transparent;
 }
 
 .scrollbar-auto-hide::-webkit-scrollbar {
-  width: 8px !important;
-  height: 8px !important;
+  width: 5px !important;
+  height: 5px !important;
   background: transparent !important;
 }
 .scrollbar-auto-hide::-webkit-scrollbar-track {
@@ -787,6 +786,7 @@ select:where(:not([multiple]):not(.appearance-none)):where(:not([size]), [size="
 }
 .scrollbar-auto-hide::-webkit-scrollbar-thumb {
   background: transparent !important;
+  border-radius: 999px !important;
 }
 
 /* Task thread: keep the gutter available without painting a persistent rail.
