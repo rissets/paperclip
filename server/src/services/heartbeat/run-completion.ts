@@ -27,6 +27,7 @@ import { resolveChatRunPresentationAuthorizationReason } from "../chat-run-publi
 import { SANDBOX_PROVIDER_PLUGIN_NOT_READY_REASON } from "../recovery/stranded-notice.js";
 import { MAX_TURN_CONTINUATION_RETRY_REASON } from "../../modules/run-dispatch/index.js";
 import { redactCurrentUserText } from "../../log-redaction.js";
+import { emailConnectionManager } from "../email/email-connection-manager.js";
 import type { createHeartbeatLifecycle } from "./run-lifecycle.js";
 import type { createHeartbeatRunPreparation } from "./run-preparation.js";
 import type { createHeartbeatRetries, HeartbeatRetryDependencies } from "./retries.js";
@@ -768,6 +769,11 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
             { agentId: agent.id, runId: livenessRun.id },
             { authorizationReason: presentationAuthorizationReason, completionReply: true },
           );
+          void emailConnectionManager.checkAndSendAutoReply(
+            issueId,
+            livenessRun.companyId,
+            resolved.text,
+          );
           presentationDecision = {
             ...presentationDecision,
             commentId: comment.id,
@@ -828,6 +834,12 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         await onLog(
           "stderr",
           `[paperclip] Failed to resolve run presentation: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+      if (outcome === "succeeded" && issueId) {
+        void emailConnectionManager.checkAndSendAutoReply(
+          issueId,
+          livenessRun.companyId,
         );
       }
       if (outcome === "failed" && isMaxTurnExhaustionRun(livenessRun)) {

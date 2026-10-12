@@ -11320,6 +11320,11 @@ export function issueService(db: Db) {
           userId: actorUserId ?? null,
         });
         await recordChatCompletion(tx, receiptExisting, updated);
+        if ((updated.status === "done" || updated.status === "in_review") && receiptExisting.status !== updated.status) {
+          import("./email/email-connection-manager.js").then(({ emailConnectionManager }) => {
+            void emailConnectionManager.checkAndSendAutoReply(updated.id, updated.companyId);
+          }).catch(() => {});
+        }
         // An operator explicitly choosing a disposition owns that decision,
         // including choosing In Review while the conversation is Idle.
         if (actorUserId && issueData.status !== undefined) {
@@ -12809,6 +12814,11 @@ export function issueService(db: Db) {
       }
       if (!comment) throw new Error("Failed to create issue comment");
       if (options?.completionReply && actor.agentId && createdByRunId) await acknowledgeChatCompletionReply(dbOrTx, createdByRunId, comment.id);
+      if (options?.completionReply && actor.agentId) {
+        import("./email/email-connection-manager.js").then(({ emailConnectionManager }) => {
+          void emailConnectionManager.checkAndSendAutoReply(issueId, issue.companyId, redactedBody);
+        }).catch(() => {});
+      }
 
       const boundAttachments: Array<{
         id: string;

@@ -8,6 +8,7 @@ export interface ImapConfig {
   secure?: boolean;
   user: string;
   pass: string;
+  pollIntervalSeconds?: number;
 }
 
 export interface InboundEmail {
@@ -61,7 +62,9 @@ export async function verifyImap(config: ImapConfig): Promise<{ success: boolean
 export class ImapListener {
   private client: ImapFlow | null = null;
   private isRunning = false;
+  private isFetching = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
+  private pollTimer: NodeJS.Timeout | null = null;
   private reconnectAttempts = 0;
 
   constructor(
@@ -81,6 +84,13 @@ export class ImapListener {
         ),
       ]);
       void this.runListeningLoop();
+
+      // Periodic check as fallback in case IDLE drops or exists event is missed
+      this.pollTimer = setInterval(() => {
+        if (this.isRunning && this.client && this.client.usable) {
+          void this.fetchUnreadMessages();
+        }
+      }, (this.config.pollIntervalSeconds ?? 30) * 1000);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logger.warn({ user: this.config.user, err: message }, "Failed connecting to IMAP server on start");
@@ -90,6 +100,10 @@ export class ImapListener {
 
   async stop(): Promise<void> {
     this.isRunning = false;
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -139,6 +153,11 @@ export class ImapListener {
       this.scheduleReconnect();
     });
 
+    this.client.on("exists", (data) => {
+      logger.info({ user: this.config.user, count: data.count }, "New message detected via IMAP exists event");
+      void this.fetchUnreadMessages();
+    });
+
     await this.client.connect();
     this.reconnectAttempts = 0;
     logger.info({ user: this.config.user, host: this.config.host }, "IMAP client connected successfully");
@@ -148,25 +167,20 @@ export class ImapListener {
     if (!this.isRunning || !this.client || !this.client.usable) return;
 
     try {
-      const lock = await this.client.getMailboxLock("INBOX");
-      try {
-        // Initial fetch of unread messages
-        await this.fetchUnreadMessages();
+      // Initial fetch of unread messages
+      await this.fetchUnreadMessages();
 
-        // Listen for new messages using IDLE
-        while (this.isRunning && this.client && this.client.usable) {
-          try {
-            await this.client.idle();
-            await this.fetchUnreadMessages();
-          } catch (idleErr) {
-            if (!this.isRunning) break;
-            logger.warn({ user: this.config.user, err: idleErr }, "IMAP idle interrupted, fetching again");
-            await this.fetchUnreadMessages();
-            await new Promise((resolve) => setTimeout(resolve, 5000));
-          }
+      // Listen for new messages using IDLE (do NOT hold lock across idle())
+      while (this.isRunning && this.client && this.client.usable) {
+        try {
+          await this.client.idle();
+          await this.fetchUnreadMessages();
+        } catch (idleErr) {
+          if (!this.isRunning) break;
+          logger.warn({ user: this.config.user, err: idleErr }, "IMAP idle interrupted, fetching again");
+          await this.fetchUnreadMessages();
+          await new Promise((resolve) => setTimeout(resolve, 5000));
         }
-      } finally {
-        lock.release();
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -199,11 +213,34 @@ export class ImapListener {
   }
 
   private async fetchUnreadMessages(): Promise<void> {
-    if (!this.client || !this.client.usable) return;
+    if (!this.client || !this.client.usable || this.isFetching) return;
+    this.isFetching = true;
+
+    let lock;
+    try {
+      lock = await this.client.getMailboxLock("INBOX");
+    } catch (lockErr) {
+      this.isFetching = false;
+      logger.warn({ user: this.config.user, err: lockErr }, "Failed to get mailbox lock for fetch");
+      return;
+    }
 
     try {
-      // Find all UNSEEN message sequences
-      const messages = this.client.fetch({ seen: false }, { source: true, flags: true, uid: true });
+      // Search unseen messages from the last 7 days to avoid scanning thousands of ancient emails
+      const searchSince = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+      let uids = await this.client.search({ seen: false, since: searchSince }, { uid: true });
+
+      // Fallback: if search returns nothing, search all unseen but take only the latest 50
+      if (!uids || uids.length === 0) {
+        const allUnseen = await this.client.search({ seen: false }, { uid: true });
+        if (allUnseen && allUnseen.length > 0) {
+          uids = allUnseen.slice(-50);
+        }
+      }
+
+      if (!uids || uids.length === 0) return;
+
+      const messages = this.client.fetch(uids, { source: true, flags: true, uid: true }, { uid: true });
       for await (const msg of messages) {
         if (!this.isRunning) break;
         if (!msg.source) continue;
@@ -230,6 +267,9 @@ export class ImapListener {
       }
     } catch (fetchErr) {
       logger.warn({ err: fetchErr }, "Error fetching unread messages from IMAP");
+    } finally {
+      lock.release();
+      this.isFetching = false;
     }
   }
 
@@ -285,7 +325,7 @@ export class ImapListener {
       to: toAddresses,
       cc: ccAddresses,
       subject: parsed.subject || "(Tanpa Subjek)",
-      text: parsed.text || "",
+      text: parsed.text || (typeof parsed.html === "string" ? parsed.html.replace(/<[^>]+>/g, " ").trim() : ""),
       html: typeof parsed.html === "string" ? parsed.html : undefined,
       date: parsed.date || new Date(),
       inReplyTo: parsed.inReplyTo,

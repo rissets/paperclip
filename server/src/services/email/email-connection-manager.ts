@@ -4,6 +4,7 @@ import {
   chatConversations,
   emailMessages,
   issues,
+  issueComments,
   companySecrets,
   toolConnections,
 } from "@paperclipai/db";
@@ -39,7 +40,7 @@ export class EmailConnectionManager {
   private credentialsCache = new Map<string, EmailStoredCredentials>();
   private statuses = new Map<string, { status: "connected" | "connecting" | "error" | "idle"; lastError?: string }>();
   private db: Db | null = null;
-  private heartbeat: { wakeup: (agentId: string) => Promise<unknown> } | null = null;
+  private heartbeat: { wakeup: (agentId: string, options?: any) => Promise<unknown> } | null = null;
 
   static getInstance(): EmailConnectionManager {
     if (!this.instance) {
@@ -48,7 +49,7 @@ export class EmailConnectionManager {
     return this.instance;
   }
 
-  setDependencies(db: Db, heartbeat: { wakeup: (agentId: string) => Promise<unknown> }) {
+  setDependencies(db: Db, heartbeat: { wakeup: (agentId: string, options?: any) => Promise<unknown> }) {
     this.db = db;
     this.heartbeat = heartbeat;
   }
@@ -83,6 +84,7 @@ export class EmailConnectionManager {
       secure: creds.imapSecure,
       user: creds.imapUser,
       pass: creds.imapPass,
+      pollIntervalSeconds: creds.pollIntervalSeconds,
     };
 
     const listener = new ImapListener(imapConfig, async (inboundEmail) => {
@@ -235,7 +237,17 @@ export class EmailConnectionManager {
 
         // Wake up assigned agent
         if (this.heartbeat && endpoint.assignedAgentId) {
-          await this.heartbeat.wakeup(endpoint.assignedAgentId);
+          await this.heartbeat.wakeup(endpoint.assignedAgentId, {
+            source: "automation",
+            triggerDetail: "system",
+            reason: "chat_channel",
+            payload: { issueId: existingConversation.issueId },
+            contextSnapshot: {
+              issueId: existingConversation.issueId,
+              taskId: existingConversation.issueId,
+              wakeReason: "chat_channel",
+            },
+          });
         }
       } else {
         // Create a new task / issue for this email conversation
@@ -294,7 +306,17 @@ export class EmailConnectionManager {
 
         // Wake up assigned agent
         if (this.heartbeat && endpoint.assignedAgentId) {
-          await this.heartbeat.wakeup(endpoint.assignedAgentId);
+          await this.heartbeat.wakeup(endpoint.assignedAgentId, {
+            source: "automation",
+            triggerDetail: "system",
+            reason: "chat_channel",
+            payload: { issueId: task.id },
+            contextSnapshot: {
+              issueId: task.id,
+              taskId: task.id,
+              wakeReason: "chat_channel",
+            },
+          });
         }
       }
     } catch (err) {
@@ -413,7 +435,160 @@ export class EmailConnectionManager {
     }
   }
 
-  async initializeActiveEndpoints(db: Db, heartbeat: { wakeup: (agentId: string) => Promise<unknown> }): Promise<void> {
+  async ensureEndpointLoaded(endpointId: string): Promise<boolean> {
+    if (this.transporters.has(endpointId) && this.credentialsCache.has(endpointId)) {
+      return true;
+    }
+    if (!this.db) return false;
+
+    try {
+      const [ep] = await this.db
+        .select()
+        .from(chatEndpoints)
+        .where(eq(chatEndpoints.id, endpointId));
+
+      if (!ep || !ep.connectionId) return false;
+
+      const [conn] = await this.db
+        .select()
+        .from(toolConnections)
+        .where(eq(toolConnections.id, ep.connectionId));
+
+      if (conn && conn.config) {
+        const creds = conn.config as unknown as EmailStoredCredentials;
+        if (creds.smtpHost && creds.imapHost) {
+          await this.startEndpoint(ep.id, ep.companyId, creds);
+          return true;
+        }
+      }
+    } catch (err) {
+      logger.error({ err, endpointId }, "Failed in ensureEndpointLoaded");
+    }
+    return false;
+  }
+
+  async checkAndSendAutoReply(
+    issueId: string,
+    companyId: string,
+    candidateReplyText?: string | null
+  ): Promise<void> {
+    if (!this.db) {
+      logger.error("Database not initialized in EmailConnectionManager");
+      return;
+    }
+
+    try {
+      // 1. Check if this issue is linked to an active email/gmail chat conversation
+      const [conversation] = await this.db
+        .select({
+          id: chatConversations.id,
+          endpointId: chatConversations.endpointId,
+          externalConversationId: chatConversations.externalConversationId,
+          externalThreadId: chatConversations.externalThreadId,
+          externalLabel: chatConversations.externalLabel,
+        })
+        .from(chatConversations)
+        .innerJoin(
+          chatEndpoints,
+          and(
+            eq(chatEndpoints.id, chatConversations.endpointId),
+            eq(chatEndpoints.companyId, companyId)
+          )
+        )
+        .where(
+          and(
+            eq(chatConversations.issueId, issueId),
+            eq(chatConversations.companyId, companyId),
+            inArray(chatEndpoints.provider, ["email", "gmail"]),
+            eq(chatEndpoints.status, "active")
+          )
+        );
+
+      if (!conversation) {
+        return; // Not an active email conversation
+      }
+
+      // 2. Check the messages in this conversation.
+      // We only reply if the latest message is INBOUND (customer message awaiting reply).
+      const recentMessages = await this.db
+        .select()
+        .from(emailMessages)
+        .where(
+          and(
+            eq(emailMessages.conversationId, conversation.id),
+            eq(emailMessages.endpointId, conversation.endpointId)
+          )
+        )
+        .orderBy(sql`${emailMessages.timestamp} DESC`)
+        .limit(1);
+
+      if (!recentMessages.length) {
+        return;
+      }
+
+      const latestMsg = recentMessages[0];
+      if (latestMsg.direction === "outbound") {
+        // Already replied! Idempotent guard prevents duplicate sending.
+        return;
+      }
+
+      // 3. Resolve reply text: candidate reply text or the latest agent comment
+      let replyText = candidateReplyText?.trim();
+
+      if (!replyText) {
+        const agentComments = await this.db
+          .select({
+            id: issueComments.id,
+            body: issueComments.body,
+          })
+          .from(issueComments)
+          .where(
+            and(
+              eq(issueComments.issueId, issueId),
+              eq(issueComments.companyId, companyId),
+              eq(issueComments.authorType, "agent")
+            )
+          )
+          .orderBy(sql`${issueComments.createdAt} DESC`)
+          .limit(1);
+
+        if (agentComments.length > 0 && agentComments[0].body?.trim()) {
+          replyText = agentComments[0].body.trim();
+        }
+      }
+
+      if (!replyText) {
+        logger.info({ issueId }, "No agent response text available yet for email auto-reply; skipping");
+        return;
+      }
+
+      // 4. Ensure endpoint transporter is loaded in memory
+      await this.ensureEndpointLoaded(conversation.endpointId);
+
+      // 5. Send reply via SMTP
+      logger.info(
+        { issueId, endpointId: conversation.endpointId, recipient: conversation.externalConversationId },
+        "Sending automatic email reply with agent final response"
+      );
+
+      const sendResult = await this.sendAgentReply(
+        conversation.endpointId,
+        companyId,
+        issueId,
+        replyText
+      );
+
+      if (sendResult.success) {
+        logger.info({ issueId, messageId: sendResult.messageId }, "Automatic email reply sent successfully");
+      } else {
+        logger.error({ issueId, error: sendResult.error }, "Failed to send automatic email reply");
+      }
+    } catch (err) {
+      logger.error({ err, issueId }, "Error in checkAndSendAutoReply");
+    }
+  }
+
+  async initializeActiveEndpoints(db: Db, heartbeat: { wakeup: (agentId: string, options?: any) => Promise<unknown> }): Promise<void> {
     this.setDependencies(db, heartbeat);
 
     try {
