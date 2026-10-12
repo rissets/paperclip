@@ -2830,6 +2830,7 @@ export * from "./validators/data-source-upload-session.js";
 export * from "./validators/data-source-mapping-review.js";
 export * from "./validators/complete-data-source-upload-session.js";
 export * from "./validators/email.js";
+export * from "./validators/email-connector.js";
 export { configureRailwaySshSchema, type ConfigureRailwaySsh, type RailwaySshSetup } from "./railway-connection.js";
 export * from "./announcements.js";
 

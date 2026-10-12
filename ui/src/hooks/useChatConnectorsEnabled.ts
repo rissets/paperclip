@@ -41,6 +41,8 @@ export function chatProviderVisible(
 ) {
   return (
     provider === "agentmail" ||
+    provider === "email" ||
+    provider === "gmail" ||
     (provider === "github" || provider === "github-code-review-bot"
       ? githubEnabled
       : chatEnabled)

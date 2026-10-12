@@ -511,5 +511,8 @@ export function parseChatProviderLifecycle(
       return parseTeamsLifecycle(input);
     case "telegram":
       return parseTelegramLifecycle(input);
+    case "email":
+    case "gmail":
+      return [];
   }
 }

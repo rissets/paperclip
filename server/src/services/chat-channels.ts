@@ -469,6 +469,8 @@ const PROVIDER_LABELS: Record<ChatProvider, string> = {
   "microsoft-teams": "Microsoft Teams",
   telegram: "Telegram",
   whatsapp: "WhatsApp",
+  email: "Custom Email",
+  gmail: "Gmail",
 };
 
 type PublicationOrderTable = {
@@ -803,6 +805,36 @@ const CAPABILITIES: Record<ChatProvider, ChatAdapterCapabilities> = {
     ephemeralMessages: false,
     proactiveDirectMessages: true,
   },
+  email: {
+    threads: true,
+    directMessages: true,
+    nativeStreaming: false,
+    messageEdits: false,
+    messageDeletes: false,
+    reactions: false,
+    files: true,
+    cards: false,
+    actions: false,
+    modals: false,
+    slashCommands: false,
+    ephemeralMessages: false,
+    proactiveDirectMessages: true,
+  },
+  gmail: {
+    threads: true,
+    directMessages: true,
+    nativeStreaming: false,
+    messageEdits: false,
+    messageDeletes: false,
+    reactions: false,
+    files: true,
+    cards: false,
+    actions: false,
+    modals: false,
+    slashCommands: false,
+    ephemeralMessages: false,
+    proactiveDirectMessages: true,
+  },
 };
 
 const REQUIRED_CREDENTIALS: Record<
@@ -817,6 +849,8 @@ const REQUIRED_CREDENTIALS: Record<
   "microsoft-teams": ["clientId", "tenantId", "clientSecret"],
   telegram: ["botToken"],
   whatsapp: [],
+  email: [],
+  gmail: [],
 };
 
 const REQUIRED_SLACK_BOT_SCOPES = SLACK_CHAT_BOT_SCOPES;
@@ -864,6 +898,8 @@ const SUPPLIED_CREDENTIAL_KEYS: Record<ChatProvider, readonly string[]> = {
   "microsoft-teams": ["clientId", "tenantId", "clientSecret"],
   telegram: ["botToken"],
   whatsapp: [],
+  email: [],
+  gmail: [],
 };
 
 const MAX_INBOUND_TEXT = 100_000;
@@ -2751,6 +2787,12 @@ function providerSetupState(
           ? `https://t.me/${encodeURIComponent(endpoint.botUsername)}`
           : "https://t.me/BotFather",
         webhookUrl,
+      } as const;
+    case "email":
+    case "gmail":
+      return {
+        step,
+        providerUrl: endpoint.provider === "gmail" ? "https://mail.google.com" : null,
       } as const;
   }
 }

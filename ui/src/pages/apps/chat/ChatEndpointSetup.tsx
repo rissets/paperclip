@@ -9,6 +9,7 @@ import { ChatSetupNavigation } from "@/components/chat/ChatSetupNavigation";
 import { SlackIdentityStep } from "./SlackIdentityStep";
 import { PhotonConnectStep } from "./PhotonConnectStep";
 import { WhatsAppConnectStep } from "./WhatsAppConnectStep";
+import { EmailConnectStep } from "./EmailConnectStep";
 import { EmailEndpointSetup } from "./EmailEndpointSetup";
 import {
   useEffect,
@@ -61,6 +62,8 @@ const providerNames: Record<ChatProvider, string> = {
   telegram: "Telegram",
   "imessage-photon": "iMessage Photon",
   whatsapp: "WhatsApp",
+  email: "Custom Email",
+  gmail: "Gmail",
 };
 
 const knownProviders = new Set(Object.keys(providerNames));
@@ -892,6 +895,18 @@ function ProviderConnectStep({
   );
   if (provider === "imessage-photon") return <PhotonConnectStep endpoint={endpoint} agentName={agentName} repairing={repairing} pending={pending} onAction={onAction} />;
   if (provider === "whatsapp") return <WhatsAppConnectStep endpoint={endpoint} agentName={agentName} repairing={repairing} pending={pending} onAction={onAction} />;
+  if (provider === "email" || provider === "gmail") {
+    return (
+      <EmailConnectStep
+        endpoint={endpoint}
+        agentName={agentName}
+        provider={provider}
+        repairing={repairing}
+        pending={pending}
+        onAction={onAction}
+      />
+    );
+  }
   if (provider === "discord") {
     const applicationId = credentials.applicationId?.trim() ?? "";
     const guildId = credentials.guildId?.trim() ?? "";

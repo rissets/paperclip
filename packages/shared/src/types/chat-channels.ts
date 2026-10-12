@@ -9,6 +9,8 @@ export const CHAT_PROVIDERS = [
   "agentmail",
   "imessage-photon",
   "whatsapp",
+  "email",
+  "gmail",
 ] as const;
 export type ChatProvider = (typeof CHAT_PROVIDERS)[number];
 

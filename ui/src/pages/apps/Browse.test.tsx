@@ -1075,6 +1075,7 @@ describe("Connectors landing page", () => {
     ).toEqual([
       "assistant-connection",
       "agentmail",
+      "email",
       "discord",
       "github-code-review-bot",
       "imessage-photon",
@@ -1295,7 +1296,7 @@ describe("Connectors landing page", () => {
     expect(navigateMock.mock.lastCall![0]).not.toBe(first.pathname + first.search);
   });
 
-  it.each(["slack", "discord", "telegram", "github", "microsoft-teams", "agentmail", "imessage-photon", "whatsapp"])(
+  it.each(["slack", "discord", "telegram", "github", "microsoft-teams", "agentmail", "imessage-photon", "whatsapp", "email"])(
     "puts Manage and removal in the %s chat menu while keeping draft setup visible",
     async (provider) => {
       chatListMock.mockResolvedValue([

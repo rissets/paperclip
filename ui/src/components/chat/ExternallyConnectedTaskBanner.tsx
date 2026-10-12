@@ -42,6 +42,8 @@ const providerNames: Record<ChatProvider, string> = {
   agentmail: "AgentMail",
   "imessage-photon": "iMessage Photon",
   whatsapp: "WhatsApp",
+  email: "Custom Email",
+  gmail: "Gmail",
 };
 
 type PublicationFeedback = {

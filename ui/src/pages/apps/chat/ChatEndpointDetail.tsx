@@ -79,6 +79,8 @@ const providerNames: Record<ChatProvider, string> = {
   telegram: "Telegram",
   "imessage-photon": "iMessage Photon",
   whatsapp: "WhatsApp",
+  email: "Custom Email",
+  gmail: "Gmail",
 };
 
 const providerLifecycleGuidance: Record<
@@ -127,6 +129,14 @@ const providerLifecycleGuidance: Record<
       "Reconnect verifies this same BotFather bot and automatically refreshes its Paperclip webhook and command menu.",
     remove:
       "Paperclip archives the endpoint and queues durable removal of its Telegram webhook and command menu. After Telegram confirms that cleanup, Paperclip retires the saved token. The BotFather bot and its chat memberships remain until you remove them in Telegram.",
+  },
+  email: {
+    reconnect: "Reconnect verifies SMTP and IMAP credentials and resumes the email listener.",
+    remove: "Stop checking inbound emails and archive this endpoint. Email history remains in Paperclip.",
+  },
+  gmail: {
+    reconnect: "Reconnect verifies Gmail App Password and resumes the email listener.",
+    remove: "Stop checking Gmail and archive this endpoint. Email history remains in Paperclip.",
   },
 };
 

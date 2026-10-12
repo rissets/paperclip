@@ -17,6 +17,8 @@ const providerNames: Record<ChatProvider, string> = {
   "imessage-photon": "iMessage Photon",
   agentmail: "AgentMail",
   whatsapp: "WhatsApp",
+  email: "Custom Email",
+  gmail: "Gmail",
 };
 
 export function AgentChannelsPanel({

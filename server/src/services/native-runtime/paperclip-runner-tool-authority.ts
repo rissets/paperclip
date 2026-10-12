@@ -2023,7 +2023,7 @@ export class PaperclipRunnerToolAuthority {
                 eq(chatEndpoints.assignedAgentId, this.binding.agentId),
               ),
             );
-          if (!endpoint || endpoint.provider === "agentmail") {
+          if (!endpoint || endpoint.provider === "agentmail" || endpoint.provider === "email" || endpoint.provider === "gmail") {
             throw new Error("paperclip_runner_chat_attachment_binding_denied");
           }
           provider = endpoint.provider;

@@ -21,7 +21,7 @@ export type {
 } from "@paperclipai/shared";
 
 export type ChatProvider =
-  "slack" | "github" | "discord" | "microsoft-teams" | "telegram" | "agentmail" | "imessage-photon" | "speko" | "whatsapp";
+  "slack" | "github" | "discord" | "microsoft-teams" | "telegram" | "agentmail" | "imessage-photon" | "speko" | "whatsapp" | "email" | "gmail";
 export type ChatEndpointStatus =
   | "draft"
   | "verifying"

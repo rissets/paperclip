@@ -149,6 +149,7 @@ const GOOGLE_CONNECTOR_SLUGS = new Set(
 );
 
 function chatProviderForSlug(slug: string): ChatProvider | null {
+  if (slug === "email" || slug === "gmail") return slug;
   const method = getAppStoreDefinition(slug)?.methods.find(
     (candidate) =>
       candidate.purpose === "channel" &&
@@ -162,9 +163,15 @@ function chatConnectHref(
   toolHref: string | null,
   agentId?: string | null,
 ): string | null {
-  const definition = getAppStoreDefinition(slug);
   const provider = chatProviderForSlug(slug);
-  if (!definition || !provider) return null;
+  if (!provider) return null;
+  if (provider === "email" || provider === "gmail") {
+    const params = new URLSearchParams({ provider, purpose: "chat" });
+    if (agentId) params.set("agentId", agentId);
+    return `/apps/chat/connect?${params.toString()}`;
+  }
+  const definition = getAppStoreDefinition(slug);
+  if (!definition) return null;
   const params = new URLSearchParams({ provider });
   const hasToolMethod = definition.methods.some(
     (method) => method.purpose === "tool" && method.transport !== "chat_sdk",
@@ -605,6 +612,18 @@ export function Browse({ renderAccountDetails = (connection) => connection.conne
         description:
           "Connect WhatsApp via QR code to chat with agents and create tasks directly from WhatsApp.",
       },
+      {
+        slug: "gmail",
+        name: "Gmail",
+        description:
+          "Connect Gmail with Google App Password to handle customer support and send/receive emails.",
+      },
+      {
+        slug: "email",
+        name: "Custom Email (SMTP / IMAP)",
+        description:
+          "Connect custom domain email via SMTP and IMAP for customer support and agent email handling.",
+      },
     ] as const;
     for (const item of nativeChatApps.filter(item => chatProviderVisible(item.slug, chatConnectorsEnabled, githubEnabled))) {
       if (rowsBySlug.has(item.slug)) continue;
@@ -719,6 +738,8 @@ export function Browse({ renderAccountDetails = (connection) => connection.conne
           "imessage-photon": "iMessage Photon",
           whatsapp: "WhatsApp",
           agentmail: "AgentMail",
+          email: "Custom Email",
+          gmail: "Gmail",
         } as const;
         target = {
           key: `chat:${endpoint.provider}`,
