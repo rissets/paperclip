@@ -6206,6 +6206,18 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
           values.allowGroupChats = input.allowGroupChats;
         if (input.allowUnlinkedPeople !== undefined)
           values.allowUnlinkedPeople = input.allowUnlinkedPeople;
+        if (input.emailTemplate !== undefined) {
+          if (existing.endpoint.provider !== "gmail" && existing.endpoint.provider !== "email") {
+            throw unprocessable("Email template configuration only applies to Email and Gmail connections");
+          }
+          values.setup = {
+            ...(values.setup ?? existing.endpoint.setup),
+            emailTemplate: {
+              ...(existing.endpoint.setup?.emailTemplate ?? {}),
+              ...input.emailTemplate,
+            },
+          };
+        }
         await db.transaction(async (tx) => {
           await credentialLease.assertOwned(tx);
           await tx

@@ -131,6 +131,7 @@ export interface ChatEndpoint {
   activity?: ChatActivityItem[];
   setup?: {
     github?: import("@paperclipai/shared").ChatEndpointSetupState["github"];
+    emailTemplate?: import("@paperclipai/shared").EmailTemplateConfiguration;
     step: string;
     testStartedAt?: string | null;
     testSkipped?: boolean;

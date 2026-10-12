@@ -192,6 +192,15 @@ export interface SlackAppConfiguration {
   command: string;
 }
 
+export interface EmailTemplateConfiguration {
+  preset?: "card" | "minimal" | "formal" | "custom";
+  brandColor?: string | null;
+  headerTitle?: string | null;
+  headerBadge?: string | null;
+  footerText?: string | null;
+  customHtml?: string | null;
+}
+
 export interface ChatEndpointSetupState {
   slackSetupMethod?: "automatic" | "manual" | "existing";
   slackRegistration?: import("../slack-app-manifest.js").SlackRegistrationState;
@@ -224,6 +233,7 @@ export interface ChatEndpointSetupState {
     pushName?: string | null;
     lastError?: string | null;
   };
+  emailTemplate?: EmailTemplateConfiguration;
   step: "choose_agent" | "provider_setup" | "test" | "complete";
   /** Server-generated boundary; only provider events at or after this time can complete setup. */
   testStartedAt?: string | null;
@@ -528,6 +538,7 @@ export interface UpdateChatEndpointInput {
   requireAtMention?: boolean;
   allowGroupChats?: boolean;
   allowUnlinkedPeople?: boolean;
+  emailTemplate?: EmailTemplateConfiguration;
 }
 
 export interface ConfigureChatEndpointInput {

@@ -459,8 +459,17 @@ export class EmailConnectionManager {
       const inReplyTo = lastCustomerMessage?.providerMessageId;
 
       // 3. Send email via SMTP with beautiful HTML formatting
+      const [endpointRecord] = await this.db
+        .select()
+        .from(chatEndpoints)
+        .where(eq(chatEndpoints.id, endpointId))
+        .limit(1);
+
+      const emailTemplate = endpointRecord?.setup?.emailTemplate;
       const htmlBody = formatEmailHtml(replyText, {
-        senderName: creds.displayName || "AI Assistant",
+        senderName: creds.displayName || endpointRecord?.botDisplayName || "AI Assistant",
+        subject,
+        template: emailTemplate,
       });
 
       const sendResult = await sendSmtpEmail(

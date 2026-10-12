@@ -86,6 +86,17 @@ export const createChatEndpointSchema = z
     message: "Slack app details only apply to Slack connections", path: ["slackApp"],
   });
 
+export const emailTemplateSchema = z
+  .object({
+    preset: z.enum(["card", "minimal", "formal", "custom"]).optional(),
+    brandColor: z.string().trim().regex(/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/, "Invalid hex color").optional().nullable(),
+    headerTitle: z.string().trim().max(100).optional().nullable(),
+    headerBadge: z.string().trim().max(50).optional().nullable(),
+    footerText: z.string().trim().max(1000).optional().nullable(),
+    customHtml: z.string().trim().max(50000).optional().nullable(),
+  })
+  .strict();
+
 export const updateChatEndpointSchema = z
   .object({
     communicationInstructions: multilineTextSchema.pipe(z.string().trim().max(4000)).optional(),
@@ -95,6 +106,7 @@ export const updateChatEndpointSchema = z
     requireAtMention: z.boolean().optional(),
     allowGroupChats: z.boolean().optional(),
     allowUnlinkedPeople: z.boolean().optional(),
+    emailTemplate: emailTemplateSchema.optional(),
   })
   .strict()
   .refine((value) => Object.keys(value).length > 0, {

@@ -15,6 +15,7 @@ import { GitHubBotMention, GitHubAppIdentityActions } from "./GitHubAppIdentity"
 import { GitHubConnectionComplete, type GitHubConnectionCompleteLocationState } from "./GitHubConnectionComplete";
 import { EmailEndpointSettings } from "./EmailEndpointSetup";
 import { EmailConnectionAccess } from "@/components/EmailConnectionAccess";
+import { EmailTemplateSettings } from "./EmailTemplateSettings";
 import { emailApi } from "@/api/email";
 import { toolsApi } from "@/api/tools";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -601,6 +602,22 @@ function Settings({
             />
           )}
         </div>
+      )}
+      {(endpoint.provider === "gmail" || endpoint.provider === "email") && (
+        <EmailTemplateSettings
+          key={`${endpoint.id}-${JSON.stringify(endpoint.setup?.emailTemplate ?? {})}`}
+          endpoint={endpoint}
+          pending={updateEndpoint.isPending}
+          onSave={async (emailTemplate) => {
+            const next = await chatEndpointsApi.update(endpointId, { emailTemplate });
+            queryClient.setQueryData(queryKeys.chatEndpoints.detail(endpointId), next);
+            pushToast({
+              title: "Email template updated",
+              body: "Outbound emails will now use the new template settings.",
+              tone: "success",
+            });
+          }}
+        />
       )}
       {endpoint.provider === "slack" && <ChatCommunicationInstructions
         key={endpoint.id}
