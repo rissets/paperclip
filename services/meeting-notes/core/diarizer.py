@@ -131,6 +131,29 @@ class Diarizer:
         segments = cursor.fetchall()
 
         if not segments:
+            # Auto-transcribe audio file if available
+            if wav_path.exists() and len(audio) > sr * 0.5:
+                logger.info(f"No transcript segments found for {meeting_id}. Auto-transcribing from {wav_path}...")
+                from core.transcriber import transcriber
+                from models.schema import add_transcript_segment
+                new_segs = transcriber.transcribe_file_to_segments(wav_path, language="id")
+                for seg in new_segs:
+                    if seg.get("text", "").strip():
+                        add_transcript_segment(
+                            meeting_id=meeting_id,
+                            speaker="Speaker 1",
+                            start_seconds=seg["start_seconds"],
+                            end_seconds=seg["end_seconds"],
+                            text=seg["text"].strip(),
+                            confidence=seg.get("confidence", 0.9)
+                        )
+                cursor.execute(
+                    "SELECT id, start_seconds, end_seconds, text FROM transcript_segments WHERE meeting_id = ? ORDER BY start_seconds ASC",
+                    (meeting_id,),
+                )
+                segments = cursor.fetchall()
+
+        if not segments:
             conn.close()
             return {"error": "No transcript segments found", "success": False}
 
@@ -151,8 +174,24 @@ class Diarizer:
                 valid_indices.append(idx)
 
         if len(features) < 2:
+            # Only 1 segment or features too short: assign all to Speaker 1
+            for seg in segments:
+                cursor.execute("UPDATE transcript_segments SET speaker = 'Speaker 1' WHERE id = ?", (seg["id"],))
+            total_duration = round(len(audio) / sr, 2)
+            cursor.execute(
+                "UPDATE meetings SET status = 'completed', duration_seconds = ?, audio_path = ? WHERE id = ?",
+                (total_duration, str(wav_path), meeting_id),
+            )
+            conn.commit()
             conn.close()
-            return {"error": "Insufficient audio features for clustering", "success": False}
+            return {
+                "success": True,
+                "meeting_id": meeting_id,
+                "num_speakers": 1,
+                "speaker_counts": {"Speaker 1": len(segments)},
+                "total_segments": len(segments),
+                "duration_seconds": total_duration,
+            }
 
         X = np.array(features)
         X_norm = StandardScaler().fit_transform(X)

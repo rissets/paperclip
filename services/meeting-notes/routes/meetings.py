@@ -119,6 +119,38 @@ def finish_meeting(meeting_id: str):
         return jsonify({"error": "Meeting not found"}), 404
         
     final_path = live_stream_manager.close_session(meeting_id)
+    
+    # If meeting has audio but no segments (e.g. websocket failed during recording), auto-transcribe now
+    segments = get_transcript_segments(meeting_id)
+    audio_path_str = meeting.get("audio_path") or (str(final_path) if final_path else None)
+    audio_path = Path(audio_path_str) if audio_path_str else None
+    
+    if not segments and audio_path and audio_path.exists():
+        new_segs = transcriber.transcribe_file_to_segments(audio_path, language="id")
+        for seg in new_segs:
+            if seg.get("text", "").strip():
+                add_transcript_segment(
+                    meeting_id=meeting_id,
+                    speaker="Speaker 1",
+                    start_seconds=seg["start_seconds"],
+                    end_seconds=seg["end_seconds"],
+                    text=seg["text"].strip(),
+                    confidence=seg.get("confidence", 0.9)
+                )
+        segments = get_transcript_segments(meeting_id)
+        if segments:
+            try:
+                diarizer.diarize_meeting(meeting_id, audio_path)
+            except Exception as e:
+                pass
+
+    if not meeting.get("summary") and segments:
+        try:
+            analyzer.generate_rolling_summary(meeting_id, interval_minutes=5)
+        except Exception:
+            pass
+
+    update_meeting(meeting_id, status="completed")
     updated = get_meeting(meeting_id)
     return jsonify(updated)
 
@@ -150,14 +182,46 @@ def upload_meeting_audio(meeting_id: str):
         
     duration = audio_processor.get_duration(wav_path)
     
+    # Check existing segments (from live recording)
     segments = get_transcript_segments(meeting_id)
+    if not segments and wav_path.exists() and duration > 0.3:
+        # Full file uploaded directly or stream had no segments: auto-transcribe now
+        new_segs = transcriber.transcribe_file_to_segments(wav_path, language="id")
+        for seg in new_segs:
+            if seg.get("text", "").strip():
+                add_transcript_segment(
+                    meeting_id=meeting_id,
+                    speaker="Speaker 1",
+                    start_seconds=seg["start_seconds"],
+                    end_seconds=seg["end_seconds"],
+                    text=seg["text"].strip(),
+                    confidence=seg.get("confidence", 0.9)
+                )
+        segments = get_transcript_segments(meeting_id)
+        
+        # Run acoustic speaker diarization across the full transcribed audio
+        if segments:
+            try:
+                diarizer.diarize_meeting(meeting_id, wav_path)
+                segments = get_transcript_segments(meeting_id)
+            except Exception as d_err:
+                pass
+    
     summary_update = {}
     if not meeting.get("summary") and segments:
         try:
-            analysis = analyzer.analyze_segments(meeting_id, segments)
-            summary_update["summary"] = json.dumps(analysis, ensure_ascii=False)
-        except Exception as e:
-            logger.warning(f"Error generating summary in upload_meeting_audio: {e}")
+            analysis = analyzer.generate_rolling_summary(meeting_id, interval_minutes=5)
+            if analysis and not analysis.get("error"):
+                import json
+                summary_update["summary"] = json.dumps(analysis, ensure_ascii=False)
+        except Exception:
+            try:
+                analysis = analyzer.analyze_segments(meeting_id, segments)
+                if analysis:
+                    import json
+                    summary_update["summary"] = json.dumps(analysis, ensure_ascii=False)
+            except Exception:
+                pass
 
     update_meeting(meeting_id, status="completed", duration_seconds=duration, **summary_update)
         

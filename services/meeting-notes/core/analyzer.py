@@ -172,13 +172,45 @@ class LiveAnalyzer:
         }
         return fallback_data
 
+    def _ensure_segments(self, meeting_id: str, meeting: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        segments = get_transcript_segments(meeting_id)
+        if segments:
+            return segments
+        if not meeting:
+            meeting = get_meeting(meeting_id)
+        if not meeting:
+            return []
+        audio_path_str = meeting.get("audio_path")
+        audio_path = Path(audio_path_str) if audio_path_str else None
+        if audio_path and audio_path.exists():
+            from core.transcriber import transcriber
+            from models.schema import add_transcript_segment
+            from core.diarizer import diarizer
+            new_segs = transcriber.transcribe_file_to_segments(audio_path, language="id")
+            for seg in new_segs:
+                if seg.get("text", "").strip():
+                    add_transcript_segment(
+                        meeting_id=meeting_id,
+                        speaker="Speaker 1",
+                        start_seconds=seg["start_seconds"],
+                        end_seconds=seg["end_seconds"],
+                        text=seg["text"].strip(),
+                        confidence=seg.get("confidence", 0.9)
+                    )
+            try:
+                diarizer.diarize_meeting(meeting_id, audio_path)
+            except Exception:
+                pass
+            return get_transcript_segments(meeting_id)
+        return []
+
     def generate_rolling_summary(self, meeting_id: str, interval_minutes: int = 5) -> Dict[str, Any]:
         """Generates rich, periodic rolling summaries (per 5 or 10 min) plus executive meeting synthesis."""
         meeting = get_meeting(meeting_id)
         if not meeting:
             return {"error": "Meeting not found"}
 
-        segments = get_transcript_segments(meeting_id)
+        segments = self._ensure_segments(meeting_id, meeting)
         if not segments:
             return {"error": "No transcript segments found"}
 
@@ -289,7 +321,7 @@ class LiveAnalyzer:
         if not meeting:
             return []
 
-        segments = get_transcript_segments(meeting_id)
+        segments = self._ensure_segments(meeting_id, meeting)
         if not segments:
             return []
 
@@ -360,12 +392,12 @@ class LiveAnalyzer:
 
     def ask_copilot(self, meeting_id: str, query: str) -> str:
         """Answers any user question grounded in the meeting transcript."""
-        segments = get_transcript_segments(meeting_id)
+        meeting = get_meeting(meeting_id)
+        segments = self._ensure_segments(meeting_id, meeting)
         transcript_excerpt = "\n".join(
             f"[{format_seconds(s['start_seconds'])} - {s['speaker']}]: {s['text']}"
             for s in segments[-40:]
         )
-        meeting = get_meeting(meeting_id)
         summary_str = meeting.get("summary", "") if meeting else ""
 
         prompt = (
