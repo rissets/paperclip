@@ -665,7 +665,7 @@ function ChatSdkEndpointSetup() {
             onSaveExit={() => navigate("/apps")}
           />
         )}
-        {step !== 0 && !isSlack && <div className="flex justify-start">
+        {step !== 0 && !isSlack && provider !== "email" && provider !== "gmail" && <div className="flex justify-start">
           <Button className="text-muted-foreground" variant="ghost" onClick={() => navigate("/apps")}>
             Save &amp; exit
           </Button>

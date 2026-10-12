@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   CheckCircle2,
   AlertCircle,
@@ -17,6 +17,7 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useNavigate } from "@/lib/router";
 import { useCompany } from "@/context/CompanyContext";
+import { queryKeys } from "@/lib/queryKeys";
 import {
   emailConnectorApi,
   type EmailTestResult,
@@ -45,6 +46,7 @@ export function EmailConnectStep({
   ): void;
 }) {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { selectedCompanyId } = useCompany();
 
   const [provider, setProvider] = useState<"gmail" | "email">(initialProvider);
@@ -156,8 +158,19 @@ export function EmailConnectStep({
         pollIntervalSeconds: 30,
       });
     },
-    onSuccess: () => {
-      onAction("verify");
+    onSuccess: (data) => {
+      if (selectedCompanyId) {
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.chatEndpoints.list(selectedCompanyId),
+        });
+      }
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.chatEndpoints.detail(endpoint.id),
+      });
+      navigate(`/apps/chat/${data?.endpoint?.id ?? endpoint.id}/settings`);
+    },
+    onError: (err: Error) => {
+      setTestError(err.message || "Gagal menyimpan koneksi email");
     },
   });
 

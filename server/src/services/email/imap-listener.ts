@@ -72,7 +72,20 @@ export class ImapListener {
   async start(): Promise<void> {
     if (this.isRunning) return;
     this.isRunning = true;
-    await this.connectAndListen();
+
+    try {
+      await Promise.race([
+        this.initClient(),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("IMAP connection timed out (10s)")), 10000)
+        ),
+      ]);
+      void this.runListeningLoop();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.warn({ user: this.config.user, err: message }, "Failed connecting to IMAP server on start");
+      this.scheduleReconnect();
+    }
   }
 
   async stop(): Promise<void> {
@@ -92,45 +105,56 @@ export class ImapListener {
     logger.info({ user: this.config.user, host: this.config.host }, "IMAP listener stopped");
   }
 
-  private async connectAndListen(): Promise<void> {
-    if (!this.isRunning) return;
+  private async initClient(): Promise<void> {
+    if (this.client) {
+      try {
+        await this.client.logout();
+      } catch {
+        // ignore
+      }
+      this.client = null;
+    }
+
+    this.client = new ImapFlow({
+      host: this.config.host,
+      port: this.config.port,
+      secure: this.config.secure ?? (this.config.port === 993),
+      auth: {
+        user: this.config.user,
+        pass: this.config.pass,
+      },
+      logger: false,
+      tls: {
+        rejectUnauthorized: true,
+      },
+    });
+
+    this.client.on("error", (err) => {
+      logger.warn({ user: this.config.user, err: err.message }, "IMAP client error");
+      this.scheduleReconnect();
+    });
+
+    this.client.on("close", () => {
+      logger.info({ user: this.config.user }, "IMAP connection closed");
+      this.scheduleReconnect();
+    });
+
+    await this.client.connect();
+    this.reconnectAttempts = 0;
+    logger.info({ user: this.config.user, host: this.config.host }, "IMAP client connected successfully");
+  }
+
+  private async runListeningLoop(): Promise<void> {
+    if (!this.isRunning || !this.client || !this.client.usable) return;
 
     try {
-      this.client = new ImapFlow({
-        host: this.config.host,
-        port: this.config.port,
-        secure: this.config.secure ?? (this.config.port === 993),
-        auth: {
-          user: this.config.user,
-          pass: this.config.pass,
-        },
-        logger: false,
-        tls: {
-          rejectUnauthorized: true,
-        },
-      });
-
-      this.client.on("error", (err) => {
-        logger.warn({ user: this.config.user, err: err.message }, "IMAP client error");
-        this.scheduleReconnect();
-      });
-
-      this.client.on("close", () => {
-        logger.info({ user: this.config.user }, "IMAP connection closed");
-        this.scheduleReconnect();
-      });
-
-      await this.client.connect();
-      this.reconnectAttempts = 0;
-      logger.info({ user: this.config.user, host: this.config.host }, "IMAP client connected successfully");
-
       const lock = await this.client.getMailboxLock("INBOX");
       try {
         // Initial fetch of unread messages
         await this.fetchUnreadMessages();
 
         // Listen for new messages using IDLE
-        while (this.isRunning && this.client.usable) {
+        while (this.isRunning && this.client && this.client.usable) {
           try {
             await this.client.idle();
             await this.fetchUnreadMessages();
@@ -146,7 +170,7 @@ export class ImapListener {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      logger.warn({ user: this.config.user, err: message }, "Failed connecting to IMAP server");
+      logger.warn({ user: this.config.user, err: message }, "Error in IMAP listening loop");
       this.scheduleReconnect();
     }
   }
@@ -160,6 +184,18 @@ export class ImapListener {
       this.reconnectTimer = null;
       void this.connectAndListen();
     }, delay);
+  }
+
+  private async connectAndListen(): Promise<void> {
+    if (!this.isRunning) return;
+    try {
+      await this.initClient();
+      void this.runListeningLoop();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.warn({ user: this.config.user, err: message }, "Failed connecting to IMAP server");
+      this.scheduleReconnect();
+    }
   }
 
   private async fetchUnreadMessages(): Promise<void> {
