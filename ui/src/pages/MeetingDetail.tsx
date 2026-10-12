@@ -107,7 +107,7 @@ export function MeetingDetail() {
   const [copiedEnhanced, setCopiedEnhanced] = useState(false);
 
   // Right Pane state: ONLY Live Q&A, Summary, and Transcript (Chat is in floating bubble)
-  const [activeTab, setActiveTab] = useState<"qa" | "summary" | "transcript">("qa");
+  const [activeTab, setActiveTab] = useState<"qa" | "summary" | "transcript">("transcript");
   const [fontSize, setFontSize] = useState<"sm" | "base" | "lg">("sm");
   const [isRightPaneOpen, setIsRightPaneOpen] = useState(true);
 
@@ -903,9 +903,9 @@ export function MeetingDetail() {
       )}
 
       {/* 2. Main Two-Column Layout (Matching Full Height with internal scrolling) */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 items-stretch flex-1 min-h-0 overflow-hidden">
+      <div className="grid grid-cols-1 md:grid-cols-12 gap-3.5 items-stretch flex-1 min-h-0 overflow-hidden">
         {/* Left Column: Notes & Live Enhanced Notes */}
-        <div className={`${isRightPaneOpen ? "lg:col-span-7" : "lg:col-span-12"} h-full flex flex-col min-h-0 overflow-hidden transition-all duration-200`}>
+        <div className={`${isRightPaneOpen ? "md:col-span-7" : "md:col-span-12"} h-full flex flex-col min-h-0 overflow-hidden transition-all duration-200`}>
           <div className="rounded-2xl border border-border/80 bg-card shadow-xs flex flex-col h-full min-h-0 overflow-hidden">
             {/* Toolbar Row */}
             <div className="flex items-center justify-between border-b border-border/60 px-3 py-2 bg-card/70 shrink-0 flex-wrap gap-2">
@@ -1162,7 +1162,7 @@ export function MeetingDetail() {
 
         {/* Right Column: Multi-Tab Pane (Matching Full Height down to bottom!) */}
         {isRightPaneOpen && (
-          <div className="lg:col-span-5 h-full flex flex-col min-h-0 overflow-hidden transition-all duration-200">
+          <div className="md:col-span-5 h-full flex flex-col min-h-0 overflow-hidden transition-all duration-200">
             <div className="rounded-2xl border border-border/80 bg-card shadow-xs flex flex-col h-full min-h-0 overflow-hidden">
               {/* Tab Bar: ONLY Live Q&A, Summary, and Transcript */}
               <div className="flex items-center justify-between border-b border-border/60 px-3 py-2 bg-card/70 shrink-0">
