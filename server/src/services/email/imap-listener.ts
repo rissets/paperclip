@@ -225,44 +225,31 @@ export class ImapListener {
       return;
     }
 
+    const rawMessages: { uid?: number; source: Buffer }[] = [];
+
     try {
-      // Search unseen messages from the last 7 days to avoid scanning thousands of ancient emails
-      const searchSince = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-      let uids = await this.client.search({ seen: false, since: searchSince }, { uid: true });
+      // Search unseen messages from the last 3 days
+      const searchSince = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+      const uids = await this.client.search({ seen: false, since: searchSince }, { uid: true });
 
-      // Fallback: if search returns nothing, search all unseen but take only the latest 50
-      if (!uids || uids.length === 0) {
-        const allUnseen = await this.client.search({ seen: false }, { uid: true });
-        if (allUnseen && allUnseen.length > 0) {
-          uids = allUnseen.slice(-50);
+      if (uids && uids.length > 0) {
+        const messages = this.client.fetch(uids, { source: true, flags: true, uid: true }, { uid: true });
+        for await (const msg of messages) {
+          if (!this.isRunning) break;
+          if (!msg.source) continue;
+          rawMessages.push({ uid: msg.uid, source: msg.source });
         }
-      }
 
-      if (!uids || uids.length === 0) return;
-
-      const messages = this.client.fetch(uids, { source: true, flags: true, uid: true }, { uid: true });
-      for await (const msg of messages) {
-        if (!this.isRunning) break;
-        if (!msg.source) continue;
-
-        try {
-          const parsed = await simpleParser(msg.source);
-          const inbound = this.normalizeEmail(parsed);
-
-          // Mark message as seen
-          if (msg.uid) {
-            await this.client.messageFlagsAdd({ uid: msg.uid }, ["\\Seen"]);
+        // Mark messages as seen outside the fetch generator to prevent IMAP stream deadlock
+        const fetchedUids = rawMessages
+          .map((m) => m.uid)
+          .filter((uid): uid is number => typeof uid === "number");
+        if (fetchedUids.length > 0) {
+          try {
+            await this.client.messageFlagsAdd(fetchedUids, ["\\Seen"], { uid: true });
+          } catch (flagErr) {
+            logger.warn({ user: this.config.user, err: flagErr }, "Failed to mark fetched messages as seen");
           }
-
-          // Filter auto-replies / bounce loops
-          if (inbound.isAutoReply) {
-            logger.info({ subject: inbound.subject, from: inbound.from }, "Skipping automatic/bounce email");
-            continue;
-          }
-
-          await this.onNewEmail(inbound);
-        } catch (parseErr) {
-          logger.error({ err: parseErr }, "Failed to parse inbound email message");
         }
       }
     } catch (fetchErr) {
@@ -270,6 +257,25 @@ export class ImapListener {
     } finally {
       lock.release();
       this.isFetching = false;
+    }
+
+    // Process parsed emails after mailbox lock is released so long DB/agent operations do not block IMAP
+    for (const raw of rawMessages) {
+      if (!this.isRunning) break;
+      try {
+        const parsed = await simpleParser(raw.source);
+        const inbound = this.normalizeEmail(parsed);
+
+        // Filter auto-replies / bounce loops
+        if (inbound.isAutoReply) {
+          logger.info({ subject: inbound.subject, from: inbound.from }, "Skipping automatic/bounce email");
+          continue;
+        }
+
+        await this.onNewEmail(inbound);
+      } catch (parseErr) {
+        logger.error({ err: parseErr }, "Failed to parse inbound email message");
+      }
     }
   }
 
@@ -291,16 +297,21 @@ export class ImapListener {
       : []
     ).filter(Boolean);
 
-    // Check for auto-replies / robot emails
+    // Check for auto-replies / robot emails / newsletters / marketing
     const autoSubmitted = parsed.headers.get("auto-submitted")?.toString().toLowerCase();
     const xAutoreply = parsed.headers.get("x-autoreply")?.toString().toLowerCase();
     const precedence = parsed.headers.get("precedence")?.toString().toLowerCase();
+    const hasListUnsubscribe = Boolean(parsed.headers.get("list-unsubscribe") || parsed.headers.get("list-id"));
+    const isAutomatedSender = /^(no-?reply|notifications?|mailer-daemon|alerts?|updates?|billing|newsletter|marketing|promo|news)@/i.test(fromAddress);
+
     const isAutoReply = Boolean(
       (autoSubmitted && autoSubmitted !== "no") ||
       xAutoreply === "yes" ||
       precedence === "bulk" ||
       precedence === "junk" ||
-      precedence === "auto_reply"
+      precedence === "auto_reply" ||
+      hasListUnsubscribe ||
+      isAutomatedSender
     );
 
     const rawReferences = parsed.references;

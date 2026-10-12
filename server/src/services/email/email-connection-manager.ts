@@ -2,6 +2,8 @@ import type { Db } from "@paperclipai/db";
 import {
   chatEndpoints,
   chatConversations,
+  chatDeliveries,
+  chatPublications,
   emailMessages,
   issues,
   issueComments,
@@ -14,6 +16,7 @@ import { logger } from "../../middleware/logger.js";
 import { issueService } from "../issues.js";
 import { createSmtpTransporter, sendSmtpEmail, type SmtpConfig } from "./smtp-transport.js";
 import { ImapListener, type ImapConfig, type InboundEmail } from "./imap-listener.js";
+import { formatEmailHtml } from "./email-formatter.js";
 import type { Transporter } from "nodemailer";
 
 export interface EmailStoredCredentials {
@@ -189,8 +192,37 @@ export class EmailConnectionManager {
         if (conv) existingConversation = conv;
       }
 
+      // If still not found, check by sender email and matching subject (e.g. Re: <subject>)
+      if (!existingConversation && email.from) {
+        const cleanSubject = email.subject.replace(/^(re|fwd|fw):\s*/i, "").trim().toLowerCase();
+        if (cleanSubject && cleanSubject !== "(tanpa subjek)") {
+          const convs = await this.db
+            .select()
+            .from(chatConversations)
+            .where(
+              and(
+                eq(chatConversations.endpointId, endpointId),
+                eq(chatConversations.externalConversationId, email.from)
+              )
+            )
+            .orderBy(sql`${chatConversations.createdAt} DESC`)
+            .limit(5);
+
+          for (const c of convs) {
+            const cSubject = (c.externalLabel || "").replace(/^(re|fwd|fw):\s*/i, "").trim().toLowerCase();
+            if (cSubject === cleanSubject) {
+              existingConversation = c;
+              break;
+            }
+          }
+        }
+      }
+
+      let targetConversationId: string;
+
       // 3. Dispatch based on whether thread exists
       if (existingConversation) {
+        targetConversationId = existingConversation.id;
         logger.info(
           { conversationId: existingConversation.id, issueId: existingConversation.issueId, from: email.from },
           "Matching email to existing conversation thread"
@@ -285,6 +317,8 @@ export class EmailConnectionManager {
           })
           .returning();
 
+        targetConversationId = conversation.id;
+
         // Record incoming message in emailMessages
         await this.db.insert(emailMessages).values({
           companyId,
@@ -319,6 +353,46 @@ export class EmailConnectionManager {
           });
         }
       }
+
+      // Record in chatDeliveries for the Connection Activity tab
+      await this.db
+        .insert(chatDeliveries)
+        .values({
+          companyId,
+          endpointId,
+          conversationId: targetConversationId,
+          providerEventId: `email:${endpointId}:${email.messageId}`,
+          deduplicationKey: `email:${endpointId}:${email.messageId}`,
+          eventKind: "direct_message",
+          state: "processed",
+          receivedAt: email.date,
+          processedAt: new Date(),
+          normalizedEvent: {
+            kind: "direct_message",
+            message: {
+              text: email.text,
+              providerMessageId: email.messageId,
+              providerSentAt: email.date.toISOString(),
+            },
+            principal: {
+              displayName: email.fromName,
+              externalId: email.from,
+              handle: email.from,
+            },
+            conversation: {
+              externalConversationId: email.from,
+              externalThreadId: email.inReplyTo || email.messageId,
+              label: email.subject,
+            },
+          },
+        })
+        .onConflictDoNothing();
+
+      // Update endpoint lastEventAt
+      await this.db
+        .update(chatEndpoints)
+        .set({ lastEventAt: new Date(), updatedAt: new Date() })
+        .where(eq(chatEndpoints.id, endpointId));
     } catch (err) {
       logger.error({ err, from: email.from, subject: email.subject }, "Error handling incoming email message");
     }
@@ -384,7 +458,11 @@ export class EmailConnectionManager {
       const references = lastCustomerMessage ? [lastCustomerMessage.providerMessageId] : [];
       const inReplyTo = lastCustomerMessage?.providerMessageId;
 
-      // 3. Send email via SMTP
+      // 3. Send email via SMTP with beautiful HTML formatting
+      const htmlBody = formatEmailHtml(replyText, {
+        senderName: creds.displayName || "AI Assistant",
+      });
+
       const sendResult = await sendSmtpEmail(
         transporter,
         {
@@ -400,6 +478,7 @@ export class EmailConnectionManager {
           to: recipient,
           subject,
           text: replyText,
+          html: htmlBody,
           inReplyTo,
           references,
         }
@@ -417,7 +496,7 @@ export class EmailConnectionManager {
         providerMessageId: sendResult.messageId,
         direction: "outbound",
         text: replyText,
-        fullText: replyText,
+        fullText: htmlBody,
         envelope: {
           from: creds.emailAddress,
           to: [recipient],
@@ -426,6 +505,27 @@ export class EmailConnectionManager {
         timestamp: new Date(),
         automatic: false,
       });
+
+      // 5. Record outbound publication in chatPublications for the Activity tab
+      await this.db.insert(chatPublications).values({
+        companyId,
+        endpointId,
+        conversationId: conversation.id,
+        issueId,
+        idempotencyKey: `email:pub:${conversation.id}:${sendResult.messageId || Date.now()}`,
+        state: "published",
+        publishedAt: new Date(),
+        providerMessageId: sendResult.messageId,
+        payload: {
+          text: replyText,
+        },
+      });
+
+      // 6. Update endpoint lastPublicationAt
+      await this.db
+        .update(chatEndpoints)
+        .set({ lastPublicationAt: new Date(), updatedAt: new Date() })
+        .where(eq(chatEndpoints.id, endpointId));
 
       return { success: true, messageId: sendResult.messageId };
     } catch (err) {

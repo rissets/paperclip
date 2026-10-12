@@ -106,6 +106,7 @@
     "jsdom": "^30.0.1",
     "light-my-request": "^6.6.0",
     "mailparser": "^3.9.38",
+    "marked": "^16.4.2",
     "multer": "^2.4.0",
     "mysql2": "^3.24.4",
     "nice-grpc": "2.1.17",

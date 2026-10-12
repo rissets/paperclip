@@ -1067,6 +1067,9 @@ importers:
       mailparser:
         specifier: ^3.9.38
         version: 3.9.38
+      marked:
+        specifier: ^16.4.2
+        version: 16.4.2
       multer:
         specifier: ^2.4.0
         version: 2.4.0
@@ -8362,7 +8365,6 @@ packages:
 
   opencode-ai@1.18.34:
     resolution: {integrity: sha512-9WUS2T0t4HHDVzXvuwTHF0nvhXvZ9mQ0r+ozCvKdJu0LVoQpOzqAW4qWTC3ygNc5Oedcc7j+Oct24JYlQYnySA==}
-    cpu: [arm64, x64]
     os: [darwin, linux, win32]
     hasBin: true
 
